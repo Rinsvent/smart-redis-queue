@@ -1,10 +1,11 @@
-.PHONY: build clean docker-up docker-down test test-short test-coverage
+.PHONY: build clean docker-up docker-down test test-short test-coverage example
 
+# Библиотека: проверка сборки
 build:
-	go build -o bin/smart-redis-queue .
+	go build ./...
 
 clean:
-	rm -rf bin/
+	rm -rf bin/ coverage.out coverage.html
 
 docker-up:
 	docker compose up -d
@@ -21,3 +22,6 @@ test-short:
 test-coverage:
 	go test ./... -coverprofile=coverage.out
 	go tool cover -html=coverage.out -o coverage.html
+
+example:
+	go run ./examples/basic
