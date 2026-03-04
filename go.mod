@@ -1,6 +1,6 @@
 module github.com/Rinsvent/smart-redis-queue
 
-go 1.21
+go 1.22
 
 require (
 	github.com/redis/go-redis/v9 v9.18.0
@@ -12,6 +12,7 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/urfave/cli/v3 v3.7.0 // indirect
 	go.uber.org/atomic v1.11.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
