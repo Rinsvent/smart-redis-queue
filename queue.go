@@ -55,7 +55,6 @@ type Task struct {
 	Priority    int       `json:"priority,omitempty"`
 	Payload     []byte    `json:"-"`
 	Scheduled   time.Time `json:"scheduled"`
-	CreatedAt   time.Time `json:"createdAt"`
 	RejectCount int       `json:"rejectCount,omitempty"` // кол-во reject для расчёта задержки
 }
 
@@ -355,7 +354,6 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 			Partition:   partition,
 			Payload:     []byte(payload),
 			Scheduled:   time.Now(),
-			CreatedAt:   time.Now(),
 			RejectCount: rejectCount,
 		})
 	}

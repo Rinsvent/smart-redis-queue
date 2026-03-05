@@ -39,9 +39,9 @@ func main() {
 
 	// Публикуем несколько задач
 	tasks := []*redisqueue.Task{
-		{ID: "task-1", Payload: []byte(`{"msg": "hello"}`), Scheduled: time.Now(), CreatedAt: time.Now()},
-		{ID: "task-2", Payload: []byte(`{"msg": "world"}`), Scheduled: time.Now(), CreatedAt: time.Now()},
-		{ID: "task-3", Payload: []byte(`{"msg": "!"}`), Scheduled: time.Now().Add(2 * time.Second), CreatedAt: time.Now()},
+		{ID: "task-1", Payload: []byte(`{"msg": "hello"}`), Scheduled: time.Now()},
+		{ID: "task-2", Payload: []byte(`{"msg": "world"}`), Scheduled: time.Now()},
+		{ID: "task-3", Payload: []byte(`{"msg": "!"}`), Scheduled: time.Now().Add(2 * time.Second)},
 	}
 	if err := producer.Publish(ctx, tasks...); err != nil {
 		log.Fatal(err)

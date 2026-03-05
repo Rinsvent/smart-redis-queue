@@ -99,7 +99,6 @@ func TestQueue_Add_NonPartitioned(t *testing.T) {
 		Partition: "",
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now(),
-		CreatedAt: time.Now(),
 	}
 
 	err := producer.Publish(ctx, task)
@@ -120,7 +119,6 @@ func TestQueue_Add_Partitioned(t *testing.T) {
 		Partition: "partition-1",
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now(),
-		CreatedAt: time.Now(),
 	}
 
 	err := producer.Publish(ctx, task)
@@ -140,7 +138,6 @@ func TestQueue_Add_Duplicate(t *testing.T) {
 		ID:        "task-1",
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now(),
-		CreatedAt: time.Now(),
 	}
 
 	err := producer.Publish(ctx, task)
@@ -159,7 +156,6 @@ func TestQueue_Get_NonPartitioned(t *testing.T) {
 		ID:        "task-1",
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now().Add(-time.Second),
-		CreatedAt: time.Now(),
 	}
 
 	err := producer.Publish(ctx, task)
@@ -181,7 +177,6 @@ func TestQueue_Get_Partitioned(t *testing.T) {
 		Partition: "!partition-1", // партиция с "!" блокируется
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now().Add(-time.Second),
-		CreatedAt: time.Now(),
 	}
 
 	err := producer.Publish(ctx, task)
@@ -211,7 +206,6 @@ func TestQueue_Get_PartitionOrdering(t *testing.T) {
 			Partition: "!partition-1", // с блокировкой — по одной задаче за Get до ack
 			Payload:   []byte(fmt.Sprintf("payload-%d", i)),
 			Scheduled: time.Now().Add(-time.Second),
-			CreatedAt: time.Now(),
 		}
 		err := producer.Publish(ctx, task)
 		require.NoError(t, err)
@@ -239,7 +233,6 @@ func TestQueue_Get_PrefetchMultiple(t *testing.T) {
 			Partition: "partition-" + strconv.Itoa(i),
 			Payload:   []byte(fmt.Sprintf("payload-%d", i)),
 			Scheduled: time.Now().Add(-time.Second),
-			CreatedAt: time.Now(),
 		}
 		err := producer.Publish(ctx, task)
 		require.NoError(t, err)
@@ -300,7 +293,6 @@ func TestQueue_Get_Scheduled(t *testing.T) {
 		ID:        "task-1",
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now().Add(2 * time.Second),
-		CreatedAt: time.Now(),
 	}
 
 	err := producer.Publish(ctx, task)
@@ -327,7 +319,6 @@ func TestQueue_Ack(t *testing.T) {
 		ID:        "task-1",
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now().Add(-time.Second),
-		CreatedAt: time.Now(),
 	}
 
 	err := producer.Publish(ctx, task)
@@ -359,7 +350,6 @@ func TestQueue_Ack_PartitionUnlock(t *testing.T) {
 		Partition: "!partition-1", // партиция с "!" блокируется и разблокируется при ack
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now().Add(-time.Second),
-		CreatedAt: time.Now(),
 	}
 
 	err := producer.Publish(ctx, task)
@@ -391,7 +381,6 @@ func TestQueue_Reject(t *testing.T) {
 		ID:        "task-1",
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now().Add(-time.Second),
-		CreatedAt: time.Now(),
 	}
 
 	err := producer.Publish(ctx, task)
@@ -420,7 +409,6 @@ func TestQueue_Reject_PartitionUnlock(t *testing.T) {
 		Partition: "!partition-1", // партиция с "!" разблокируется при reject
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now().Add(-time.Second),
-		CreatedAt: time.Now(),
 	}
 
 	err := producer.Publish(ctx, task)
@@ -457,7 +445,6 @@ func TestQueue_Reject_OrderedPartition_WithWaitTime(t *testing.T) {
 		Partition: "!ratelimit-partition",
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now().Add(-time.Second),
-		CreatedAt: time.Now(),
 	}
 	err := producer.Publish(ctx, task)
 	require.NoError(t, err)
@@ -552,7 +539,6 @@ func TestQueue_Reject_NonOrderedPartition_WaitTimeIgnored(t *testing.T) {
 		Partition: "shared-partition",
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now().Add(-time.Second),
-		CreatedAt: time.Now(),
 	}
 	err := producer.Publish(ctx, task)
 	require.NoError(t, err)
@@ -588,7 +574,6 @@ func TestQueue_Reject_OrderedPartition_WaitTimeZero(t *testing.T) {
 		Partition: "!ordered",
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now().Add(-time.Second),
-		CreatedAt: time.Now(),
 	}
 	err := producer.Publish(ctx, task)
 	require.NoError(t, err)
@@ -642,7 +627,6 @@ func TestQueue_MultipleConsumers(t *testing.T) {
 			ID:        fmt.Sprintf("task-%d", i),
 			Payload:   []byte(fmt.Sprintf("payload-%d", i)),
 			Scheduled: time.Now().Add(-time.Second),
-			CreatedAt: time.Now(),
 		}
 		err := producer.Publish(ctx, task)
 		require.NoError(t, err)
@@ -690,7 +674,6 @@ func TestQueue_DeadConsumerUnlock(t *testing.T) {
 		Partition: "!partition-1", // партиция с "!" - ping разблокирует при мёртвом консьюмере
 		Payload:   []byte("test payload"),
 		Scheduled: time.Now().Add(-time.Second),
-		CreatedAt: time.Now(),
 	}
 
 	err = producer.Publish(ctx, task)
@@ -1201,7 +1184,6 @@ func TestQueue_PartitionStrictOrdering(t *testing.T) {
 			Partition: "!partition-1", // партиция с "!" - эксклюзивна для одного консьюмера
 			Payload:   []byte(fmt.Sprintf("payload-%d", i)),
 			Scheduled: time.Now().Add(-time.Second),
-			CreatedAt: time.Now(),
 		}
 		err := producer.Publish(ctx, task)
 		require.NoError(t, err)

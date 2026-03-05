@@ -52,7 +52,6 @@ func main() {
         ID:        "task-1",
         Payload:   []byte(`{"action": "send_email"}`),
         Scheduled: time.Now(),
-        CreatedAt: time.Now(),
     })
     if err != nil {
         log.Fatal(err)
@@ -76,7 +75,6 @@ producer.Publish(ctx, &redisqueue.Task{
     ID:        "delayed-task",
     Payload:   []byte("data"),
     Scheduled: time.Now().Add(5 * time.Minute),
-    CreatedAt: time.Now(),
 })
 ```
 
