@@ -4,6 +4,10 @@
 build:
 	go build ./...
 
+# Собрать CLI manager
+manager:
+	go build -o bin/manager ./cmd/manager
+
 clean:
 	rm -rf bin/ coverage.out coverage.html
 

@@ -176,6 +176,47 @@ docker compose up -d
 go run ./examples/basic
 ```
 
+## CLI Manager
+
+Утилита для обслуживания очередей:
+
+```bash
+make manager
+./bin/manager --help
+```
+
+### Команды
+
+| Команда | Описание |
+|---------|----------|
+| `info` (alias: list, ls) | Информация об очередях: партиции, pending, in-progress, консьюмеры |
+| `purge` | Очистить очередь (или только указанную партицию) |
+| `retry` | Вернуть in-progress задачи в очередь (для зависших после падения консьюмера) |
+
+### Примеры
+
+```bash
+# Все очереди
+./bin/manager info
+
+# Конкретная очередь
+./bin/manager info -q my-queue
+
+# С фильтром по партиции
+./bin/manager info -q my-queue -p "!user-123"
+
+# Очистить очередь
+./bin/manager purge -q my-queue
+
+# Очистить только партицию
+./bin/manager purge -q my-queue -p base
+
+# Вернуть зависшие задачи
+./bin/manager retry -q my-queue
+```
+
+Глобальные флаги: `-a` (addr), `-P` (password), `--db`. Переменные: `REDIS_ADDR`, `REDIS_PASSWORD`.
+
 ## Тесты
 
 ```bash
@@ -196,6 +237,7 @@ make test-coverage
 | `Producer` | Публикация задач |
 | `Consumer` | Один консьюмер (Get/Ack/Reject, Consume, GetChan) |
 | `ConsumerPool` | Пул консьюмеров |
+| `Admin` | Обслуживание: Inspect, Purge, Retry |
 | `Task` | Задача: ID, Partition, Priority, Payload, Scheduled |
 | `RejectWithDelay` | Ошибка для отложенного reject (rate limit) |
 
