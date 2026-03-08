@@ -115,7 +115,7 @@ local function getFromPartition(partition)
         end
     end
 
-	local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition" .. partition .. ":count"
+	local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partition .. ":count"
 	local found = false
 	local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partition .. ":priorities"
 	local priorities = redis.call('ZREVRANGE', prioritiesKey, 0, -1)
@@ -202,7 +202,7 @@ end
 -- Получаем партицию
 local partitionCode = redis.call('GET', partitionKey) or "base"
 local priority = redis.call('GET', priorityKey) or 0
-local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition" .. partitionCode .. ":count"
+local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partitionCode .. ":count"
 local consumerPartitionCount = redis.call('DECR', consumerPartitionCountKey) or 0
 
 -- Разблокируем партицию только если она с префиксом "!" (заблокированная)
@@ -289,7 +289,7 @@ redis.call('SADD', partitionsKey, partitionCode)
 local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
 redis.call('ZADD', prioritiesKey, newPriority, tostring(newPriority))
 
-local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition" .. partitionCode .. ":count"
+local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partitionCode .. ":count"
 local consumerPartitionCount = redis.call('DECR', consumerPartitionCountKey) or 0
 
 -- Разблокируем партицию только если она с префиксом "!"
