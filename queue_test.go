@@ -1,6 +1,7 @@
 package redisqueue
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"math/rand"
@@ -1640,9 +1641,25 @@ func BenchmarkConsumeParallel(b *testing.B) {
 	}
 }
 
+// randPayload возвращает payload случайной длины. Большая часть — до 100 KB, редкие исключения до 1 MB.
+func randPayload() []byte {
+	const smallMax = 100 * 1024  // 100 KB
+	const largeMax = 1024 * 1024 // 1 MB
+
+	var size int
+	if rand.Float32() < 0.9 {
+		// 90%: 1 — 100 KB
+		size = rand.Intn(smallMax) + 1
+	} else {
+		// 10%: 100 KB — 1 MB (исключение)
+		size = smallMax + rand.Intn(largeMax-smallMax)
+	}
+	return bytes.Repeat([]byte("x"), size)
+}
+
 // BenchmarkFullCycle измеряет пропускную способность при одновременной работе продюсера и консьюмеров.
-// Продюсер шлёт от 1 до 30 сообщений рандомно, пул из 100 консьюмеров с prefetch=5 читает и акает.
-// По итогу выводятся RPS продюсера и консьюмера. После теста очередь очищается.
+// Продюсер шлёт от 1 до 30 сообщений рандомно с payload 1–100 KB (90%) или до 1 MB (10%),
+// пул из 100 консьюмеров с prefetch=5 читает и акает.
 func BenchmarkFullCycle(b *testing.B) {
 	const runDuration = 10 * time.Second
 	const consumerPoolSize = 100
@@ -1692,7 +1709,7 @@ func BenchmarkFullCycle(b *testing.B) {
 						taskCounter++
 						tasks[j] = &Task{
 							ID:        fmt.Sprintf("t-%d-%d", i, taskCounter),
-							Payload:   []byte("bench-payload"),
+							Payload:   randPayload(),
 							Scheduled: time.Now(),
 						}
 					}
