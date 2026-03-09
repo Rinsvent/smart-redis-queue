@@ -3,6 +3,7 @@ package redisqueue
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1637,4 +1638,98 @@ func BenchmarkConsumeParallel(b *testing.B) {
 			wg.Wait()
 		})
 	}
+}
+
+// BenchmarkFullCycle измеряет пропускную способность при одновременной работе продюсера и консьюмеров.
+// Продюсер шлёт от 1 до 30 сообщений рандомно, пул из 100 консьюмеров с prefetch=5 читает и акает.
+// По итогу выводятся RPS продюсера и консьюмера. После теста очередь очищается.
+func BenchmarkFullCycle(b *testing.B) {
+	const runDuration = 10 * time.Second
+	const consumerPoolSize = 100
+	const prefetchCount = 5
+
+	cfg := RedisConfig{
+		Addr:     "localhost:6379",
+		Password: "",
+		DB:       5,
+	}
+	client, err := newClient(cfg)
+	if err != nil {
+		b.Skipf("Redis not available: %v", err)
+	}
+
+	queueName := fmt.Sprintf("bench-full-cycle-%d", time.Now().UnixNano())
+	producer := NewProducer(client, queueName)
+	pool := NewConsumerPool(client, queueName)
+	pool.SetCount(consumerPoolSize)
+	pool.SetPrefetchCount(prefetchCount)
+	pool.SetPollInterval(10 * time.Millisecond)
+	admin := NewAdmin(client)
+
+	ctx := context.Background()
+
+	for i := 0; i < b.N; i++ {
+		// Чистим очередь перед каждой итерацией
+		_, _ = admin.Purge(ctx, queueName, "")
+
+		runCtx, cancel := context.WithCancel(context.Background())
+
+		var produced, consumed atomic.Int64
+
+		// Продюсер: постоянно шлёт от 1 до 30 сообщений рандомно
+		producerDone := make(chan struct{})
+		go func() {
+			defer close(producerDone)
+			taskCounter := int64(0)
+			for {
+				select {
+				case <-runCtx.Done():
+					return
+				default:
+					n := rand.Intn(30) + 1 // 1..30
+					tasks := make([]*Task, n)
+					for j := 0; j < n; j++ {
+						taskCounter++
+						tasks[j] = &Task{
+							ID:        fmt.Sprintf("t-%d-%d", i, taskCounter),
+							Payload:   []byte("bench-payload"),
+							Scheduled: time.Now(),
+						}
+					}
+					if err := producer.Publish(runCtx, tasks...); err != nil {
+						return
+					}
+					produced.Add(int64(n))
+				}
+			}
+		}()
+
+		// Консьюмеры через pool
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			pool.Consume(runCtx, func(task *Task) error {
+				consumed.Add(1)
+				return nil
+			})
+		}()
+
+		// Бежим runDuration
+		time.Sleep(runDuration)
+		cancel()
+
+		<-producerDone
+		wg.Wait()
+
+		producedVal := produced.Load()
+		consumedVal := consumed.Load()
+
+		b.ReportMetric(float64(producedVal)/runDuration.Seconds(), "produced/s")
+		b.ReportMetric(float64(consumedVal)/runDuration.Seconds(), "consumed/s")
+	}
+
+	// Очистка после теста: удаляем очередь и чистим БД
+	_, _ = admin.Purge(ctx, queueName, "")
+	_ = client.FlushDB(ctx)
 }
