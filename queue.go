@@ -239,16 +239,17 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 			continue
 		}
 
+		waitTime := 0
 		rejectedPartitions := make(map[string]bool)
 		for _, task := range tasks {
 			select {
 			case <-ctx.Done():
-				if err := c.Reject(ctx, task.ID, 0); err != nil {
+				if err := c.Reject(ctx, task.ID, waitTime); err != nil {
 					return err
 				}
 				continue
 			case <-c.stopPing:
-				if err := c.Reject(ctx, task.ID, 0); err != nil {
+				if err := c.Reject(ctx, task.ID, waitTime); err != nil {
 					return err
 				}
 				continue
@@ -256,7 +257,7 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 			}
 
 			if isOrderedPartition(task.Partition) && rejectedPartitions[task.Partition] {
-				if err := c.Reject(ctx, task.ID, 0); err != nil {
+				if err := c.Reject(ctx, task.ID, waitTime); err != nil {
 					return err
 				}
 				continue
@@ -266,7 +267,6 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 				if isOrderedPartition(task.Partition) {
 					rejectedPartitions[task.Partition] = true
 				}
-				waitTime := 0
 				var rejectErr *RejectWithDelay
 				if errors.As(err, &rejectErr) && rejectErr.Delay > 0 {
 					waitTime = rejectErr.Delay
