@@ -606,9 +606,6 @@ func TestQueue_Ping(t *testing.T) {
 	_, consumer, _ := setupTestQueue(t)
 	ctx := context.Background()
 
-	// Ждем немного чтобы ping успел выполниться
-	time.Sleep(100 * time.Millisecond)
-
 	// Проверяем что консьюмер зарегистрирован
 	exists, err := consumer.redis.Exists(ctx, consumerKey("test-queue", consumer.ConsumerID())).Result()
 	require.NoError(t, err)
@@ -697,6 +694,8 @@ func TestQueue_DeadConsumerUnlock(t *testing.T) {
 	// Останавливаем pingLoop и симулируем смерть — удаляем ключ heartbeat
 	consumer1.Close()
 	err = client.Del(ctx, consumerKey(queueName, consumer1.ConsumerID())).Err()
+	require.NoError(t, err)
+	err = client.Del(ctx, unlockKey(queueName)).Err()
 	require.NoError(t, err)
 
 	// consumer2 без pingLoop — наш ping() гарантированно обработает мёртвого

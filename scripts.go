@@ -347,7 +347,6 @@ if not lockAcquired then
 end
 
 -- Получаем список всех консамеров
-local consumersKey = "queue:" .. queueName .. ":consumers"
 local consumers = redis.call('SMEMBERS', consumersKey)
 for i = 1, #consumers do
     local lockOwner = consumers[i]

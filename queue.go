@@ -142,6 +142,9 @@ func newConsumer(redisClient *redis.Client, queueName string, consumerID string,
 	}
 
 	if startPing {
+		ctx := context.Background()
+		c.ping(ctx)
+
 		go c.pingLoop()
 	}
 
@@ -299,7 +302,6 @@ func (c *Consumer) pingLoop() {
 	defer ticker.Stop()
 
 	ctx := context.Background()
-	c.ping(ctx)
 
 	for {
 		select {
