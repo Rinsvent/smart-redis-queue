@@ -185,6 +185,7 @@ var ackScript = redis.NewScript(`
 local queueName = ARGV[1]
 local taskId = ARGV[2]
 local consumerId = ARGV[3]
+local idempotencyTtl = tonumber(ARGV[4])
 
 -- Формируем ключи
 local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
@@ -215,7 +216,12 @@ if partitionCode:sub(1, 1) == "!" and consumerPartitionCount == 0 then
 end
 
 -- Удаляем payload, ключ партиции и reject_count
-redis.call('DEL', payloadKey)
+if idempotencyTtl > 0 then
+	redis.call('SET', payloadKey, '0')
+	redis.call('EXPIRE', payloadKey, idempotencyTtl)
+else
+	redis.call('DEL', payloadKey)
+end
 redis.call('DEL', partitionKey)
 redis.call('DEL', priorityKey)
 redis.call('DEL', "queue:" .. queueName .. ":reject_count:" .. taskId)

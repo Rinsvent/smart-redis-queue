@@ -111,12 +111,13 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 
 // Consumer получает и обрабатывает задачи из очереди
 type Consumer struct {
-	redis         *redis.Client
-	queueName     string
-	consumerID    string
-	pollInterval  time.Duration
-	prefetchCount int
-	stopPing      chan struct{}
+	redis          *redis.Client
+	queueName      string
+	consumerID     string
+	pollInterval   time.Duration
+	prefetchCount  int
+	idempotencyTtl int
+	stopPing       chan struct{}
 }
 
 // NewConsumer создает нового консьюмера и запускает ping горутину.
@@ -131,12 +132,13 @@ func newConsumer(redisClient *redis.Client, queueName string, consumerID string,
 		consumerID = generateConsumerID()
 	}
 	c := &Consumer{
-		redis:         redisClient,
-		queueName:     queueName,
-		consumerID:    consumerID,
-		pollInterval:  1 * time.Second,
-		prefetchCount: 5,
-		stopPing:      make(chan struct{}),
+		redis:          redisClient,
+		queueName:      queueName,
+		consumerID:     consumerID,
+		pollInterval:   1 * time.Second,
+		prefetchCount:  5,
+		idempotencyTtl: 0,
+		stopPing:       make(chan struct{}),
 	}
 
 	if startPing {
@@ -167,6 +169,14 @@ func (c *Consumer) SetPrefetchCount(n int) {
 		n = 1
 	}
 	c.prefetchCount = n
+}
+
+// SetIdempotencyTtl задает количество секунд до удаления ключа задачи после ack. Пока жив ключ задачи с таким же requestId будут пропущены (по умолчанию 0 - сразу удаляем после ack)
+func (c *Consumer) SetIdempotencyTtl(n int) {
+	if n < 0 {
+		n = 0
+	}
+	c.idempotencyTtl = n
 }
 
 // GetChan запускает цикл чтения очереди и возвращает канал с задачами.
@@ -275,7 +285,7 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 					return ackErr
 				}
 			} else {
-				if ackErr := c.Ack(ctx, task.ID); ackErr != nil {
+				if ackErr := c.Ack(ctx, task.ID, c.idempotencyTtl); ackErr != nil {
 					return ackErr
 				}
 			}
@@ -362,13 +372,14 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 }
 
 // Ack подтверждает обработку задачи
-func (c *Consumer) Ack(ctx context.Context, taskID string) error {
+func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl int) error {
 	script := getAckScript()
 
 	result, err := script.Run(ctx, c.redis, []string{},
 		c.queueName,
 		taskID,
 		c.consumerID,
+		idempotencyTtl,
 	).Result()
 
 	if err != nil {
