@@ -421,21 +421,23 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime int) erro
 
 // ConsumerPool пул консьюмеров, обрабатывающих очередь параллельно
 type ConsumerPool struct {
-	redis         *redis.Client
-	queueName     string
-	count         int
-	pollInterval  time.Duration
-	prefetchCount int
+	redis          *redis.Client
+	queueName      string
+	count          int
+	pollInterval   time.Duration
+	prefetchCount  int
+	idempotencyTtl int
 }
 
 // NewConsumerPool создает пул консьюмеров
 func NewConsumerPool(redisClient *redis.Client, queueName string) *ConsumerPool {
 	return &ConsumerPool{
-		redis:         redisClient,
-		queueName:     queueName,
-		count:         5,
-		pollInterval:  1 * time.Second,
-		prefetchCount: 5,
+		redis:          redisClient,
+		queueName:      queueName,
+		count:          5,
+		pollInterval:   1 * time.Second,
+		prefetchCount:  5,
+		idempotencyTtl: 0,
 	}
 }
 
@@ -458,6 +460,13 @@ func (p *ConsumerPool) SetPrefetchCount(n int) {
 		n = 1
 	}
 	p.prefetchCount = n
+}
+
+func (p *ConsumerPool) SetIdempotencyTtl(n int) {
+	if n < 0 {
+		n = 0
+	}
+	p.idempotencyTtl = n
 }
 
 // Consume запускает count консьюмеров, блокируется до отмены контекста.
@@ -489,6 +498,7 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c := newConsumer(p.redis, p.queueName, "", true)
 		c.pollInterval = p.pollInterval
 		c.prefetchCount = p.prefetchCount
+		c.idempotencyTtl = p.idempotencyTtl
 
 		c.Consume(ctx, handler)
 		c.Close()
