@@ -116,7 +116,7 @@ type Consumer struct {
 	consumerID     string
 	pollInterval   time.Duration
 	prefetchCount  int
-	idempotencyTtl int
+	idempotencyTtl time.Duration
 	stopPing       chan struct{}
 }
 
@@ -175,7 +175,7 @@ func (c *Consumer) SetPrefetchCount(n int) {
 }
 
 // SetIdempotencyTtl задает количество секунд до удаления ключа задачи после ack. Пока жив ключ задачи с таким же requestId будут пропущены (по умолчанию 0 - сразу удаляем после ack)
-func (c *Consumer) SetIdempotencyTtl(n int) {
+func (c *Consumer) SetIdempotencyTtl(n time.Duration) {
 	if n < 0 {
 		n = 0
 	}
@@ -374,14 +374,14 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 }
 
 // Ack подтверждает обработку задачи
-func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl int) error {
+func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl time.Duration) error {
 	script := getAckScript()
 
 	result, err := script.Run(ctx, c.redis, []string{},
 		c.queueName,
 		taskID,
 		c.consumerID,
-		idempotencyTtl,
+		idempotencyTtl.Seconds(),
 	).Result()
 
 	if err != nil {
@@ -426,7 +426,7 @@ type ConsumerPool struct {
 	count          int
 	pollInterval   time.Duration
 	prefetchCount  int
-	idempotencyTtl int
+	idempotencyTtl time.Duration
 }
 
 // NewConsumerPool создает пул консьюмеров
@@ -462,7 +462,7 @@ func (p *ConsumerPool) SetPrefetchCount(n int) {
 	p.prefetchCount = n
 }
 
-func (p *ConsumerPool) SetIdempotencyTtl(n int) {
+func (p *ConsumerPool) SetIdempotencyTtl(n time.Duration) {
 	if n < 0 {
 		n = 0
 	}

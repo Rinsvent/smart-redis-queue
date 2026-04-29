@@ -1453,7 +1453,7 @@ func TestQueue_Ack_Idempotency(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, got)
 	require.Equal(t, "task-low", got[0].ID)
-	err = consumer.Ack(ctx, got[0].ID, 1)
+	err = consumer.Ack(ctx, got[0].ID, 1*time.Second)
 	require.NoError(t, err)
 
 	err = producer.Publish(ctx, duplicateTask)
