@@ -772,7 +772,11 @@ func TestQueue_Publish_MultipleTasks_WithDuplicate(t *testing.T) {
 	// Пытаемся добавить батч с дубликатом
 	err = producer.Publish(ctx, &Task{ID: "task-1", Payload: []byte("dup"), Scheduled: time.Now()}, &Task{ID: "task-2", Payload: []byte("new"), Scheduled: time.Now()})
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "1 of 2 tasks already exist")
+
+	var targetErr = err.(*ErrTasksAlreadyExist)
+	require.ErrorIs(t, err, targetErr, "Ошибка должна быть типа *ErrTasksAlreadyExist")
+	require.Equal(t, 1, len(targetErr.TaskIDs))
+	require.Equal(t, "task-1", targetErr.TaskIDs[0])
 }
 
 func TestQueue_Consume(t *testing.T) {
@@ -1458,6 +1462,9 @@ func TestQueue_Ack_Idempotency(t *testing.T) {
 
 	err = producer.Publish(ctx, duplicateTask)
 	require.Error(t, err)
+	var targetErr = err.(*ErrTasksAlreadyExist)
+	require.ErrorIs(t, err, targetErr, "Ошибка должна быть типа *ErrTasksAlreadyExist")
+	require.Equal(t, got[0].ID, targetErr.TaskIDs[0])
 
 	time.Sleep(500 * time.Millisecond)
 
@@ -1468,6 +1475,39 @@ func TestQueue_Ack_Idempotency(t *testing.T) {
 
 	err = producer.Publish(ctx, duplicateTask)
 	require.NoError(t, err)
+}
+
+// TestQueue_Ack_Idempotency проверяет, что после ack c idempotencyTtl > 0
+// нельзя добавить новый таск с таким же requestId.
+func TestQueue_Check_DeduplicationId(t *testing.T) {
+	producer, consumer, _ := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	ctx := context.Background()
+
+	tasks := []*Task{
+		{ID: "task-2", Partition: "p1", Priority: 1, Payload: []byte("low"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-3", Partition: "p1", Priority: 10, Payload: []byte("high"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-4", Partition: "p1", Priority: 5, Payload: []byte("mid"), Scheduled: time.Now().Add(-time.Second)},
+	}
+
+	err := producer.Publish(ctx, tasks...)
+	require.NoError(t, err)
+
+	tasks2 := []*Task{
+		{ID: "task-1", Partition: "p1", Priority: 10, Payload: []byte("high"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-3", Partition: "p1", Priority: 10, Payload: []byte("high"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-4", Partition: "p1", Priority: 5, Payload: []byte("mid"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-5", Partition: "p1", Priority: 5, Payload: []byte("mid"), Scheduled: time.Now().Add(-time.Second)},
+	}
+
+	err = producer.Publish(ctx, tasks2...)
+	require.Error(t, err)
+
+	var targetErr = err.(*ErrTasksAlreadyExist)
+	require.ErrorIs(t, err, targetErr, "Ошибка должна быть типа *ErrTasksAlreadyExist")
+	require.Equal(t, 2, len(targetErr.TaskIDs))
+	require.Equal(t, "task-3", targetErr.TaskIDs[0])
+	require.Equal(t, "task-4", targetErr.TaskIDs[1])
 }
 
 // --- Benchmarks ---

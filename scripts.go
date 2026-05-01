@@ -15,14 +15,14 @@ import (
 //	ARGV[5 + i*5] = scheduled timestamp (ms)
 //	ARGV[6 + i*5] = payload
 //
-// Возвращает количество успешно добавленных задач
+// Возвращает список не добавленных задач - их порядковый номер
 var addScript = redis.NewScript(`
 local queueName = ARGV[1]
 local taskCount = tonumber(ARGV[2])
 
 local partitionsKey = "queue:" .. queueName .. ":partitions"
 
-local added = 0
+local notAddedItems = {}
 
 for i = 0, taskCount - 1 do
     local base = 3 + i * 5
@@ -50,12 +50,12 @@ for i = 0, taskCount - 1 do
 
 		local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
 		redis.call('ZADD', prioritiesKey, priority, priority)
-
-        added = added + 1
+    else 
+		notAddedItems[#notAddedItems + 1] = i
     end
 end
 
-return added
+return notAddedItems
 `)
 
 // getGetScript возвращает Lua скрипт для получения до prefetchCount задач

@@ -37,6 +37,15 @@ func NewRejectWithDelay(err error, delaySeconds int) *RejectWithDelay {
 	return &RejectWithDelay{Err: err, Delay: delaySeconds}
 }
 
+// ErrTasksAlreadyExist возникает, когда одна или несколько задач уже существуют.
+type ErrTasksAlreadyExist struct {
+	TaskIDs []string
+}
+
+func (e *ErrTasksAlreadyExist) Error() string {
+	return fmt.Sprintf("%d tasks already exist: %v", len(e.TaskIDs), e.TaskIDs)
+}
+
 // generateConsumerID генерирует уникальный ID консьюмера: UnixNano + 8 случайных байт в hex.
 // Коллизии практически исключены при распределённом запуске воркеров.
 func generateConsumerID() string {
@@ -78,16 +87,14 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 		return nil
 	}
 
-	for _, task := range tasks {
-		if task.ID == "" {
-			return fmt.Errorf("task ID is required")
-		}
-	}
-
 	args := make([]interface{}, 0, 2+len(tasks)*4)
 	args = append(args, p.queueName, len(tasks))
 
 	for _, task := range tasks {
+		if task.ID == "" {
+			return fmt.Errorf("task ID is required")
+		}
+
 		scheduled := task.Scheduled.UnixMilli()
 		if scheduled == 0 {
 			scheduled = time.Now().UnixMilli()
@@ -101,12 +108,29 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 		return fmt.Errorf("failed to publish tasks: %w", err)
 	}
 
-	added := result.(int64)
-	if added < int64(len(tasks)) {
-		return fmt.Errorf("%d of %d tasks already exist", int64(len(tasks))-added, len(tasks))
+	// Скрипт возвращает массив индексов задач, которые не были добавлены
+	notAddedIndices, ok := result.([]interface{})
+	if !ok {
+		return fmt.Errorf("failed to get response: %w", err)
 	}
 
-	return nil
+	if len(notAddedIndices) == 0 {
+		return nil
+	}
+
+	// Собираем ID задач по возвращённым индексам
+	notAddedIDs := make([]string, 0, len(notAddedIndices))
+	for _, idxInterface := range notAddedIndices {
+		idx, ok := idxInterface.(int64) // Lua number -> int64
+		if !ok {
+			continue
+		}
+		if int(idx) < len(tasks) {
+			notAddedIDs = append(notAddedIDs, tasks[idx].ID)
+		}
+	}
+
+	return &ErrTasksAlreadyExist{TaskIDs: notAddedIDs}
 }
 
 // Consumer получает и обрабатывает задачи из очереди
