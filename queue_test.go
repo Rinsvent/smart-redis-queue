@@ -116,6 +116,31 @@ func TestQueue_Add_NonPartitioned(t *testing.T) {
 	assert.Equal(t, int64(1), count)
 }
 
+func TestQueue_Add_Locks(t *testing.T) {
+	producer, consumer, _ := setupTestQueue(t)
+	ctx := context.Background()
+
+	err := producer.Lock(ctx, []string{"task-2", "task-3", "task-5"}...)
+	require.NoError(t, err)
+
+	// Проверяем что блокировки добавлена
+	exists, err := consumer.redis.Exists(ctx, payloadKey("test-queue", "task-2")).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), exists)
+
+	exists, err = consumer.redis.Exists(ctx, payloadKey("test-queue", "task-3")).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), exists)
+
+	exists, err = consumer.redis.Exists(ctx, payloadKey("test-queue", "task-4")).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), exists)
+
+	exists, err = consumer.redis.Exists(ctx, payloadKey("test-queue", "task-5")).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), exists)
+}
+
 func TestQueue_Add_Partitioned(t *testing.T) {
 	producer, consumer, _ := setupTestQueue(t)
 	ctx := context.Background()

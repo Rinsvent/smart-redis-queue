@@ -58,6 +58,33 @@ end
 return notAddedItems
 `)
 
+// geLockScript возвращает Lua скрипт для блокировки ключей (батч)
+// ARGV[1] = queue name
+// ARGV[2] = количество задач
+// Далее requestId:
+//
+// ARGV[i] = requestId
+var lockScript = redis.NewScript(`
+local queueName = ARGV[1]
+local taskCount = tonumber(ARGV[2])
+
+local notAddedItems = {}
+
+for i = 0, taskCount - 1 do
+    local base = 3 + i
+    local taskId = ARGV[base]
+
+    local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
+
+    local ok = redis.call('SET', payloadKey, 0, 'NX')
+    if ok == 0 then
+		notAddedItems[#notAddedItems + 1] = i
+    end
+end
+
+return notAddedItems
+`)
+
 // getGetScript возвращает Lua скрипт для получения до prefetchCount задач
 // ARGV[1] = queue name
 // ARGV[2] = consumer ID
@@ -421,6 +448,10 @@ return 1
 
 func getAddScript() *redis.Script {
 	return addScript
+}
+
+func getLockScript() *redis.Script {
+	return lockScript
 }
 
 func getGetScript() *redis.Script {

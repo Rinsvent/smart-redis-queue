@@ -133,6 +133,49 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 	return &ErrTasksAlreadyExist{TaskIDs: notAddedIDs}
 }
 
+// Lock добавляет одну или несколько блокировок
+func (p *Producer) Lock(ctx context.Context, ids ...string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	args := make([]interface{}, 0, 2+len(ids))
+	args = append(args, p.queueName, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+
+	script := getLockScript()
+	result, err := script.Run(ctx, p.redis, []string{}, args...).Result()
+	if err != nil {
+		return fmt.Errorf("failed to publish tasks: %w", err)
+	}
+
+	// Скрипт возвращает массив индексов задач, которые не были добавлены
+	notAddedIndices, ok := result.([]interface{})
+	if !ok {
+		return fmt.Errorf("failed to get response: %w", err)
+	}
+
+	if len(notAddedIndices) == 0 {
+		return nil
+	}
+
+	// Собираем ID задач по возвращённым индексам
+	notAddedIDs := make([]string, 0, len(notAddedIndices))
+	for _, idxInterface := range notAddedIndices {
+		idx, ok := idxInterface.(int64) // Lua number -> int64
+		if !ok {
+			continue
+		}
+		if int(idx) < len(ids) {
+			notAddedIDs = append(notAddedIDs, ids[idx])
+		}
+	}
+
+	return &ErrTasksAlreadyExist{TaskIDs: notAddedIDs}
+}
+
 // Consumer получает и обрабатывает задачи из очереди
 type Consumer struct {
 	redis          *redis.Client
