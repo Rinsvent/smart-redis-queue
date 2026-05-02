@@ -148,7 +148,7 @@ for task := range ch {
     if err := handle(task); err != nil {
         consumer.Reject(ctx, task.ID, 0) // вернуть в очередь
     } else {
-        consumer.Ack(ctx, task.ID)
+        consumer.Ack(ctx, task.ID, 2*time.Second) // 2 секунды после ack не будем принимать задачи с таким же taskID
     }
 }
 ```
