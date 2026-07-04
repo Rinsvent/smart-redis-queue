@@ -243,7 +243,7 @@ func (c *Consumer) SetPrefetchCount(n int) {
 	c.prefetchCount = n
 }
 
-// SetCheckDeadConsumerLocksOnGet флаг проверки блокировок при getч
+// SetCheckDeadConsumerLocksOnGet флаг проверки блокировок при get
 func (c *Consumer) SetCheckDeadConsumerLocksOnGet(cd bool) {
 	c.checkDeadConsumerLocksOnGet = cd
 }
@@ -539,7 +539,7 @@ func (p *ConsumerPool) SetPrefetchCount(n int) {
 	p.prefetchCount = n
 }
 
-// SetCheckDeadConsumerLocksOnGet задает количество задач для предзагрузки
+// SetCheckDeadConsumerLocksOnGet флаг проверки блокировок при get
 func (p *ConsumerPool) SetCheckDeadConsumerLocksOnGet(cd bool) {
 	p.checkDeadConsumerLocksOnGet = cd
 }
