@@ -94,6 +94,7 @@ var getScript = redis.NewScript(`
 local queueName = ARGV[1]
 local consumerId = ARGV[2]
 local prefetchCount = tonumber(ARGV[3]) or 1
+local checkDeadConsumerLocks = ARGV[4] == "1"
 if prefetchCount < 1 then
     prefetchCount = 1
 end
@@ -109,6 +110,9 @@ local partitionsKey = "queue:" .. queueName .. ":partitions"
 local consumersKey = "queue:" .. queueName .. ":consumers"
 local consumerKey = "queue:" .. queueName .. ":consumer:" .. consumerId
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
+
+local acquiredPartitionLocks = {}
+local partitionHadTask = {}
 
 -- Регистрируем/обновляем консьюмера
 redis.call('SADD', consumersKey, consumerId)
@@ -137,7 +141,15 @@ local function getFromPartition(partition)
             if not lockAcquired then
                 return nil
             end
+            acquiredPartitionLocks[partition] = true
         elseif lockOwner ~= consumerId then
+            if checkDeadConsumerLocks then
+                -- Снимаем stale-lock только когда lockOwner уже удалён из consumers (ping его “признал мёртвым”).
+                -- Иначе можно нарушить порядок: задачи могли быть в обработке и ещё не возвращены в очередь.
+                if redis.call('SISMEMBER', consumersKey, lockOwner) == 0 then
+                    redis.call('DEL', partitionLockKey)
+                end
+            end
             return nil
         end
     end
@@ -159,6 +171,7 @@ local function getFromPartition(partition)
 				redis.call('ZREM', partitionQueueKey, taskId)
 				redis.call('HSET', consumerTasksKey, taskId, now)
 				redis.call('INCR', consumerPartitionCountKey)
+				partitionHadTask[partition] = true
 				local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
 				local payload = redis.call('GET', payloadKey)
 				local taskPartitionKey = "queue:" .. queueName .. ":partition:" .. taskId
@@ -201,6 +214,15 @@ while #results / 4 < prefetchCount do
 	end
 end
 
+-- Если мы залочили партицию в рамках этого GET, но не взяли из неё ни одной задачи,
+-- снимаем лок. Повторный GET тем же consumer случится только после обработки пачки, т.е. “хвостов” не остаётся.
+for partition, _ in pairs(acquiredPartitionLocks) do
+	if partitionHadTask[partition] ~= true then
+		local partitionLockKey = "queue:" .. queueName .. ":partition:" .. partition .. ":lock"
+		redis.call('DEL', partitionLockKey)
+	end
+end
+
 return results
 `)
 
@@ -232,6 +254,9 @@ local partitionCode = redis.call('GET', partitionKey) or "base"
 local priority = redis.call('GET', priorityKey) or 0
 local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partitionCode .. ":count"
 local consumerPartitionCount = redis.call('DECR', consumerPartitionCountKey) or 0
+if consumerPartitionCount <= 0 then
+	redis.call('DEL', consumerPartitionCountKey)
+end
 
 -- Разблокируем партицию только если она с префиксом "!" (заблокированная)
 if partitionCode:sub(1, 1) == "!" and consumerPartitionCount == 0 then
@@ -324,6 +349,9 @@ redis.call('ZADD', prioritiesKey, newPriority, tostring(newPriority))
 
 local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partitionCode .. ":count"
 local consumerPartitionCount = redis.call('DECR', consumerPartitionCountKey) or 0
+if consumerPartitionCount <= 0 then
+	redis.call('DEL', consumerPartitionCountKey)
+end
 
 -- Разблокируем партицию только если она с префиксом "!"
 if needsLockUnlock and consumerPartitionCount == 0 then

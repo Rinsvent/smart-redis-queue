@@ -178,13 +178,14 @@ func (p *Producer) Lock(ctx context.Context, ids ...string) error {
 
 // Consumer получает и обрабатывает задачи из очереди
 type Consumer struct {
-	redis          *redis.Client
-	queueName      string
-	consumerID     string
-	pollInterval   time.Duration
-	prefetchCount  int
-	idempotencyTtl time.Duration
-	stopPing       chan struct{}
+	redis                       *redis.Client
+	queueName                   string
+	consumerID                  string
+	pollInterval                time.Duration
+	prefetchCount               int
+	checkDeadConsumerLocksOnGet bool
+	idempotencyTtl              time.Duration
+	stopPing                    chan struct{}
 }
 
 // NewConsumer создает нового консьюмера и запускает ping горутину.
@@ -199,13 +200,14 @@ func newConsumer(redisClient *redis.Client, queueName string, consumerID string,
 		consumerID = generateConsumerID()
 	}
 	c := &Consumer{
-		redis:          redisClient,
-		queueName:      queueName,
-		consumerID:     consumerID,
-		pollInterval:   1 * time.Second,
-		prefetchCount:  5,
-		idempotencyTtl: 0,
-		stopPing:       make(chan struct{}),
+		redis:                       redisClient,
+		queueName:                   queueName,
+		consumerID:                  consumerID,
+		pollInterval:                1 * time.Second,
+		prefetchCount:               5,
+		checkDeadConsumerLocksOnGet: false,
+		idempotencyTtl:              0,
+		stopPing:                    make(chan struct{}),
 	}
 
 	if startPing {
@@ -239,6 +241,11 @@ func (c *Consumer) SetPrefetchCount(n int) {
 		n = 1
 	}
 	c.prefetchCount = n
+}
+
+// SetCheckDeadConsumerLocksOnGet флаг проверки блокировок при getч
+func (c *Consumer) SetCheckDeadConsumerLocksOnGet(cd bool) {
+	c.checkDeadConsumerLocksOnGet = cd
 }
 
 // SetIdempotencyTtl задает количество секунд до удаления ключа задачи после ack. Пока жив ключ задачи с таким же requestId будут пропущены (по умолчанию 0 - сразу удаляем после ack)
@@ -395,6 +402,7 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 		c.queueName,
 		c.consumerID,
 		c.prefetchCount,
+		c.checkDeadConsumerLocksOnGet,
 	).Result()
 
 	if err != nil {
@@ -488,23 +496,25 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime int) erro
 
 // ConsumerPool пул консьюмеров, обрабатывающих очередь параллельно
 type ConsumerPool struct {
-	redis          *redis.Client
-	queueName      string
-	count          int
-	pollInterval   time.Duration
-	prefetchCount  int
-	idempotencyTtl time.Duration
+	redis                       *redis.Client
+	queueName                   string
+	count                       int
+	pollInterval                time.Duration
+	prefetchCount               int
+	checkDeadConsumerLocksOnGet bool
+	idempotencyTtl              time.Duration
 }
 
 // NewConsumerPool создает пул консьюмеров
 func NewConsumerPool(redisClient *redis.Client, queueName string) *ConsumerPool {
 	return &ConsumerPool{
-		redis:          redisClient,
-		queueName:      queueName,
-		count:          5,
-		pollInterval:   1 * time.Second,
-		prefetchCount:  5,
-		idempotencyTtl: 0,
+		redis:                       redisClient,
+		queueName:                   queueName,
+		count:                       5,
+		pollInterval:                1 * time.Second,
+		prefetchCount:               5,
+		checkDeadConsumerLocksOnGet: false,
+		idempotencyTtl:              0,
 	}
 }
 
@@ -527,6 +537,11 @@ func (p *ConsumerPool) SetPrefetchCount(n int) {
 		n = 1
 	}
 	p.prefetchCount = n
+}
+
+// SetCheckDeadConsumerLocksOnGet задает количество задач для предзагрузки
+func (p *ConsumerPool) SetCheckDeadConsumerLocksOnGet(cd bool) {
+	p.checkDeadConsumerLocksOnGet = cd
 }
 
 func (p *ConsumerPool) SetIdempotencyTtl(n time.Duration) {
@@ -565,6 +580,7 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c := newConsumer(p.redis, p.queueName, "", true)
 		c.pollInterval = p.pollInterval
 		c.prefetchCount = p.prefetchCount
+		c.checkDeadConsumerLocksOnGet = p.checkDeadConsumerLocksOnGet
 		c.idempotencyTtl = p.idempotencyTtl
 
 		c.Consume(ctx, handler)
