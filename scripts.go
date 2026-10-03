@@ -4,16 +4,34 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// TagSeparator — разделитель тегов в ARGV add-скрипта и в Redis-индексах.
+// Тег не должен содержать этот символ. Выбран `#`: реже встречается в id/slug, чем `,` или `/`.
+const TagSeparator = "#"
+
+// DefaultRemoveByTagLimit — лимит RemoveByTag по умолчанию.
+const DefaultRemoveByTagLimit = 100
+
+// MaxRemoveByTagLimit — верхняя граница лимита RemoveByTag (защита от долгой блокировки Lua).
+const MaxRemoveByTagLimit = 1000
+
+// Статусы удаления задачи (Remove / RemoveByTag).
+const (
+	RemovalStatusMissing    = "missing"
+	RemovalStatusInProgress = "inprogress"
+	RemovalStatusRemoved    = "removed"
+)
+
 // getAddScript возвращает Lua скрипт для добавления задач (батч)
 // ARGV[1] = queue name
 // ARGV[2] = количество задач
-// Далее группы по 5 аргумента на задачу:
+// Далее группы по 6 аргументов на задачу:
 //
-//	ARGV[3 + i*5] = task ID
-//	ARGV[4 + i*5] = partition code (пустая строка = без партиции)
-//	ARGV[4 + i*5] = priority
-//	ARGV[5 + i*5] = scheduled timestamp (ms)
-//	ARGV[6 + i*5] = payload
+//	ARGV[3 + i*6] = task ID
+//	ARGV[4 + i*6] = partition code (пустая строка = без партиции)
+//	ARGV[5 + i*6] = priority
+//	ARGV[6 + i*6] = scheduled timestamp (ms)
+//	ARGV[7 + i*6] = payload
+//	ARGV[8 + i*6] = tags (строка tag1#tag2#..., пустая = без тегов)
 //
 // Возвращает список не добавленных задач - их порядковый номер
 var addScript = redis.NewScript(`
@@ -25,7 +43,7 @@ local partitionsKey = "queue:" .. queueName .. ":partitions"
 local notAddedItems = {}
 
 for i = 0, taskCount - 1 do
-    local base = 3 + i * 5
+    local base = 3 + i * 6
     local taskId = ARGV[base]
     local partitionCode = ARGV[base + 1]
 	if partitionCode == "" then
@@ -34,6 +52,7 @@ for i = 0, taskCount - 1 do
     local priority = ARGV[base + 2]
     local scheduled = tonumber(ARGV[base + 3])
     local payload = ARGV[base + 4]
+    local tagsStr = ARGV[base + 5] or ""
 
     local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
     local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
@@ -50,6 +69,16 @@ for i = 0, taskCount - 1 do
 
 		local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
 		redis.call('ZADD', prioritiesKey, priority, priority)
+
+		if tagsStr ~= "" then
+			local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
+			for tag in string.gmatch(tagsStr, "[^#]+") do
+				if tag ~= "" then
+					redis.call('SADD', "queue:" .. queueName .. ":tag:" .. tag, taskId)
+					redis.call('SADD', tagsKey, tag)
+				end
+			end
+		end
     else 
 		notAddedItems[#notAddedItems + 1] = i
     end
@@ -278,6 +307,14 @@ redis.call('DEL', partitionKey)
 redis.call('DEL', priorityKey)
 redis.call('DEL', "queue:" .. queueName .. ":reject_count:" .. taskId)
 
+-- Чистим индексы тегов (если были)
+local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
+local tags = redis.call('SMEMBERS', tagsKey)
+for t = 1, #tags do
+	redis.call('SREM', "queue:" .. queueName .. ":tag:" .. tags[t], taskId)
+end
+redis.call('DEL', tagsKey)
+
 -- Удаляем задачу из hash консьюмера
 redis.call('HDEL', consumerTasksKey, taskId)
 
@@ -472,6 +509,182 @@ end
 return 1
 `)
 
+// removeScript атомарно снимает ожидающую задачу из очереди по ID (без consumer).
+// ARGV[1] = queue name
+// ARGV[2] = task ID
+// Возврат: {status} или {status, payload} при removed.
+// status: missing | inprogress | removed
+var removeScript = redis.NewScript(`
+local queueName = ARGV[1]
+local taskId = ARGV[2]
+
+local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
+local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
+local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
+local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
+
+local function cleanupTags()
+	local tags = redis.call('SMEMBERS', tagsKey)
+	for t = 1, #tags do
+		redis.call('SREM', "queue:" .. queueName .. ":tag:" .. tags[t], taskId)
+	end
+	redis.call('DEL', tagsKey)
+end
+
+local partition = redis.call('GET', partitionKey)
+if not partition then
+	-- Возможны осиротевшие индексы тегов (старый ack без чистки тегов) — подчистим.
+	cleanupTags()
+	return {'missing'}
+end
+
+local priority = redis.call('GET', priorityKey) or '0'
+local queueKey = "queue:" .. queueName .. ":partition:" .. partition .. ":" .. priority
+
+if redis.call('ZREM', queueKey, taskId) == 0 then
+	-- Задача взята консьюмером (или уже не в ZSET) — не трогаем.
+	return {'inprogress'}
+end
+
+local payload = redis.call('GET', payloadKey) or ''
+redis.call('DEL', payloadKey, partitionKey, priorityKey, "queue:" .. queueName .. ":reject_count:" .. taskId)
+cleanupTags()
+
+local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partition .. ":priorities"
+if redis.call('ZCARD', queueKey) == 0 then
+	redis.call('ZREM', prioritiesKey, priority)
+	if redis.call('ZCARD', prioritiesKey) == 0 then
+		redis.call('SREM', "queue:" .. queueName .. ":partitions", partition)
+	end
+end
+
+return {'removed', payload}
+`)
+
+// removeByTagScript удаляет до limit ожидающих задач с указанным тегом.
+// ARGV[1] = queue name
+// ARGV[2] = tag
+// ARGV[3] = limit (1..1000)
+// ARGV[4] = returnPayload ("1" / "0")
+// Возврат: плоский массив {taskId, status, payload, ...}
+// Приоритет в ответе: removed; missing/inprogress добивают до limit и вытесняются removed.
+var removeByTagScript = redis.NewScript(`
+local queueName = ARGV[1]
+local tag = ARGV[2]
+local limit = tonumber(ARGV[3]) or 100
+local returnPayload = ARGV[4] == "1"
+
+if limit < 1 then
+	limit = 1
+end
+if limit > 1000 then
+	limit = 1000
+end
+
+local tagKey = "queue:" .. queueName .. ":tag:" .. tag
+
+local function cleanupTags(taskId)
+	local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
+	local tags = redis.call('SMEMBERS', tagsKey)
+	for t = 1, #tags do
+		redis.call('SREM', "queue:" .. queueName .. ":tag:" .. tags[t], taskId)
+	end
+	redis.call('DEL', tagsKey)
+	-- На случай отсутствия reverse-index всё равно убираем из текущего тега.
+	redis.call('SREM', tagKey, taskId)
+end
+
+local function removeOne(taskId)
+	local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
+	local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
+	local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
+
+	local partition = redis.call('GET', partitionKey)
+	if not partition then
+		cleanupTags(taskId)
+		return 'missing', ''
+	end
+
+	local priority = redis.call('GET', priorityKey) or '0'
+	local queueKey = "queue:" .. queueName .. ":partition:" .. partition .. ":" .. priority
+
+	if redis.call('ZREM', queueKey, taskId) == 0 then
+		return 'inprogress', ''
+	end
+
+	local payload = redis.call('GET', payloadKey) or ''
+	redis.call('DEL', payloadKey, partitionKey, priorityKey, "queue:" .. queueName .. ":reject_count:" .. taskId)
+	cleanupTags(taskId)
+
+	local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partition .. ":priorities"
+	if redis.call('ZCARD', queueKey) == 0 then
+		redis.call('ZREM', prioritiesKey, priority)
+		if redis.call('ZCARD', prioritiesKey) == 0 then
+			redis.call('SREM', "queue:" .. queueName .. ":partitions", partition)
+		end
+	end
+
+	return 'removed', payload
+end
+
+local removed = {}
+local other = {}
+local seen = {}
+local cursor = "0"
+
+repeat
+	local scan = redis.call('SSCAN', tagKey, cursor, 'COUNT', tostring(math.min(limit * 2, 200)))
+	cursor = scan[1]
+	local members = scan[2]
+
+	for i = 1, #members do
+		local taskId = members[i]
+		if not seen[taskId] then
+			seen[taskId] = true
+			local status, payload = removeOne(taskId)
+			local entry = {taskId, status, payload}
+			if status == 'removed' then
+				removed[#removed + 1] = entry
+			elseif #other < limit then
+				-- Храним не больше limit non-removed: при миллионах inprogress не раздуваем Lua.
+				other[#other + 1] = entry
+			end
+			if #removed >= limit then
+				break
+			end
+		end
+	end
+until cursor == "0" or #removed >= limit
+
+local out = {}
+for i = 1, #removed do
+	if #out / 3 >= limit then
+		break
+	end
+	out[#out + 1] = removed[i][1]
+	out[#out + 1] = removed[i][2]
+	if returnPayload then
+		out[#out + 1] = removed[i][3]
+	else
+		out[#out + 1] = ''
+	end
+end
+for i = 1, #other do
+	if #out / 3 >= limit then
+		break
+	end
+	out[#out + 1] = other[i][1]
+	out[#out + 1] = other[i][2]
+	if returnPayload then
+		out[#out + 1] = other[i][3]
+	else
+		out[#out + 1] = ''
+	end
+end
+
+return out
+`)
+
 // Функции для получения скриптов
 
 func getAddScript() *redis.Script {
@@ -496,4 +709,12 @@ func getRejectScript() *redis.Script {
 
 func getPingScript() *redis.Script {
 	return pingScript
+}
+
+func getRemoveScript() *redis.Script {
+	return removeScript
+}
+
+func getRemoveByTagScript() *redis.Script {
+	return removeByTagScript
 }

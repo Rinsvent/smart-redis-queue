@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,7 +65,32 @@ type Task struct {
 	Priority    int       `json:"priority,omitempty"`
 	Payload     []byte    `json:"-"`
 	Scheduled   time.Time `json:"scheduled"`
+	Tags        []string  `json:"tags,omitempty"`        // теги для индексации / массового удаления
 	RejectCount int       `json:"rejectCount,omitempty"` // кол-во reject для расчёта задержки
+}
+
+// encodeTags сериализует теги в строку для Lua add-скрипта.
+// Пустые отбрасываются, дубликаты схлопываются; TagSeparator внутри тега запрещён.
+func encodeTags(tags []string) (string, error) {
+	if len(tags) == 0 {
+		return "", nil
+	}
+	seen := make(map[string]struct{}, len(tags))
+	parts := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if tag == "" {
+			continue
+		}
+		if strings.Contains(tag, TagSeparator) {
+			return "", fmt.Errorf("tag %q contains forbidden separator %q", tag, TagSeparator)
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		parts = append(parts, tag)
+	}
+	return strings.Join(parts, TagSeparator), nil
 }
 
 // Producer отправляет задачи в очередь
@@ -87,7 +113,7 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 		return nil
 	}
 
-	args := make([]interface{}, 0, 2+len(tasks)*4)
+	args := make([]interface{}, 0, 2+len(tasks)*6)
 	args = append(args, p.queueName, len(tasks))
 
 	for _, task := range tasks {
@@ -99,7 +125,11 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 		if scheduled == 0 {
 			scheduled = time.Now().UnixMilli()
 		}
-		args = append(args, task.ID, task.Partition, task.Priority, scheduled, string(task.Payload))
+		tags, err := encodeTags(task.Tags)
+		if err != nil {
+			return err
+		}
+		args = append(args, task.ID, task.Partition, task.Priority, scheduled, string(task.Payload), tags)
 	}
 
 	script := getAddScript()

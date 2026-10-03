@@ -149,6 +149,116 @@ func (a *Admin) queueStats(ctx context.Context, queueName, partitionFilter strin
 	return stats, nil
 }
 
+// TaskRemoval — результат удаления одной задачи (Remove / RemoveByTag).
+type TaskRemoval struct {
+	TaskID  string
+	Payload []byte
+	Status  string // RemovalStatusMissing | RemovalStatusInProgress | RemovalStatusRemoved
+}
+
+// RemoveByTagOptions настройки массового удаления по тегу.
+type RemoveByTagOptions struct {
+	// Limit — сколько задач обработать за вызов (default 100, max 1000).
+	Limit int
+	// ReturnPayload — возвращать ли payload для removed (и missing, если ещё был).
+	ReturnPayload bool
+}
+
+// Remove атомарно снимает ожидающую задачу из очереди по ID (без consumer).
+// missing — задачи нет; inprogress — взята консьюмером (не трогаем); removed — снята.
+func (a *Admin) Remove(ctx context.Context, queueName, taskID string) (*TaskRemoval, error) {
+	if taskID == "" {
+		return nil, fmt.Errorf("task ID is required")
+	}
+
+	result, err := getRemoveScript().Run(ctx, a.redis, []string{}, queueName, taskID).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to remove task: %w", err)
+	}
+
+	arr, ok := result.([]interface{})
+	if !ok || len(arr) == 0 {
+		return nil, fmt.Errorf("unexpected remove script response: %v", result)
+	}
+
+	status, _ := arr[0].(string)
+	payload := ""
+	if status == RemovalStatusRemoved && len(arr) > 1 && arr[1] != nil {
+		payload, _ = arr[1].(string)
+	}
+
+	return &TaskRemoval{
+		TaskID:  taskID,
+		Payload: []byte(payload),
+		Status:  status,
+	}, nil
+}
+
+// RemoveByTag атомарно удаляет до Limit ожидающих задач с тегом.
+// Предпочитает removed: missing/inprogress вытесняются из ответа, пока не наберётся Limit removed
+// или не закончится индекс тега. Если в ответе только inprogress — снимать больше нечего
+// (остались задачи в обработке у воркеров).
+func (a *Admin) RemoveByTag(ctx context.Context, queueName, tag string, opts RemoveByTagOptions) ([]TaskRemoval, error) {
+	if tag == "" {
+		return nil, fmt.Errorf("tag is required")
+	}
+	if strings.Contains(tag, TagSeparator) {
+		return nil, fmt.Errorf("tag %q contains forbidden separator %q", tag, TagSeparator)
+	}
+
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = DefaultRemoveByTagLimit
+	}
+	if limit > MaxRemoveByTagLimit {
+		limit = MaxRemoveByTagLimit
+	}
+
+	returnPayload := "0"
+	if opts.ReturnPayload {
+		returnPayload = "1"
+	}
+
+	result, err := getRemoveByTagScript().Run(ctx, a.redis, []string{},
+		queueName, tag, limit, returnPayload,
+	).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to remove by tag: %w", err)
+	}
+
+	arr, ok := result.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("unexpected remove-by-tag response: %v", result)
+	}
+
+	out := make([]TaskRemoval, 0, len(arr)/3)
+	for i := 0; i+2 < len(arr); i += 3 {
+		taskID, _ := arr[i].(string)
+		status, _ := arr[i+1].(string)
+		payload := ""
+		if arr[i+2] != nil {
+			payload, _ = arr[i+2].(string)
+		}
+		out = append(out, TaskRemoval{
+			TaskID:  taskID,
+			Payload: []byte(payload),
+			Status:  status,
+		})
+	}
+	return out, nil
+}
+
+// CountByTag возвращает число taskId в индексе тега (pending + inprogress; removed уже не считаются).
+func (a *Admin) CountByTag(ctx context.Context, queueName, tag string) (int64, error) {
+	if tag == "" {
+		return 0, fmt.Errorf("tag is required")
+	}
+	if strings.Contains(tag, TagSeparator) {
+		return 0, fmt.Errorf("tag %q contains forbidden separator %q", tag, TagSeparator)
+	}
+	return a.redis.SCard(ctx, "queue:"+queueName+":tag:"+tag).Result()
+}
+
 // Purge удаляет все задачи из очереди. Если partition != "", удаляет только указанную партицию.
 func (a *Admin) Purge(ctx context.Context, queueName, partition string) (int, error) {
 	if partition != "" {
@@ -188,11 +298,17 @@ func (a *Admin) purgePartition(ctx context.Context, queueName, partition string)
 		queueKey := "queue:" + queueName + ":partition:" + partition + ":" + prio
 		taskIds, _ := a.redis.ZRange(ctx, queueKey, 0, -1).Result()
 		for _, tid := range taskIds {
+			tagsKey := "queue:" + queueName + ":tags:" + tid
+			tags, _ := a.redis.SMembers(ctx, tagsKey).Result()
+			for _, tag := range tags {
+				a.redis.SRem(ctx, "queue:"+queueName+":tag:"+tag, tid)
+			}
 			keysToDel = append(keysToDel,
 				"queue:"+queueName+":payload:"+tid,
 				"queue:"+queueName+":partition:"+tid,
 				"queue:"+queueName+":priority:"+tid,
 				"queue:"+queueName+":reject_count:"+tid,
+				tagsKey,
 			)
 		}
 		keysToDel = append(keysToDel, queueKey)

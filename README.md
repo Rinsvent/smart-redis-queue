@@ -12,6 +12,8 @@
 - **Prefetch с сохранением порядка** — для ordered-партиций при reject первой задачи в батче остальные тоже reject'ятся и возвращаются в правильном порядке
 - **Rate limiting** — `RejectWithDelay` для ordered-партиций ставит TTL-блок, партиция не берётся до истечения задержки
 - **Идемпотентность** — добавление по `ID` (NX), дубликаты отклоняются
+- **Теги** — индексация задач для подсчёта и массового удаления (`Admin.CountByTag` / `RemoveByTag`)
+- **Удаление без consumer** — `Admin.Remove` снимает ожидающую задачу по ID
 
 ## Требования
 
@@ -153,6 +155,50 @@ for task := range ch {
 }
 ```
 
+### Теги
+
+Теги задаются при публикации. Разделитель в Lua/Redis — `#` (`TagSeparator`); символ `#` внутри значения тега запрещён.
+
+```go
+producer.Publish(ctx, &redisqueue.Task{
+    ID:      "msg-1",
+    Payload: []byte(`{"to":"user@example.com"}`),
+    Tags:    []string{"mailing:42", "campaign:spring"},
+    Scheduled: time.Now(),
+})
+
+admin := redisqueue.NewAdmin(rdb)
+
+n, _ := admin.CountByTag(ctx, "my-queue", "mailing:42")
+// n == 1 (pending + in-progress; после remove/ack уже не считаются)
+
+// Удаление одной ожидающей задачи без consumer
+res, _ := admin.Remove(ctx, "my-queue", "msg-1")
+// res.Status: "removed" | "inprogress" | "missing"
+
+// Массовое удаление по тегу (батчами, чтобы не блокировать Redis Lua надолго)
+for {
+    batch, err := admin.RemoveByTag(ctx, "my-queue", "mailing:42", redisqueue.RemoveByTagOptions{
+        Limit:         100, // default 100, max 1000
+        ReturnPayload: true,
+    })
+    if err != nil || len(batch) == 0 {
+        break
+    }
+    onlyInProgress := true
+    for _, item := range batch {
+        if item.Status == redisqueue.RemovalStatusRemoved {
+            onlyInProgress = false
+            // item.TaskID, item.Payload
+        }
+    }
+    // Если в батче только inprogress — снимать больше нечего, остальное у воркеров
+    if onlyInProgress {
+        break
+    }
+}
+```
+
 ## Конфигурация консьюмера
 
 ```go
@@ -235,9 +281,19 @@ make test-coverage
 | `Producer` | Публикация задач |
 | `Consumer` | Один консьюмер (Get/Ack/Reject, Consume, GetChan) |
 | `ConsumerPool` | Пул консьюмеров |
-| `Admin` | Обслуживание: Inspect, Purge, Retry |
-| `Task` | Задача: ID, Partition, Priority, Payload, Scheduled |
+| `Admin` | Обслуживание: Inspect, Purge, Retry, Remove, RemoveByTag, CountByTag |
+| `Task` | Задача: ID, Partition, Priority, Payload, Scheduled, Tags |
 | `RejectWithDelay` | Ошибка для отложенного reject (rate limit) |
+
+### Admin: удаление и теги
+
+| Метод | Описание |
+|-------|----------|
+| `Remove(queue, taskID)` | Снять ожидающую задачу по ID. `inprogress` не трогает |
+| `RemoveByTag(queue, tag, opts)` | Снять до `Limit` задач с тегом (default 100, max 1000) |
+| `CountByTag(queue, tag)` | `SCARD` индекса тега |
+
+Статусы: `removed`, `inprogress`, `missing` (`RemovalStatus*`).
 
 ## Ключи Redis
 
@@ -247,6 +303,27 @@ make test-coverage
 - `queue:{name}:partition:{code}:{priority}` — ZSET задач по партиции и приоритету
 - `queue:{name}:consumers` — множество консьюмеров
 - `queue:{name}:consumer:{id}` — heartbeat консьюмера (TTL 120 сек)
+- `queue:{name}:tag:{tag}` — SET taskId по тегу
+- `queue:{name}:tags:{taskId}` — SET тегов задачи (для точечной чистки)
+
+## Обновление библиотеки (совместимость)
+
+Lua-скрипты в Redis регистрируются по SHA содержимого. Новая версия библиотеки добавляет/меняет скрипты рядом со старыми: процесс со старой версией пакета продолжает вызывать свой SHA, процесс с новой — свой. Конфликта «двух версий одного скрипта» нет.
+
+| Сценарий | Поведение |
+|----------|-----------|
+| Старые продюсеры + новые консьюмеры | OK: add без тегов, новый ack просто не находит индекс тегов |
+| Новые продюсеры **без** `Tags` + старые консьюмеры | OK: контракт данных тот же |
+| Новые продюсеры **с** `Tags` + старые консьюмеры | Работает, но старый `Ack` не чистит `tag:*` / `tags:*` → возможны «осиротевшие» id в индексе. `Remove` / `RemoveByTag` подчищают `missing` |
+| `Admin.Remove` / `RemoveByTag` / `CountByTag` | Только в новой версии; на старых воркерах методов нет |
+
+**Если начинаете использовать теги**, рекомендуемый порядок выката:
+
+1. Обновить консьюмеры (чтобы `Ack` чистил теги).
+2. Обновить продюсеры / сервисы, которые вызывают `Admin`.
+3. Включать публикацию с `Tags`.
+
+Останавливать очередь и «вычитывать всё старой версией» **не требуется**, если теги ещё не пишутся. Если теги уже писали новой версией, а консьюмеры старые — после обновления консьюмеров достаточно прогнать `RemoveByTag` / дождаться ack; сиротские записи в индексе тега уйдут как `missing`.
 
 ## Contributing
 
