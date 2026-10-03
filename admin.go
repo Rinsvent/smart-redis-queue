@@ -301,7 +301,11 @@ func (a *Admin) purgePartition(ctx context.Context, queueName, partition string)
 			tagsKey := "queue:" + queueName + ":tags:" + tid
 			tags, _ := a.redis.SMembers(ctx, tagsKey).Result()
 			for _, tag := range tags {
-				a.redis.SRem(ctx, "queue:"+queueName+":tag:"+tag, tid)
+				tagKey := "queue:" + queueName + ":tag:" + tag
+				a.redis.SRem(ctx, tagKey, tid)
+				if a.redis.SCard(ctx, tagKey).Val() == 0 {
+					a.redis.Del(ctx, tagKey)
+				}
 			}
 			keysToDel = append(keysToDel,
 				"queue:"+queueName+":payload:"+tid,

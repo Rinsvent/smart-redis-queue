@@ -146,8 +146,8 @@ func TestAdmin_Remove_Pending(t *testing.T) {
 	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:remove-queue:partition:t1").Val())
 	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:remove-queue:priority:t1").Val())
 	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:remove-queue:tags:t1").Val())
-	assert.Equal(t, int64(0), rdb.SCard(ctx, "queue:remove-queue:tag:campaign-a").Val())
-	assert.Equal(t, int64(0), rdb.SCard(ctx, "queue:remove-queue:tag:batch-1").Val())
+	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:remove-queue:tag:campaign-a").Val())
+	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:remove-queue:tag:batch-1").Val())
 
 	// Повторное удаление — missing
 	res2, err := admin.Remove(ctx, "remove-queue", "t1")
@@ -264,11 +264,13 @@ func TestAdmin_RemoveByTag(t *testing.T) {
 	n, err = admin.CountByTag(ctx, "rmtag-queue", "camp")
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), n)
+	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:rmtag-queue:tag:camp").Val())
 
-	// Тег keep должен быть снят вместе с задачей
+	// Тег keep должен быть снят вместе с задачей, ключ удалён
 	n, err = admin.CountByTag(ctx, "rmtag-queue", "keep")
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), n)
+	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:rmtag-queue:tag:keep").Val())
 }
 
 func TestAdmin_RemoveByTag_PrefersRemovedOverInProgress(t *testing.T) {

@@ -307,11 +307,15 @@ redis.call('DEL', partitionKey)
 redis.call('DEL', priorityKey)
 redis.call('DEL', "queue:" .. queueName .. ":reject_count:" .. taskId)
 
--- Чистим индексы тегов (если были)
+-- Чистим индексы тегов (если были); пустой SET тега удаляем явно
 local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
 local tags = redis.call('SMEMBERS', tagsKey)
 for t = 1, #tags do
-	redis.call('SREM', "queue:" .. queueName .. ":tag:" .. tags[t], taskId)
+	local tagKey = "queue:" .. queueName .. ":tag:" .. tags[t]
+	redis.call('SREM', tagKey, taskId)
+	if redis.call('SCARD', tagKey) == 0 then
+		redis.call('DEL', tagKey)
+	end
 end
 redis.call('DEL', tagsKey)
 
@@ -526,7 +530,11 @@ local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
 local function cleanupTags()
 	local tags = redis.call('SMEMBERS', tagsKey)
 	for t = 1, #tags do
-		redis.call('SREM', "queue:" .. queueName .. ":tag:" .. tags[t], taskId)
+		local tagKey = "queue:" .. queueName .. ":tag:" .. tags[t]
+		redis.call('SREM', tagKey, taskId)
+		if redis.call('SCARD', tagKey) == 0 then
+			redis.call('DEL', tagKey)
+		end
 	end
 	redis.call('DEL', tagsKey)
 end
@@ -583,15 +591,22 @@ end
 
 local tagKey = "queue:" .. queueName .. ":tag:" .. tag
 
+local function removeFromTag(key, taskId)
+	redis.call('SREM', key, taskId)
+	if redis.call('SCARD', key) == 0 then
+		redis.call('DEL', key)
+	end
+end
+
 local function cleanupTags(taskId)
 	local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
 	local tags = redis.call('SMEMBERS', tagsKey)
 	for t = 1, #tags do
-		redis.call('SREM', "queue:" .. queueName .. ":tag:" .. tags[t], taskId)
+		removeFromTag("queue:" .. queueName .. ":tag:" .. tags[t], taskId)
 	end
 	redis.call('DEL', tagsKey)
 	-- На случай отсутствия reverse-index всё равно убираем из текущего тега.
-	redis.call('SREM', tagKey, taskId)
+	removeFromTag(tagKey, taskId)
 end
 
 local function removeOne(taskId)
