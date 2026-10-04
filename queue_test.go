@@ -899,6 +899,118 @@ func TestQueue_ConsumeWithHandler(t *testing.T) {
 	assert.Equal(t, []string{"task-1", "task-2", "task-3"}, received, "порядок сообщений")
 }
 
+// TestQueue_Consume_AckSurvivesContextCancel проверяет graceful shutdown:
+// ctx отменён во время handler (SIGTERM), задача всё равно Ack'ается живым контекстом,
+// ordered-партиция не зависает до heartbeat.
+func TestQueue_Consume_AckSurvivesContextCancel(t *testing.T) {
+	producer, consumer, client := setupTestQueue(t)
+	consumer.SetPollInterval(50 * time.Millisecond)
+	consumer.SetPrefetchCount(1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	consumeErr := make(chan error, 1)
+
+	go func() {
+		consumeErr <- consumer.Consume(ctx, func(task *Task) error {
+			close(started)
+			time.Sleep(200 * time.Millisecond)
+			return nil
+		})
+	}()
+
+	require.NoError(t, producer.Publish(context.Background(), &Task{
+		ID:        "shutdown-task",
+		Partition: "!chat-1",
+		Payload:   []byte("x"),
+		Scheduled: time.Now().Add(-time.Second),
+	}))
+
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	cancel() // отмена во время обработки, как при deploy/SIGTERM
+
+	select {
+	case err := <-consumeErr:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Consume did not exit after cancel")
+	}
+
+	bg := context.Background()
+	assert.Equal(t, int64(0), client.Exists(bg, payloadKey("test-queue", "shutdown-task")).Val(),
+		"задача должна быть Ack после отмены ctx")
+	assert.Equal(t, int64(0), client.Exists(bg, partitionLockKey("test-queue", "!chat-1")).Val(),
+		"лок ordered-партиции должен сняться")
+	assert.Equal(t, int64(0), client.HLen(bg, fmt.Sprintf("queue:test-queue:consumer:%s:tasks", consumer.ConsumerID())).Val(),
+		"задача не должна остаться in-progress")
+}
+
+// TestQueue_Consume_RejectRemainingOnCancel: неначатые задачи prefetch возвращаются в очередь
+// через Reject с живым контекстом, даже если shutdown-ctx уже отменён.
+func TestQueue_Consume_RejectRemainingOnCancel(t *testing.T) {
+	producer, consumer, client := setupTestQueue(t)
+	consumer.SetPollInterval(50 * time.Millisecond)
+	consumer.SetPrefetchCount(3)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	started := make(chan struct{})
+	consumeErr := make(chan error, 1)
+	var handled atomic.Int32
+
+	go func() {
+		consumeErr <- consumer.Consume(ctx, func(task *Task) error {
+			if handled.Add(1) == 1 {
+				close(started)
+				cancel()
+				time.Sleep(50 * time.Millisecond)
+				return nil
+			}
+			t.Errorf("handler must not run for %s after cancel", task.ID)
+			return nil
+		})
+	}()
+
+	require.NoError(t, producer.Publish(context.Background(),
+		&Task{ID: "t1", Partition: "p1", Payload: []byte("1"), Scheduled: time.Now().Add(-time.Second)},
+		&Task{ID: "t2", Partition: "p2", Payload: []byte("2"), Scheduled: time.Now().Add(-time.Second)},
+		&Task{ID: "t3", Partition: "p3", Payload: []byte("3"), Scheduled: time.Now().Add(-time.Second)},
+	))
+
+	select {
+	case <-started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("handler did not start")
+	}
+
+	select {
+	case err := <-consumeErr:
+		require.NoError(t, err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("Consume did not exit")
+	}
+
+	assert.Equal(t, int32(1), handled.Load())
+
+	bg := context.Background()
+	acked := 0
+	pending := 0
+	for _, id := range []string{"t1", "t2", "t3"} {
+		if client.Exists(bg, payloadKey("test-queue", id)).Val() == 0 {
+			acked++
+		}
+	}
+	for _, part := range []string{"p1", "p2", "p3"} {
+		pending += int(client.ZCard(bg, partitionKey("test-queue", part, "0")).Val())
+	}
+	assert.Equal(t, 1, acked, "ровно одна задача Ack после cancel")
+	assert.Equal(t, 2, pending, "остальные две возвращены Reject в очередь")
+}
+
 func setupTestConsumerPool(t *testing.T) (*Producer, *ConsumerPool, *redis.Client) {
 	cfg := RedisConfig{
 		Addr:     "localhost:6379",

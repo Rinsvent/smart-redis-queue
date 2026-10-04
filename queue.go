@@ -335,7 +335,15 @@ func isOrderedPartition(partition string) bool {
 // При ошибке Ack или Reject консьюмер завершает работу и возвращает ошибку — остальные
 // сообщения вернутся в очередь при чистке мёртвых консьюмеров, что важно для ordered-партиций:
 // не брать следующую пачку тем же консьюмером и не нарушать порядок.
+//
+// Отмена ctx / Close останавливает цикл между задачами: текущий handler дорабатывается,
+// Ack/Reject идут через context.WithoutCancel(ctx), чтобы SIGTERM не ронял подтверждение
+// уже взятой задачи (иначе партиция/задача висели бы до истечения heartbeat).
+// Неначатые задачи из prefetch возвращаются в очередь через Reject.
 func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error {
+	// Подтверждения не должны зависеть от отмены shutdown-контекста.
+	opCtx := context.WithoutCancel(ctx)
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -361,12 +369,12 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 		for _, task := range tasks {
 			select {
 			case <-ctx.Done():
-				if err := c.Reject(ctx, task.ID, waitTime); err != nil {
+				if err := c.Reject(opCtx, task.ID, waitTime); err != nil {
 					return err
 				}
 				continue
 			case <-c.stopPing:
-				if err := c.Reject(ctx, task.ID, waitTime); err != nil {
+				if err := c.Reject(opCtx, task.ID, waitTime); err != nil {
 					return err
 				}
 				continue
@@ -374,7 +382,7 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 			}
 
 			if isOrderedPartition(task.Partition) && rejectedPartitions[task.Partition] {
-				if err := c.Reject(ctx, task.ID, waitTime); err != nil {
+				if err := c.Reject(opCtx, task.ID, waitTime); err != nil {
 					return err
 				}
 				continue
@@ -388,11 +396,11 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 				if errors.As(err, &rejectErr) && rejectErr.Delay > 0 {
 					waitTime = rejectErr.Delay
 				}
-				if ackErr := c.Reject(ctx, task.ID, waitTime); ackErr != nil {
+				if ackErr := c.Reject(opCtx, task.ID, waitTime); ackErr != nil {
 					return ackErr
 				}
 			} else {
-				if ackErr := c.Ack(ctx, task.ID, c.idempotencyTtl); ackErr != nil {
+				if ackErr := c.Ack(opCtx, task.ID, c.idempotencyTtl); ackErr != nil {
 					return ackErr
 				}
 			}
@@ -613,12 +621,19 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c.checkDeadConsumerLocksOnGet = p.checkDeadConsumerLocksOnGet
 		c.idempotencyTtl = p.idempotencyTtl
 
-		c.Consume(ctx, handler)
+		err := c.Consume(ctx, handler)
 		c.Close()
 
 		if ctx.Err() != nil {
 			return
 		}
-		// Консьюмер умер из-за ошибки Ack/Reject — перезапускаем на его месте
+		// Консьюмер умер из-за ошибки Ack/Reject — пауза и перезапуск на его месте.
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(p.pollInterval):
+			}
+		}
 	}
 }
