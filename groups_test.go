@@ -94,7 +94,7 @@ func TestQueue_Groups_MultiGroupAdmission(t *testing.T) {
 	assert.Empty(t, got2)
 }
 
-func TestQueue_Ack_CleansPartitionIndexes(t *testing.T) {
+func TestQueue_Get_CleansEmptyPartitionIndexes(t *testing.T) {
 	producer, consumer, rdb := setupTestQueue(t)
 	consumer.SetPrefetchCount(1)
 	ctx := context.Background()
@@ -107,7 +107,11 @@ func TestQueue_Ack_CleansPartitionIndexes(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+
+	// Индексы чистятся лениво на следующем Get (found=false → removePartitionFromIndexes).
+	got2, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, got2)
 
 	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:"+q+":partition:!c:1:groups").Val())
 	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:"+q+":group:conn:ready").Val())
@@ -117,6 +121,8 @@ func TestQueue_Ack_CleansPartitionIndexes(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), n)
 	assert.False(t, rdb.SIsMember(ctx, "queue:"+q+":partitions", "!c:1").Val())
+
+	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
 }
 
 func TestQueue_Ping_RestoresDeadConsumerTaskWithGroups(t *testing.T) {

@@ -411,7 +411,22 @@ func (a *Admin) returnTaskToQueue(ctx context.Context, queueName, taskID, consum
 	a.redis.ZAdd(ctx, prioritiesKey, redis.Z{Score: priorityNum, Member: priorityStr})
 	a.redis.SAdd(ctx, "queue:"+queueName+":partitions", partition)
 
-	consumerPartitionCountKey := "queue:" + queueName + ":consumer:" + consumerID + ":partition" + partition + ":count"
+	// Get мог снять пустую партицию с groups/ready — восстанавливаем.
+	groupsKey := "queue:" + queueName + ":groups"
+	pgroupsKey := "queue:" + queueName + ":partition:" + partition + ":groups"
+	pgroups, _ := a.redis.SMembers(ctx, pgroupsKey).Result()
+	if len(pgroups) == 0 {
+		pgroups = []string{DefaultGroup}
+		a.redis.SAdd(ctx, pgroupsKey, DefaultGroup)
+	}
+	for _, g := range pgroups {
+		if _, err := a.redis.ZScore(ctx, groupsKey, g).Result(); err == redis.Nil {
+			a.redis.ZAdd(ctx, groupsKey, redis.Z{Score: 0, Member: g})
+		}
+		a.redis.ZAdd(ctx, "queue:"+queueName+":group:"+g+":ready", redis.Z{Score: 0, Member: partition})
+	}
+
+	consumerPartitionCountKey := "queue:" + queueName + ":consumer:" + consumerID + ":partition:" + partition + ":count"
 	a.redis.Decr(ctx, consumerPartitionCountKey)
 
 	if len(partition) > 0 && partition[0] == '!' {

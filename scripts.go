@@ -470,30 +470,6 @@ for t = 1, #tags do
 end
 redis.call('DEL', tagsKey)
 
--- Если в партиции не осталось pending-задач — чистим partitions/ready/groups.
--- (Get уже снял задачу из ZSET, поэтому смотрим ZCARD текущего priority.)
-local queueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. priority
-local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
-if redis.call('ZCARD', queueKey) == 0 then
-	redis.call('DEL', queueKey)
-	redis.call('ZREM', prioritiesKey, priority)
-	if redis.call('ZCARD', prioritiesKey) == 0 then
-		redis.call('DEL', prioritiesKey)
-		redis.call('SREM', "queue:" .. queueName .. ":partitions", partitionCode)
-		local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups")
-		for gi = 1, #pgroups do
-			local g = pgroups[gi]
-			local readyKey = "queue:" .. queueName .. ":group:" .. g .. ":ready"
-			redis.call('ZREM', readyKey, partitionCode)
-			if redis.call('ZCARD', readyKey) == 0 then
-				redis.call('DEL', readyKey)
-				redis.call('ZREM', "queue:" .. queueName .. ":groups", g)
-			end
-		end
-		redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups")
-	end
-end
-
 -- Удаляем задачу из hash консьюмера
 redis.call('HDEL', consumerTasksKey, taskId)
 
