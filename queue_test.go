@@ -84,6 +84,10 @@ func partitionBlockKey(queueName, partition string) string {
 	return fmt.Sprintf("queue:%s:partition:%s:block", queueName, partition)
 }
 
+func queueBlockedKey(queueName string) string {
+	return fmt.Sprintf("queue:%s:blocked", queueName)
+}
+
 func payloadKey(queueName, taskID string) string {
 	return fmt.Sprintf("queue:%s:payload:%s", queueName, taskID)
 }
@@ -485,31 +489,23 @@ func TestQueue_Reject_OrderedPartition_WithWaitTime(t *testing.T) {
 	require.NotEmpty(t, got)
 	assert.Equal(t, "task-1", got[0].ID)
 
-	// Reject с waitTime=2 сек — партиция блокируется на 2 секунды
+	// Reject с waitTime=2 сек — партиция в queue:blocked
 	beforeMs := time.Now().UnixMilli()
 	err = consumer.Reject(ctx, "task-1", 2)
 	require.NoError(t, err)
 	afterMs := time.Now().UnixMilli()
 
-	// Блок-ключ: unlockAt (ms), TTL = ceil(2) = 2 сек
-	blockKey := partitionBlockKey("test-queue", "!ratelimit-partition")
-	blockVal, err := consumer.redis.Get(ctx, blockKey).Result()
+	unlockAt, err := consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "p:!ratelimit-partition").Result()
 	require.NoError(t, err)
-	unlockAt, err := strconv.ParseInt(blockVal, 10, 64)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, unlockAt, beforeMs+2000)
-	assert.LessOrEqual(t, unlockAt, afterMs+2000+50)
-
-	ttl, err := consumer.redis.TTL(ctx, blockKey).Result()
-	require.NoError(t, err)
-	assert.True(t, ttl > 0 && ttl <= 2*time.Second, "TTL должен быть около 2 сек, got %v", ttl)
+	assert.GreaterOrEqual(t, unlockAt, float64(beforeMs+2000))
+	assert.LessOrEqual(t, unlockAt, float64(afterMs+2000+50))
 
 	// Get не должен вернуть задачу — партиция заблокирована
 	got2, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, got2, "партиция заблокирована — задача не берётся")
 
-	// Ждём истечения unlockAt / TTL
+	// Ждём истечения unlockAt
 	time.Sleep(2*time.Second + 100*time.Millisecond)
 
 	// После истечения блок снимается — задача снова доступна
@@ -551,16 +547,8 @@ func TestQueue_Consume_RejectWithDelay(t *testing.T) {
 	<-handled
 	time.Sleep(100 * time.Millisecond)
 
-	// Block key: unlockAt + TTL ~2 сек
-	blockKey := partitionBlockKey("test-queue", "!ratelimit")
-	blockVal, err := consumer.redis.Get(ctx, blockKey).Result()
-	require.NoError(t, err)
-	_, err = strconv.ParseInt(blockVal, 10, 64)
-	require.NoError(t, err, "block value должен быть unlockAt (ms), got %q", blockVal)
-
-	ttl, err := consumer.redis.TTL(ctx, blockKey).Result()
-	require.NoError(t, err)
-	assert.True(t, ttl > 0 && ttl <= 2*time.Second, "TTL должен быть около 2 сек, got %v", ttl)
+	_, err = consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "p:!ratelimit").Result()
+	require.NoError(t, err, "p:!ratelimit должен быть в queue:blocked")
 
 	cancel()
 }
@@ -587,28 +575,20 @@ func TestQueue_Reject_FractionalWaitTime(t *testing.T) {
 	require.NoError(t, consumer.Reject(ctx, "task-1", 0.3))
 	afterMs := time.Now().UnixMilli()
 
-	blockKey := partitionBlockKey("test-queue", "!frac-block")
-	blockVal, err := consumer.redis.Get(ctx, blockKey).Result()
+	unlockAt, err := consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "p:!frac-block").Result()
 	require.NoError(t, err)
-	unlockAt, err := strconv.ParseInt(blockVal, 10, 64)
-	require.NoError(t, err)
-	assert.GreaterOrEqual(t, unlockAt, beforeMs+300)
-	assert.LessOrEqual(t, unlockAt, afterMs+300+50)
-
-	ttl, err := consumer.redis.TTL(ctx, blockKey).Result()
-	require.NoError(t, err)
-	assert.True(t, ttl > 0 && ttl <= time.Second, "TTL = ceil(0.3) = 1 сек, got %v", ttl)
+	assert.GreaterOrEqual(t, unlockAt, float64(beforeMs+300))
+	assert.LessOrEqual(t, unlockAt, float64(afterMs+300+50))
 
 	got2, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, got2, "до unlockAt партиция заблокирована")
 
-	// Ждём только unlockAt (~0.3s), не полный TTL ключа
 	time.Sleep(350 * time.Millisecond)
 
 	got3, err := consumer.Get(ctx)
 	require.NoError(t, err)
-	require.NotEmpty(t, got3, "после unlockAt задача доступна, даже если :block ещё не истёк по TTL")
+	require.NotEmpty(t, got3, "после unlockAt задача доступна")
 	assert.Equal(t, "task-1", got3[0].ID)
 	require.NoError(t, consumer.Ack(ctx, "task-1", 0))
 }

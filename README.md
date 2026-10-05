@@ -13,7 +13,8 @@
 - **Приоритет выполнения** — в рамках партиции задачи с большим `Priority` обрабатываются первыми
 - **Батч-добавление** — атомарная публикация нескольких задач за один вызов `Publish`
 - **Prefetch с сохранением порядка** — для ordered-партиций при reject первой задачи в батче остальные тоже reject'ятся и возвращаются в правильном порядке
-- **Rate limiting** — `RejectWithDelay` для ordered-партиций ставит TTL-блок, партиция не берётся до истечения задержки
+- **Rate limiting** — `RejectWithDelay` / `BlockGroups`: единый `queue:blocked` (партиция `p:` и группа `g:`), Get обходит только свободные группы
+- **Группы** — `Task.Groups` для rate-limit scope (напр. коннектор); без групп → `_default`
 - **Идемпотентность** — добавление по `ID` (NX), дубликаты отклоняются
 - **Теги** — индексация задач для подсчёта и массового удаления (`Admin.CountByTag` / `RemoveByTag`)
 - **Удаление без consumer** — `Admin.Remove` снимает ожидающую задачу по ID
@@ -120,19 +121,35 @@ err := producer.Publish(ctx, tasks...)
 // Атомарно: либо все добавлены, либо ошибка (в т.ч. при дубликатах)
 ```
 
-### Reject с задержкой (rate limit)
+### Группы и rate limit
+
+Группа — scope для парковки (например id коннектора). При Publish задаётся `Task.Groups`; пустые → `_default`.
 
 ```go
+producer.Publish(ctx, &redisqueue.Task{
+    ID:        "msg-1",
+    Partition: "!163865653:chat-42",
+    Groups:    []string{"conn:163865653"}, // одна группа на партицию — оптимально
+    Payload:   []byte(`{}`),
+    Scheduled: time.Now(),
+})
+
 consumer.Consume(ctx, func(task *redisqueue.Task) error {
-    if rateLimited {
-        // Партиция ! не будет браться 60 секунд (дробные OK, напр. 0.3)
-        return redisqueue.NewRejectWithDelay(errors.New("rate limit"), 60)
+    if connectorRateLimited {
+        // Паркует всю группу: Get не обходит её ready, пока не истечёт Delay.
+        // Для ordered (!) дополнительно p:{partition}.
+        return redisqueue.NewRejectWithDelay(errors.New("rate limit"), 0.3, "conn:163865653")
     }
     return nil
 })
+
+// Без задачи — Consumer или Admin:
+consumer.BlockGroups(ctx, 0.3, "conn:163865653")
+admin.BlockGroups(ctx, "my-queue", 0.3, "conn:163865653")
 ```
 
-Блок `:block` хранит `unlockAt` (unix ms). TTL ключа = `ceil(waitTime)` сек (автоочистка); Get сравнивает `now < unlockAt`, поэтому задержки меньше секунды работают точно. Старое значение `"1"` по-прежнему считается активным блоком.
+Блоки хранятся в `queue:{name}:blocked` (ZSET): member `g:{group}` / `p:{partition}`, score = `unlockAt` (ms).  
+Get один раз загружает активные блоки в Lua и обходит **свободные группы** (random offset), затем партиции группы. Legacy-ключ `partition:…:block` ещё читается (миграция), новые записи туда не пишутся.
 
 ### Пул консьюмеров
 
@@ -288,9 +305,10 @@ CI (GitHub Actions) на каждый push/PR в `main`: сборка, `go test 
 | `Producer` | Публикация задач |
 | `Consumer` | Один консьюмер (Get/Ack/Reject, Consume, GetChan) |
 | `ConsumerPool` | Пул консьюмеров |
-| `Admin` | Обслуживание: Inspect, Purge, Retry, Remove, RemoveByTag, CountByTag |
-| `Task` | Задача: ID, Partition, Priority, Payload, Scheduled, Tags |
-| `RejectWithDelay` | Ошибка для отложенного reject (rate limit) |
+| `Admin` | Обслуживание: Inspect, Purge, Retry, Remove, RemoveByTag, CountByTag, BlockGroups |
+| `Task` | Задача: ID, Partition, Priority, Payload, Scheduled, Tags, Groups |
+| `RejectWithDelay` | Ошибка для отложенного reject (`Delay`, `BlockGroups`) |
+| `Consumer.BlockGroups` | Парковка групп без задачи |
 
 ### Admin: удаление и теги
 
@@ -312,6 +330,10 @@ CI (GitHub Actions) на каждый push/PR в `main`: сборка, `go test 
 - `queue:{name}:consumer:{id}` — heartbeat консьюмера (TTL 120 сек)
 - `queue:{name}:tag:{tag}` — SET taskId по тегу
 - `queue:{name}:tags:{taskId}` — SET тегов задачи (для точечной чистки)
+- `queue:{name}:groups` — SET групп с работой
+- `queue:{name}:group:{g}:ready` — SET партиций группы
+- `queue:{name}:partition:{p}:groups` — SET групп партиции
+- `queue:{name}:blocked` — ZSET блоков (`g:…` / `p:…` → unlockAt ms)
 
 ## Обновление библиотеки (совместимость)
 
@@ -323,14 +345,23 @@ Lua-скрипты в Redis регистрируются по SHA содержи
 | Новые продюсеры **без** `Tags` + старые консьюмеры | OK: контракт данных тот же |
 | Новые продюсеры **с** `Tags` + старые консьюмеры | Работает, но старый `Ack` не чистит `tag:*` / `tags:*` → возможны «осиротевшие» id в индексе. `Remove` / `RemoveByTag` подчищают `missing` |
 | `Admin.Remove` / `RemoveByTag` / `CountByTag` | Только в новой версии; на старых воркерах методов нет |
+| Старый `partition:…:block` + новый Get | OK: Get ещё читает legacy-ключ |
+| Новый Reject (пишет только `blocked`) + старый Get | Старый Get **не видит** новый блок → сначала обновить всех consumer’ов, потом опираться на group-block |
 
-**Если начинаете использовать теги**, рекомендуемый порядок выката:
+**Теги** — порядок выката:
 
 1. Обновить консьюмеры (чтобы `Ack` чистил теги).
 2. Обновить продюсеры / сервисы, которые вызывают `Admin`.
 3. Включать публикацию с `Tags`.
 
-Останавливать очередь и «вычитывать всё старой версией» **не требуется**, если теги ещё не пишутся. Если теги уже писали новой версией, а консьюмеры старые — после обновления консьюмеров достаточно прогнать `RemoveByTag` / дождаться ack; сиротские записи в индексе тега уйдут как `missing`.
+**Группы / `blocked`** — без downtime:
+
+1. Выкатить **всех** consumer’ов с новым Get (читает `blocked` + legacy `:block`).
+2. Выкатить продюсеры с `Task.Groups` (без Groups задачи попадают в `_default`).
+3. Включать `BlockGroups` / `RejectWithDelay(..., groups)`.
+4. Позже (отдельная итерация): перестать читать legacy `:block`, почистить хвосты ключей.
+
+Останавливать очередь не требуется. Не смешивать «новый Reject + совсем старый Get» на проде — старый Get не смотрит в `queue:blocked`.
 
 ## Contributing
 

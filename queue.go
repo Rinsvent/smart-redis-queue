@@ -15,11 +15,12 @@ import (
 )
 
 // RejectWithDelay — ошибка, при которой задача возвращается в очередь с задержкой.
-// Delay задаётся в секундах (дробные OK, напр. 0.3); для ordered-партиций (!) при waitTime > 0
-// ставится блок с unlockAt. Используется для ratelimit: партиция не берётся до unlockAt.
+// Delay — секунды (дробные OK). BlockGroups — группы для парковки в queue:blocked (g:{id}).
+// Для ordered-партиций (!) дополнительно ставится p:{partition}.
 type RejectWithDelay struct {
-	Err   error
-	Delay float64 // секунды (можно дробные)
+	Err         error
+	Delay       float64  // секунды (можно дробные)
+	BlockGroups []string // опционально: заблокировать группы на Delay
 }
 
 func (e *RejectWithDelay) Error() string {
@@ -35,8 +36,9 @@ func (e *RejectWithDelay) Unwrap() error {
 
 // NewRejectWithDelay создаёт ошибку с задержкой для Reject.
 // delaySeconds — секунды, допускается дробное значение меньше 1.
-func NewRejectWithDelay(err error, delaySeconds float64) *RejectWithDelay {
-	return &RejectWithDelay{Err: err, Delay: delaySeconds}
+// blockGroups — опциональные группы для BlockGroups при Reject.
+func NewRejectWithDelay(err error, delaySeconds float64, blockGroups ...string) *RejectWithDelay {
+	return &RejectWithDelay{Err: err, Delay: delaySeconds, BlockGroups: blockGroups}
 }
 
 // ErrTasksAlreadyExist возникает, когда одна или несколько задач уже существуют.
@@ -67,29 +69,39 @@ type Task struct {
 	Payload     []byte    `json:"-"`
 	Scheduled   time.Time `json:"scheduled"`
 	Tags        []string  `json:"tags,omitempty"`        // теги для индексации / массового удаления
+	Groups      []string  `json:"groups,omitempty"`      // rate-limit / обход Get (пустые → DefaultGroup)
 	RejectCount int       `json:"rejectCount,omitempty"` // кол-во reject для расчёта задержки
 }
 
 // encodeTags сериализует теги в строку для Lua add-скрипта.
 // Пустые отбрасываются, дубликаты схлопываются; TagSeparator внутри тега запрещён.
 func encodeTags(tags []string) (string, error) {
-	if len(tags) == 0 {
+	return encodeSeparated(tags, "tag")
+}
+
+// encodeGroups сериализует группы (тот же разделитель и правила, что у тегов).
+func encodeGroups(groups []string) (string, error) {
+	return encodeSeparated(groups, "group")
+}
+
+func encodeSeparated(items []string, kind string) (string, error) {
+	if len(items) == 0 {
 		return "", nil
 	}
-	seen := make(map[string]struct{}, len(tags))
-	parts := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		if tag == "" {
+	seen := make(map[string]struct{}, len(items))
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		if item == "" {
 			continue
 		}
-		if strings.Contains(tag, TagSeparator) {
-			return "", fmt.Errorf("tag %q contains forbidden separator %q", tag, TagSeparator)
+		if strings.Contains(item, TagSeparator) {
+			return "", fmt.Errorf("%s %q contains forbidden separator %q", kind, item, TagSeparator)
 		}
-		if _, ok := seen[tag]; ok {
+		if _, ok := seen[item]; ok {
 			continue
 		}
-		seen[tag] = struct{}{}
-		parts = append(parts, tag)
+		seen[item] = struct{}{}
+		parts = append(parts, item)
 	}
 	return strings.Join(parts, TagSeparator), nil
 }
@@ -114,7 +126,7 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 		return nil
 	}
 
-	args := make([]interface{}, 0, 2+len(tasks)*6)
+	args := make([]interface{}, 0, 2+len(tasks)*7)
 	args = append(args, p.queueName, len(tasks))
 
 	for _, task := range tasks {
@@ -130,7 +142,11 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 		if err != nil {
 			return err
 		}
-		args = append(args, task.ID, task.Partition, task.Priority, scheduled, string(task.Payload), tags)
+		groups, err := encodeGroups(task.Groups)
+		if err != nil {
+			return err
+		}
+		args = append(args, task.ID, task.Partition, task.Priority, scheduled, string(task.Payload), tags, groups)
 	}
 
 	script := getAddScript()
@@ -366,16 +382,17 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 		}
 
 		waitTime := 0.0
+		var blockGroups []string
 		rejectedPartitions := make(map[string]bool)
 		for _, task := range tasks {
 			select {
 			case <-ctx.Done():
-				if err := c.Reject(opCtx, task.ID, waitTime); err != nil {
+				if err := c.Reject(opCtx, task.ID, waitTime, blockGroups...); err != nil {
 					return err
 				}
 				continue
 			case <-c.stopPing:
-				if err := c.Reject(opCtx, task.ID, waitTime); err != nil {
+				if err := c.Reject(opCtx, task.ID, waitTime, blockGroups...); err != nil {
 					return err
 				}
 				continue
@@ -383,7 +400,7 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 			}
 
 			if isOrderedPartition(task.Partition) && rejectedPartitions[task.Partition] {
-				if err := c.Reject(opCtx, task.ID, waitTime); err != nil {
+				if err := c.Reject(opCtx, task.ID, waitTime, blockGroups...); err != nil {
 					return err
 				}
 				continue
@@ -394,10 +411,15 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 					rejectedPartitions[task.Partition] = true
 				}
 				var rejectErr *RejectWithDelay
-				if errors.As(err, &rejectErr) && rejectErr.Delay > 0 {
-					waitTime = rejectErr.Delay
+				if errors.As(err, &rejectErr) {
+					if rejectErr.Delay > 0 {
+						waitTime = rejectErr.Delay
+					}
+					if len(rejectErr.BlockGroups) > 0 {
+						blockGroups = rejectErr.BlockGroups
+					}
 				}
-				if ackErr := c.Reject(opCtx, task.ID, waitTime); ackErr != nil {
+				if ackErr := c.Reject(opCtx, task.ID, waitTime, blockGroups...); ackErr != nil {
 					return ackErr
 				}
 			} else {
@@ -510,17 +532,20 @@ func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl time.D
 }
 
 // Reject отклоняет задачу и возвращает её обратно в очередь.
-// waitTime — в секундах (дробные OK); для ordered-партиций (!) при waitTime > 0 ставится блок
-// с unlockAt = now+waitTime; партиция не берётся, пока now < unlockAt.
-// TTL ключа = ceil(waitTime) сек — для автоочистки; точность блокировки по значению unlockAt.
-func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64) error {
-	script := getRejectScript()
+// waitTime — секунды (дробные OK). При waitTime > 0 для ordered-партиций (!) в
+// queue:{name}:blocked пишется p:{partition}; blockGroups — дополнительно g:{group}.
+func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, blockGroups ...string) error {
+	groupsStr, err := encodeGroups(blockGroups)
+	if err != nil {
+		return err
+	}
 
-	result, err := script.Run(ctx, c.redis, []string{},
+	result, err := getRejectScript().Run(ctx, c.redis, []string{},
 		c.queueName,
 		taskID,
 		c.consumerID,
 		waitTime,
+		groupsStr,
 	).Result()
 
 	if err != nil {
@@ -531,6 +556,27 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64) 
 		return fmt.Errorf("task not found in processing or not owned by this consumer")
 	}
 
+	return nil
+}
+
+// BlockGroups паркует группы на waitTime секунд (без задачи): ZADD g:{group} в blocked.
+// Get не обходит ready этих групп, пока now < unlockAt.
+func (c *Consumer) BlockGroups(ctx context.Context, waitTime float64, groups ...string) error {
+	return blockGroups(ctx, c.redis, c.queueName, waitTime, groups...)
+}
+
+func blockGroups(ctx context.Context, rdb *redis.Client, queueName string, waitTime float64, groups ...string) error {
+	if waitTime <= 0 || len(groups) == 0 {
+		return nil
+	}
+	groupsStr, err := encodeGroups(groups)
+	if err != nil {
+		return err
+	}
+	_, err = getBlockGroupsScript().Run(ctx, rdb, []string{}, queueName, waitTime, groupsStr).Result()
+	if err != nil {
+		return fmt.Errorf("failed to block groups: %w", err)
+	}
 	return nil
 }
 

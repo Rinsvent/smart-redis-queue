@@ -129,8 +129,7 @@ func (a *Admin) queueStats(ctx context.Context, queueName, partitionFilter strin
 		lockKey := "queue:" + queueName + ":partition:" + part + ":lock"
 		ps.Locked = a.redis.Exists(ctx, lockKey).Val() > 0
 
-		blockKey := "queue:" + queueName + ":partition:" + part + ":block"
-		ps.Blocked = a.isPartitionBlocked(ctx, blockKey)
+		ps.Blocked = a.isPartitionBlocked(ctx, queueName, part)
 
 		for _, cid := range consumers {
 			tasksKey := "queue:" + queueName + ":consumer:" + cid + ":tasks"
@@ -150,8 +149,27 @@ func (a *Admin) queueStats(ctx context.Context, queueName, partitionFilter strin
 	return stats, nil
 }
 
-// isPartitionBlocked проверяет :block: "1" (legacy) или unlockAt(ms) > now.
-func (a *Admin) isPartitionBlocked(ctx context.Context, blockKey string) bool {
+// isPartitionBlocked: queue:blocked (p: / g:) или legacy partition:...:block.
+func (a *Admin) isPartitionBlocked(ctx context.Context, queueName, partition string) bool {
+	nowMs := float64(time.Now().UnixMilli())
+	if t, err := a.redis.Time(ctx).Result(); err == nil {
+		nowMs = float64(t.UnixMilli())
+	}
+	blockedKey := "queue:" + queueName + ":blocked"
+	if score, err := a.redis.ZScore(ctx, blockedKey, "p:"+partition).Result(); err == nil && nowMs < score {
+		return true
+	}
+	groups, _ := a.redis.SMembers(ctx, "queue:"+queueName+":partition:"+partition+":groups").Result()
+	if len(groups) == 0 {
+		groups = []string{DefaultGroup}
+	}
+	for _, g := range groups {
+		if score, err := a.redis.ZScore(ctx, blockedKey, "g:"+g).Result(); err == nil && nowMs < score {
+			return true
+		}
+	}
+	// legacy
+	blockKey := "queue:" + queueName + ":partition:" + partition + ":block"
 	val, err := a.redis.Get(ctx, blockKey).Result()
 	if err == redis.Nil || val == "" {
 		return false
@@ -163,11 +181,12 @@ func (a *Admin) isPartitionBlocked(ctx context.Context, blockKey string) bool {
 	if err != nil {
 		return true
 	}
-	nowMs := float64(time.Now().UnixMilli())
-	if t, err := a.redis.Time(ctx).Result(); err == nil {
-		nowMs = float64(t.UnixMilli())
-	}
 	return nowMs < unlockAt
+}
+
+// BlockGroups паркует группы на waitTime секунд (см. Consumer.BlockGroups).
+func (a *Admin) BlockGroups(ctx context.Context, queueName string, waitTime float64, groups ...string) error {
+	return blockGroups(ctx, a.redis, queueName, waitTime, groups...)
 }
 
 // TaskRemoval — результат удаления одной задачи (Remove / RemoveByTag).
