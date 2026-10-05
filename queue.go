@@ -15,11 +15,11 @@ import (
 )
 
 // RejectWithDelay — ошибка, при которой задача возвращается в очередь с задержкой.
-// Delay задаётся в секундах; для ordered-партиций (!) при waitTime > 0 ставится TTL-блок.
-// Используется для ratelimit: партиция не берётся до истечения задержки.
+// Delay задаётся в секундах (дробные OK, напр. 0.3); для ordered-партиций (!) при waitTime > 0
+// ставится блок с unlockAt. Используется для ratelimit: партиция не берётся до unlockAt.
 type RejectWithDelay struct {
 	Err   error
-	Delay int // секунды
+	Delay float64 // секунды (можно дробные)
 }
 
 func (e *RejectWithDelay) Error() string {
@@ -34,7 +34,8 @@ func (e *RejectWithDelay) Unwrap() error {
 }
 
 // NewRejectWithDelay создаёт ошибку с задержкой для Reject.
-func NewRejectWithDelay(err error, delaySeconds int) *RejectWithDelay {
+// delaySeconds — секунды, допускается дробное значение меньше 1.
+func NewRejectWithDelay(err error, delaySeconds float64) *RejectWithDelay {
 	return &RejectWithDelay{Err: err, Delay: delaySeconds}
 }
 
@@ -364,7 +365,7 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 			continue
 		}
 
-		waitTime := 0
+		waitTime := 0.0
 		rejectedPartitions := make(map[string]bool)
 		for _, task := range tasks {
 			select {
@@ -509,9 +510,10 @@ func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl time.D
 }
 
 // Reject отклоняет задачу и возвращает её обратно в очередь.
-// waitTime — в секундах; для ordered-партиций (!) при waitTime > 0 ставится TTL-блок,
-// партиция не берётся до истечения (кейс ratelimit: нет смысла гонять одно сообщение туда-обратно).
-func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime int) error {
+// waitTime — в секундах (дробные OK); для ordered-партиций (!) при waitTime > 0 ставится блок
+// с unlockAt = now+waitTime; партиция не берётся, пока now < unlockAt.
+// TTL ключа = ceil(waitTime) сек — для автоочистки; точность блокировки по значению unlockAt.
+func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64) error {
 	script := getRejectScript()
 
 	result, err := script.Run(ctx, c.redis, []string{},

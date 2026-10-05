@@ -153,15 +153,24 @@ local results = {}
 -- Партиции с префиксом "!" блокируются (эксклюзивны для одного консьюмера).
 -- Тот же консьюмер может брать несколько задач подряд; блокировка снимается
 -- только когда все задачи из партиции акнуты или реджекнуты.
--- Ключ :block с TTL блокирует партицию до истечения (Reject с waitTime при ratelimit).
+-- Ключ :block блокирует партицию до unlockAt (ms) или пока жив legacy-ключ "1".
 local function getFromPartition(partition)
     local needsLock = partition:sub(1, 1) == "!"
     
     if needsLock then
         -- Проверяем TTL-блок (ratelimit cooldown)
         local partitionBlockKey = "queue:" .. queueName .. ":partition:" .. partition .. ":block"
-        if redis.call('EXISTS', partitionBlockKey) == 1 then
-            return nil
+        local blockVal = redis.call('GET', partitionBlockKey)
+        if blockVal ~= false then
+            if blockVal == "1" then
+                -- Старый формат: ключ с TTL, значение-маркер
+                return nil
+            end
+            local unlockAt = tonumber(blockVal)
+            if unlockAt and now < unlockAt then
+                return nil
+            end
+            -- unlockAt уже прошёл, а TTL ключа ещё жив — партиция доступна
         end
         local partitionLockKey = "queue:" .. queueName .. ":partition:" .. partition .. ":lock"
         local lockOwner = redis.call('GET', partitionLockKey)
@@ -328,11 +337,11 @@ return 1
 // getRejectScript возвращает Lua скрипт для отклонения задачи.
 // Для ordered-партиций (префикс "!"): priority+1, задача в конец очереди с новым приоритетом —
 // при Get сначала берутся задачи с большим приоритетом, порядок сохраняется.
-// При waitTime > 0 для ordered-партиций ставится TTL-блок: партиция не берётся до истечения (ratelimit).
+// При waitTime > 0 для ordered-партиций: :block = unlockAt(ms), TTL = ceil(waitTime) сек.
 // ARGV[1] = queue name
 // ARGV[2] = task ID
 // ARGV[3] = consumer ID
-// ARGV[4] = waitTime в секундах (0 = без блокировки)
+// ARGV[4] = waitTime в секундах (дробное OK; 0 = без блокировки)
 var rejectScript = redis.NewScript(`
 local queueName = ARGV[1]
 local taskId = ARGV[2]
@@ -362,6 +371,8 @@ end
 -- Используем текущее время для возврата задачи
 local now = redis.call('TIME')
 local nowMs = now[1] * 1000 + math.floor(now[2] / 1000)
+-- Чистое время для :block (без tie-break reject_seq)
+local blockNowMs = nowMs
 
 local newPriority = priority
 local needsLockUnlock = partitionCode:sub(1, 1) == "!"
@@ -403,10 +414,15 @@ if needsLockUnlock and consumerPartitionCount == 0 then
     end
 end
 
--- При waitTime > 0 ставим TTL-блок: партиция не берётся до истечения (ratelimit)
+-- При waitTime > 0 ставим блок: unlockAt = now + waitTime*1000; TTL = ceil(waitTime)
 if needsLockUnlock and waitTime > 0 then
 	local partitionBlockKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":block"
-	redis.call('SET', partitionBlockKey, '1', 'EX', waitTime)
+	local ttlSec = math.ceil(waitTime)
+	if ttlSec < 1 then
+		ttlSec = 1
+	end
+	local unlockAt = math.floor(blockNowMs + waitTime * 1000)
+	redis.call('SET', partitionBlockKey, tostring(unlockAt), 'EX', ttlSec)
 end
 
 -- Удаляем задачу из hash консьюмера (prefetch)

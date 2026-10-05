@@ -486,14 +486,19 @@ func TestQueue_Reject_OrderedPartition_WithWaitTime(t *testing.T) {
 	assert.Equal(t, "task-1", got[0].ID)
 
 	// Reject с waitTime=2 сек — партиция блокируется на 2 секунды
+	beforeMs := time.Now().UnixMilli()
 	err = consumer.Reject(ctx, "task-1", 2)
 	require.NoError(t, err)
+	afterMs := time.Now().UnixMilli()
 
-	// Блок-ключ должен существовать с TTL ~2 сек
+	// Блок-ключ: unlockAt (ms), TTL = ceil(2) = 2 сек
 	blockKey := partitionBlockKey("test-queue", "!ratelimit-partition")
-	exists, err := consumer.redis.Exists(ctx, blockKey).Result()
+	blockVal, err := consumer.redis.Get(ctx, blockKey).Result()
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), exists, "block key должен быть установлен")
+	unlockAt, err := strconv.ParseInt(blockVal, 10, 64)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, unlockAt, beforeMs+2000)
+	assert.LessOrEqual(t, unlockAt, afterMs+2000+50)
 
 	ttl, err := consumer.redis.TTL(ctx, blockKey).Result()
 	require.NoError(t, err)
@@ -504,7 +509,7 @@ func TestQueue_Reject_OrderedPartition_WithWaitTime(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got2, "партиция заблокирована — задача не берётся")
 
-	// Ждём истечения TTL
+	// Ждём истечения unlockAt / TTL
 	time.Sleep(2*time.Second + 100*time.Millisecond)
 
 	// После истечения блок снимается — задача снова доступна
@@ -546,17 +551,93 @@ func TestQueue_Consume_RejectWithDelay(t *testing.T) {
 	<-handled
 	time.Sleep(100 * time.Millisecond)
 
-	// Block key должен быть установлен с TTL ~2 сек
+	// Block key: unlockAt + TTL ~2 сек
 	blockKey := partitionBlockKey("test-queue", "!ratelimit")
-	exists, err := consumer.redis.Exists(ctx, blockKey).Result()
+	blockVal, err := consumer.redis.Get(ctx, blockKey).Result()
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), exists, "block key должен быть установлен при RejectWithDelay")
+	_, err = strconv.ParseInt(blockVal, 10, 64)
+	require.NoError(t, err, "block value должен быть unlockAt (ms), got %q", blockVal)
 
 	ttl, err := consumer.redis.TTL(ctx, blockKey).Result()
 	require.NoError(t, err)
 	assert.True(t, ttl > 0 && ttl <= 2*time.Second, "TTL должен быть около 2 сек, got %v", ttl)
 
 	cancel()
+}
+
+// TestQueue_Reject_FractionalWaitTime: дробный waitTime — точная блокировка по unlockAt,
+// TTL округляется вверх; после unlockAt Get доступен даже если ключ ещё жив.
+func TestQueue_Reject_FractionalWaitTime(t *testing.T) {
+	producer, consumer, _ := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	ctx := context.Background()
+
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID:        "task-1",
+		Partition: "!frac-block",
+		Payload:   []byte("x"),
+		Scheduled: time.Now().Add(-time.Second),
+	}))
+
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+
+	beforeMs := time.Now().UnixMilli()
+	require.NoError(t, consumer.Reject(ctx, "task-1", 0.3))
+	afterMs := time.Now().UnixMilli()
+
+	blockKey := partitionBlockKey("test-queue", "!frac-block")
+	blockVal, err := consumer.redis.Get(ctx, blockKey).Result()
+	require.NoError(t, err)
+	unlockAt, err := strconv.ParseInt(blockVal, 10, 64)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, unlockAt, beforeMs+300)
+	assert.LessOrEqual(t, unlockAt, afterMs+300+50)
+
+	ttl, err := consumer.redis.TTL(ctx, blockKey).Result()
+	require.NoError(t, err)
+	assert.True(t, ttl > 0 && ttl <= time.Second, "TTL = ceil(0.3) = 1 сек, got %v", ttl)
+
+	got2, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, got2, "до unlockAt партиция заблокирована")
+
+	// Ждём только unlockAt (~0.3s), не полный TTL ключа
+	time.Sleep(350 * time.Millisecond)
+
+	got3, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, got3, "после unlockAt задача доступна, даже если :block ещё не истёк по TTL")
+	assert.Equal(t, "task-1", got3[0].ID)
+	require.NoError(t, consumer.Ack(ctx, "task-1", 0))
+}
+
+// TestQueue_Reject_BlockLegacyFormat: значение "1" (старый формат) по-прежнему блокирует.
+func TestQueue_Reject_BlockLegacyFormat(t *testing.T) {
+	producer, consumer, _ := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	ctx := context.Background()
+
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID:        "task-1",
+		Partition: "!legacy-block",
+		Payload:   []byte("x"),
+		Scheduled: time.Now().Add(-time.Second),
+	}))
+
+	blockKey := partitionBlockKey("test-queue", "!legacy-block")
+	require.NoError(t, consumer.redis.Set(ctx, blockKey, "1", 2*time.Second).Err())
+
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, got, "legacy block=1 должен блокировать партицию")
+
+	require.NoError(t, consumer.redis.Del(ctx, blockKey).Err())
+	got2, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, got2)
+	require.NoError(t, consumer.Ack(ctx, got2[0].ID, 0))
 }
 
 // TestQueue_Reject_NonOrderedPartition_WaitTimeIgnored проверяет, что для не-ordered партиции

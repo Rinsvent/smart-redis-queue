@@ -122,12 +122,14 @@ err := producer.Publish(ctx, tasks...)
 ```go
 consumer.Consume(ctx, func(task *redisqueue.Task) error {
     if rateLimited {
-        // Партиция ! не будет браться 60 секунд
+        // Партиция ! не будет браться 60 секунд (дробные OK, напр. 0.3)
         return redisqueue.NewRejectWithDelay(errors.New("rate limit"), 60)
     }
     return nil
 })
 ```
+
+Блок `:block` хранит `unlockAt` (unix ms). TTL ключа = `ceil(waitTime)` сек (автоочистка); Get сравнивает `now < unlockAt`, поэтому задержки меньше секунды работают точно. Старое значение `"1"` по-прежнему считается активным блоком.
 
 ### Пул консьюмеров
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
@@ -129,7 +130,7 @@ func (a *Admin) queueStats(ctx context.Context, queueName, partitionFilter strin
 		ps.Locked = a.redis.Exists(ctx, lockKey).Val() > 0
 
 		blockKey := "queue:" + queueName + ":partition:" + part + ":block"
-		ps.Blocked = a.redis.Exists(ctx, blockKey).Val() > 0
+		ps.Blocked = a.isPartitionBlocked(ctx, blockKey)
 
 		for _, cid := range consumers {
 			tasksKey := "queue:" + queueName + ":consumer:" + cid + ":tasks"
@@ -147,6 +148,26 @@ func (a *Admin) queueStats(ctx context.Context, queueName, partitionFilter strin
 	}
 
 	return stats, nil
+}
+
+// isPartitionBlocked проверяет :block: "1" (legacy) или unlockAt(ms) > now.
+func (a *Admin) isPartitionBlocked(ctx context.Context, blockKey string) bool {
+	val, err := a.redis.Get(ctx, blockKey).Result()
+	if err == redis.Nil || val == "" {
+		return false
+	}
+	if val == "1" {
+		return true
+	}
+	unlockAt, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		return true
+	}
+	nowMs := float64(time.Now().UnixMilli())
+	if t, err := a.redis.Time(ctx).Result(); err == nil {
+		nowMs = float64(t.UnixMilli())
+	}
+	return nowMs < unlockAt
 }
 
 // TaskRemoval — результат удаления одной задачи (Remove / RemoveByTag).
