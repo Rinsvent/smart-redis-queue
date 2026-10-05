@@ -1210,10 +1210,10 @@ func TestQueue_ConsumeWithHandler_Reject(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	processed := 0
+	var processed atomic.Int32
 	go func() {
 		consumer.Consume(ctx, func(task *Task) error {
-			processed++
+			processed.Add(1)
 			if task.ID == "task-reject" {
 				return fmt.Errorf("intentional reject")
 			}
@@ -1226,7 +1226,7 @@ func TestQueue_ConsumeWithHandler_Reject(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Задача отклонена и вернулась в очередь, консьюмер выходил по ctx
-	assert.GreaterOrEqual(t, processed, 1)
+	assert.GreaterOrEqual(t, processed.Load(), int32(1))
 }
 
 // TestQueue_Reject_OrderedPartition_PreservesOrder проверяет, что при reject задач из
