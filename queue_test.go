@@ -80,10 +80,6 @@ func partitionLockKey(queueName, partition string) string {
 	return fmt.Sprintf("queue:%s:partition:%s:lock", queueName, partition)
 }
 
-func partitionBlockKey(queueName, partition string) string {
-	return fmt.Sprintf("queue:%s:partition:%s:block", queueName, partition)
-}
-
 func queueBlockedKey(queueName string) string {
 	return fmt.Sprintf("queue:%s:blocked", queueName)
 }
@@ -495,7 +491,7 @@ func TestQueue_Reject_OrderedPartition_WithWaitTime(t *testing.T) {
 	require.NoError(t, err)
 	afterMs := time.Now().UnixMilli()
 
-	unlockAt, err := consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "p:!ratelimit-partition").Result()
+	unlockAt, err := consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "!ratelimit-partition").Result()
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, unlockAt, float64(beforeMs+2000))
 	assert.LessOrEqual(t, unlockAt, float64(afterMs+2000+50))
@@ -547,8 +543,8 @@ func TestQueue_Consume_RejectWithDelay(t *testing.T) {
 	<-handled
 	time.Sleep(100 * time.Millisecond)
 
-	_, err = consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "p:!ratelimit").Result()
-	require.NoError(t, err, "p:!ratelimit должен быть в queue:blocked")
+	_, err = consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "!ratelimit").Result()
+	require.NoError(t, err, "!ratelimit должен быть в queue:blocked")
 
 	cancel()
 }
@@ -575,7 +571,7 @@ func TestQueue_Reject_FractionalWaitTime(t *testing.T) {
 	require.NoError(t, consumer.Reject(ctx, "task-1", 0.3))
 	afterMs := time.Now().UnixMilli()
 
-	unlockAt, err := consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "p:!frac-block").Result()
+	unlockAt, err := consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "!frac-block").Result()
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, unlockAt, float64(beforeMs+300))
 	assert.LessOrEqual(t, unlockAt, float64(afterMs+300+50))
@@ -591,33 +587,6 @@ func TestQueue_Reject_FractionalWaitTime(t *testing.T) {
 	require.NotEmpty(t, got3, "после unlockAt задача доступна")
 	assert.Equal(t, "task-1", got3[0].ID)
 	require.NoError(t, consumer.Ack(ctx, "task-1", 0))
-}
-
-// TestQueue_Reject_BlockLegacyFormat: значение "1" (старый формат) по-прежнему блокирует.
-func TestQueue_Reject_BlockLegacyFormat(t *testing.T) {
-	producer, consumer, _ := setupTestQueue(t)
-	consumer.SetPrefetchCount(1)
-	ctx := context.Background()
-
-	require.NoError(t, producer.Publish(ctx, &Task{
-		ID:        "task-1",
-		Partition: "!legacy-block",
-		Payload:   []byte("x"),
-		Scheduled: time.Now().Add(-time.Second),
-	}))
-
-	blockKey := partitionBlockKey("test-queue", "!legacy-block")
-	require.NoError(t, consumer.redis.Set(ctx, blockKey, "1", 2*time.Second).Err())
-
-	got, err := consumer.Get(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, got, "legacy block=1 должен блокировать партицию")
-
-	require.NoError(t, consumer.redis.Del(ctx, blockKey).Err())
-	got2, err := consumer.Get(ctx)
-	require.NoError(t, err)
-	require.NotEmpty(t, got2)
-	require.NoError(t, consumer.Ack(ctx, got2[0].ID, 0))
 }
 
 // TestQueue_Reject_NonOrderedPartition_WaitTimeIgnored проверяет, что для не-ordered партиции
@@ -639,17 +608,12 @@ func TestQueue_Reject_NonOrderedPartition_WaitTimeIgnored(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, got)
 
-	// Reject с waitTime=10 — для не-ordered ничего не должно произойти
 	err = consumer.Reject(ctx, "task-1", 10)
 	require.NoError(t, err)
 
-	// Block key не должен существовать для не-ordered партиции
-	blockKey := partitionBlockKey("test-queue", "shared-partition")
-	exists, err := consumer.redis.Exists(ctx, blockKey).Result()
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), exists, "block key не должен ставиться для не-ordered")
+	_, err = consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "shared-partition").Result()
+	require.ErrorIs(t, err, redis.Nil, "blocked не должен ставиться для не-ordered")
 
-	// Задача сразу доступна снова
 	got2, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, got2)
@@ -677,10 +641,8 @@ func TestQueue_Reject_OrderedPartition_WaitTimeZero(t *testing.T) {
 	err = consumer.Reject(ctx, "task-1", 0)
 	require.NoError(t, err)
 
-	blockKey := partitionBlockKey("test-queue", "!ordered")
-	exists, err := consumer.redis.Exists(ctx, blockKey).Result()
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), exists, "при waitTime=0 block не ставится")
+	_, err = consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "!ordered").Result()
+	require.ErrorIs(t, err, redis.Nil, "при waitTime=0 block не ставится")
 
 	got2, err := consumer.Get(ctx)
 	require.NoError(t, err)

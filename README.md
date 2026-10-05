@@ -13,7 +13,7 @@
 - **Приоритет выполнения** — в рамках партиции задачи с большим `Priority` обрабатываются первыми
 - **Батч-добавление** — атомарная публикация нескольких задач за один вызов `Publish`
 - **Prefetch с сохранением порядка** — для ordered-партиций при reject первой задачи в батче остальные тоже reject'ятся и возвращаются в правильном порядке
-- **Rate limiting** — `RejectWithDelay` / `BlockGroups`: единый `queue:blocked` (партиция `p:` и группа `g:`), Get обходит только свободные группы
+- **Rate limiting** — `RejectWithDelay` / `BlockGroups`: группы через score в `groups`, партиции через `blocked` (`p:`); Get обходит только свободные группы
 - **Группы** — `Task.Groups` для rate-limit scope (напр. коннектор); без групп → `_default`
 - **Идемпотентность** — добавление по `ID` (NX), дубликаты отклоняются
 - **Теги** — индексация задач для подсчёта и массового удаления (`Admin.CountByTag` / `RemoveByTag`)
@@ -137,7 +137,7 @@ producer.Publish(ctx, &redisqueue.Task{
 consumer.Consume(ctx, func(task *redisqueue.Task) error {
     if connectorRateLimited {
         // Паркует всю группу: Get не обходит её ready, пока не истечёт Delay.
-        // Для ordered (!) дополнительно p:{partition}.
+        // Для ordered (!) дополнительно блокируется сама партиция в blocked.
         return redisqueue.NewRejectWithDelay(errors.New("rate limit"), 0.3, "conn:163865653")
     }
     return nil
@@ -148,8 +148,10 @@ consumer.BlockGroups(ctx, 0.3, "conn:163865653")
 admin.BlockGroups(ctx, "my-queue", 0.3, "conn:163865653")
 ```
 
-Блоки хранятся в `queue:{name}:blocked` (ZSET): member `g:{group}` / `p:{partition}`, score = `unlockAt` (ms).  
-Get один раз загружает активные блоки в Lua и обходит **свободные группы** (random offset), затем партиции группы. Legacy-ключ `partition:…:block` ещё читается (миграция), новые записи туда не пишутся.
+Группы: `queue:{name}:groups` (ZSET) — score `≤ now` = свободна, `> now` = блок; свободные = `ZRANGEBYSCORE -inf now`.  
+Партиции (ordered Reject): `queue:{name}:blocked` — member=partition → unlockAt.  
+Ready группы обходится через `ZRANGE` с random index (не грузит миллионы партиций в Lua разом).  
+На миграции: `consumer.SetLegacyPartitionsFallback(true)`, пока старые продюсеры без Groups.
 
 ### Пул консьюмеров
 
@@ -330,10 +332,10 @@ CI (GitHub Actions) на каждый push/PR в `main`: сборка, `go test 
 - `queue:{name}:consumer:{id}` — heartbeat консьюмера (TTL 120 сек)
 - `queue:{name}:tag:{tag}` — SET taskId по тегу
 - `queue:{name}:tags:{taskId}` — SET тегов задачи (для точечной чистки)
-- `queue:{name}:groups` — SET групп с работой
-- `queue:{name}:group:{g}:ready` — SET партиций группы
+- `queue:{name}:groups` — ZSET групп (`≤now` = свободна, `>now` = блок)
+- `queue:{name}:group:{g}:ready` — ZSET партиций группы (score=0; обход ZRANGE с random index)
 - `queue:{name}:partition:{p}:groups` — SET групп партиции
-- `queue:{name}:blocked` — ZSET блоков (`g:…` / `p:…` → unlockAt ms)
+- `queue:{name}:blocked` — ZSET блоков партиций (member=partition → unlockAt ms)
 
 ## Обновление библиотеки (совместимость)
 
@@ -345,8 +347,7 @@ Lua-скрипты в Redis регистрируются по SHA содержи
 | Новые продюсеры **без** `Tags` + старые консьюмеры | OK: контракт данных тот же |
 | Новые продюсеры **с** `Tags` + старые консьюмеры | Работает, но старый `Ack` не чистит `tag:*` / `tags:*` → возможны «осиротевшие» id в индексе. `Remove` / `RemoveByTag` подчищают `missing` |
 | `Admin.Remove` / `RemoveByTag` / `CountByTag` | Только в новой версии; на старых воркерах методов нет |
-| Старый `partition:…:block` + новый Get | OK: Get ещё читает legacy-ключ |
-| Новый Reject (пишет только `blocked`) + старый Get | Старый Get **не видит** новый блок → сначала обновить всех consumer’ов, потом опираться на group-block |
+| Новый Reject (пишет `groups` score / `blocked`) + старый Get | Старый Get **не видит** новый блок → сначала обновить всех consumer’ов |
 
 **Теги** — порядок выката:
 
@@ -356,12 +357,13 @@ Lua-скрипты в Redis регистрируются по SHA содержи
 
 **Группы / `blocked`** — без downtime:
 
-1. Выкатить **всех** consumer’ов с новым Get (читает `blocked` + legacy `:block`).
-2. Выкатить продюсеры с `Task.Groups` (без Groups задачи попадают в `_default`).
-3. Включать `BlockGroups` / `RejectWithDelay(..., groups)`.
-4. Позже (отдельная итерация): перестать читать legacy `:block`, почистить хвосты ключей.
+1. Выкатить consumer’ов с новым Get; на время миграции: `SetLegacyPartitionsFallback(true)` (обход `partitions`, если `groups` ещё пуст).
+2. Выкатить продюсеры с `Task.Groups` (без Groups → `_default`).
+3. Когда все задачи идут через Groups: `SetLegacyPartitionsFallback(false)` (дефолт) — только `ZRANGEBYSCORE` свободных групп.
+4. Включать `BlockGroups` / `RejectWithDelay(..., groups)`.
+5. Флаг fallback удалим в следующем major.
 
-Останавливать очередь не требуется. Не смешивать «новый Reject + совсем старый Get» на проде — старый Get не смотрит в `queue:blocked`.
+С нуля: fallback не включать. Не смешивать «новый Reject + старый Get» — старый Get не видит блоки групп/партиций.
 
 ## Contributing
 

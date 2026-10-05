@@ -15,8 +15,8 @@ import (
 )
 
 // RejectWithDelay — ошибка, при которой задача возвращается в очередь с задержкой.
-// Delay — секунды (дробные OK). BlockGroups — группы для парковки в queue:blocked (g:{id}).
-// Для ordered-партиций (!) дополнительно ставится p:{partition}.
+// Delay — секунды (дробные OK). BlockGroups — группы для парковки (score unlockAt в groups).
+// Для ordered-партиций (!) дополнительно ставится partition в blocked.
 type RejectWithDelay struct {
 	Err         error
 	Delay       float64  // секунды (можно дробные)
@@ -231,8 +231,11 @@ type Consumer struct {
 	pollInterval                time.Duration
 	prefetchCount               int
 	checkDeadConsumerLocksOnGet bool
-	idempotencyTtl              time.Duration
-	stopPing                    chan struct{}
+	// legacyPartitionsFallback — миграция: если groups ZSET пуст, обходить partitions.
+	// На новых инсталляциях false (дефолт). Удалим в следующем major.
+	legacyPartitionsFallback bool
+	idempotencyTtl           time.Duration
+	stopPing                 chan struct{}
 }
 
 // NewConsumer создает нового консьюмера и запускает ping горутину.
@@ -253,6 +256,7 @@ func newConsumer(redisClient *redis.Client, queueName string, consumerID string,
 		pollInterval:                1 * time.Second,
 		prefetchCount:               5,
 		checkDeadConsumerLocksOnGet: false,
+		legacyPartitionsFallback:    false,
 		idempotencyTtl:              0,
 		stopPing:                    make(chan struct{}),
 	}
@@ -293,6 +297,12 @@ func (c *Consumer) SetPrefetchCount(n int) {
 // SetCheckDeadConsumerLocksOnGet флаг проверки блокировок при get
 func (c *Consumer) SetCheckDeadConsumerLocksOnGet(cd bool) {
 	c.checkDeadConsumerLocksOnGet = cd
+}
+
+// SetLegacyPartitionsFallback включает обход queue:partitions, если groups ещё пуст
+// (миграция со старых продюсеров). После выката продюсеров с Groups — выключить.
+func (c *Consumer) SetLegacyPartitionsFallback(enabled bool) {
+	c.legacyPartitionsFallback = enabled
 }
 
 // SetIdempotencyTtl задает количество секунд до удаления ключа задачи после ack. Пока жив ключ задачи с таким же requestId будут пропущены (по умолчанию 0 - сразу удаляем после ack)
@@ -459,11 +469,16 @@ func (c *Consumer) ping(ctx context.Context) error {
 func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 	script := getGetScript()
 
+	legacy := "0"
+	if c.legacyPartitionsFallback {
+		legacy = "1"
+	}
 	result, err := script.Run(ctx, c.redis, []string{},
 		c.queueName,
 		c.consumerID,
 		c.prefetchCount,
 		c.checkDeadConsumerLocksOnGet,
+		legacy,
 	).Result()
 
 	if err != nil {
@@ -533,7 +548,7 @@ func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl time.D
 
 // Reject отклоняет задачу и возвращает её обратно в очередь.
 // waitTime — секунды (дробные OK). При waitTime > 0 для ordered-партиций (!) в
-// queue:{name}:blocked пишется p:{partition}; blockGroups — дополнительно g:{group}.
+// queue:{name}:blocked пишется partition; blockGroups — score unlockAt в groups.
 func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, blockGroups ...string) error {
 	groupsStr, err := encodeGroups(blockGroups)
 	if err != nil {
@@ -559,7 +574,7 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, 
 	return nil
 }
 
-// BlockGroups паркует группы на waitTime секунд (без задачи): ZADD g:{group} в blocked.
+// BlockGroups паркует группы на waitTime секунд (без задачи): ZADD group → unlockAt в groups.
 // Get не обходит ready этих групп, пока now < unlockAt.
 func (c *Consumer) BlockGroups(ctx context.Context, waitTime float64, groups ...string) error {
 	return blockGroups(ctx, c.redis, c.queueName, waitTime, groups...)

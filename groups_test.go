@@ -33,8 +33,9 @@ func TestQueue_Groups_BlockGroupsSkipsWholeGroup(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got2, "connA ещё заблокирована")
 
-	_, err = rdb.ZScore(ctx, queueBlockedKey("test-queue"), "g:connA").Result()
+	score, err := rdb.ZScore(ctx, "queue:test-queue:groups", "connA").Result()
 	require.NoError(t, err)
+	assert.Greater(t, score, float64(time.Now().UnixMilli()))
 }
 
 func TestQueue_Groups_RejectWithBlockGroups(t *testing.T) {
@@ -45,33 +46,28 @@ func TestQueue_Groups_RejectWithBlockGroups(t *testing.T) {
 	require.NoError(t, producer.Publish(ctx,
 		&Task{ID: "a1", Partition: "!connA:1", Groups: []string{"connA"}, Payload: []byte("a"), Scheduled: time.Now().Add(-time.Second)},
 		&Task{ID: "a2", Partition: "!connA:2", Groups: []string{"connA"}, Payload: []byte("a2"), Scheduled: time.Now().Add(-time.Second)},
-		&Task{ID: "b1", Partition: "!connB:1", Groups: []string{"connB"}, Payload: []byte("b"), Scheduled: time.Now().Add(-time.Second)},
 	))
-
-	var fromA *Task
-	for i := 0; i < 5; i++ {
-		got, err := consumer.Get(ctx)
-		require.NoError(t, err)
-		require.NotEmpty(t, got)
-		if got[0].Partition == "!connA:1" || got[0].Partition == "!connA:2" {
-			fromA = got[0]
-			break
-		}
-		require.NoError(t, consumer.Reject(ctx, got[0].ID, 0))
-	}
-	require.NotNil(t, fromA, "нужна задача из connA")
-
-	require.NoError(t, consumer.Reject(ctx, fromA.ID, 1.0, "connA"))
 
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	assert.Equal(t, "b1", got[0].ID, "после BlockGroups(connA) доступен только connB")
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	assert.Contains(t, []string{"!connA:1", "!connA:2"}, got[0].Partition)
+
+	require.NoError(t, consumer.Reject(ctx, got[0].ID, 1.0, "connA"))
+
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "b1", Partition: "!connB:1", Groups: []string{"connB"}, Payload: []byte("b"), Scheduled: time.Now().Add(-time.Second),
+	}))
+
+	gotB, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, gotB, 1)
+	assert.Equal(t, "b1", gotB[0].ID, "после BlockGroups(connA) доступен только connB")
+	require.NoError(t, consumer.Ack(ctx, gotB[0].ID, 0))
 
 	got2, err := consumer.Get(ctx)
 	require.NoError(t, err)
-	assert.Empty(t, got2)
+	assert.Empty(t, got2, "connA ещё заблокирована")
 }
 
 func TestQueue_Groups_MultiGroupAdmission(t *testing.T) {
@@ -98,25 +94,62 @@ func TestQueue_Groups_MultiGroupAdmission(t *testing.T) {
 	assert.Empty(t, got2)
 }
 
-func TestQueue_Groups_LegacyBlockKeyStillHonored(t *testing.T) {
+func TestQueue_Ack_CleansPartitionIndexes(t *testing.T) {
 	producer, consumer, rdb := setupTestQueue(t)
 	consumer.SetPrefetchCount(1)
 	ctx := context.Background()
+	q := "test-queue"
 
 	require.NoError(t, producer.Publish(ctx, &Task{
-		ID: "t1", Partition: "!legacy", Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
+		ID: "only", Partition: "!c:1", Groups: []string{"conn"},
+		Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
 	}))
-	require.NoError(t, rdb.Set(ctx, partitionBlockKey("test-queue", "!legacy"), "1", 2*time.Second).Err())
-
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
-	assert.Empty(t, got)
+	require.Len(t, got, 1)
+	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
 
-	require.NoError(t, rdb.Del(ctx, partitionBlockKey("test-queue", "!legacy")).Err())
-	got2, err := consumer.Get(ctx)
+	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:"+q+":partition:!c:1:groups").Val())
+	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:"+q+":group:conn:ready").Val())
+	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:"+q+":partition:!c:1:priorities").Val())
+	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:"+q+":partition:!c:1:0").Val())
+	n, err := rdb.ZCard(ctx, "queue:"+q+":groups").Result()
 	require.NoError(t, err)
-	require.NotEmpty(t, got2)
-	require.NoError(t, consumer.Ack(ctx, got2[0].ID, 0))
+	assert.Equal(t, int64(0), n)
+	assert.False(t, rdb.SIsMember(ctx, "queue:"+q+":partitions", "!c:1").Val())
+}
+
+func TestQueue_Ping_RestoresDeadConsumerTaskWithGroups(t *testing.T) {
+	producer, setupConsumer, rdb := setupTestQueue(t)
+	ctx := context.Background()
+	q := "test-queue"
+	// setupConsumer успел взять unlock:lock — снимаем, иначе ping c2 выйдет сразу
+	require.NoError(t, rdb.Del(ctx, "queue:"+q+":unlock:lock").Err())
+	require.NoError(t, rdb.SRem(ctx, "queue:"+q+":consumers", setupConsumer.ConsumerID()).Err())
+	_ = setupConsumer
+
+	c1 := newConsumer(rdb, q, "dead-c1", false)
+	c1.SetPrefetchCount(1)
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "t1", Partition: "!c:1", Groups: []string{"conn"},
+		Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
+	}))
+	got, err := c1.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+
+	// симулируем смерть: убираем heartbeat, оставляем задачу in-progress
+	require.NoError(t, rdb.Del(ctx, "queue:"+q+":consumer:dead-c1").Err())
+
+	c2 := newConsumer(rdb, q, "alive-c2", false)
+	c2.SetPrefetchCount(1)
+	require.NoError(t, c2.ping(ctx)) // должен вернуть задачу в очередь + ready
+
+	got2, err := c2.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got2, 1)
+	assert.Equal(t, "t1", got2[0].ID)
+	require.NoError(t, c2.Ack(ctx, "t1", 0))
 }
 
 func TestAdmin_BlockGroups(t *testing.T) {
@@ -153,11 +186,12 @@ func TestQueue_Groups_ScaleBlockedGroup(t *testing.T) {
 	blockedGroup := "conn-blocked"
 	freeGroup := "conn-free"
 
+	unlockAt := float64(time.Now().Add(time.Hour).UnixMilli())
 	pipe := rdb.Pipeline()
+	pipe.ZAdd(ctx, "queue:"+q+":groups", redis.Z{Score: unlockAt, Member: blockedGroup})
 	for i := 0; i < blockedN; i++ {
 		part := fmt.Sprintf("!blocked:%d", i)
-		pipe.SAdd(ctx, "queue:"+q+":groups", blockedGroup)
-		pipe.SAdd(ctx, "queue:"+q+":group:"+blockedGroup+":ready", part)
+		pipe.ZAdd(ctx, "queue:"+q+":group:"+blockedGroup+":ready", redis.Z{Score: 0, Member: part})
 		pipe.SAdd(ctx, "queue:"+q+":partition:"+part+":groups", blockedGroup)
 		pipe.SAdd(ctx, "queue:"+q+":partitions", part)
 		if i%5000 == 4999 {
@@ -168,11 +202,6 @@ func TestQueue_Groups_ScaleBlockedGroup(t *testing.T) {
 	}
 	_, err := pipe.Exec(ctx)
 	require.NoError(t, err)
-
-	unlockAt := float64(time.Now().Add(time.Hour).UnixMilli())
-	require.NoError(t, rdb.ZAdd(ctx, queueBlockedKey(q), redis.Z{
-		Score: unlockAt, Member: "g:" + blockedGroup,
-	}).Err())
 
 	require.NoError(t, producer.Publish(ctx, &Task{
 		ID:        "needle",
@@ -205,13 +234,14 @@ func TestQueue_Groups_GetSpeedVsLegacyScan(t *testing.T) {
 	q := "test-queue"
 
 	const n = 50_000
+	unlockAt := float64(time.Now().Add(time.Hour).UnixMilli())
 	pipe := rdb.Pipeline()
+	pipe.ZAdd(ctx, "queue:"+q+":groups", redis.Z{Score: unlockAt, Member: "parked"})
 	for i := 0; i < n; i++ {
 		part := fmt.Sprintf("!parked:%d", i)
-		pipe.SAdd(ctx, "queue:"+q+":groups", "parked")
-		pipe.SAdd(ctx, "queue:"+q+":group:parked:ready", part)
+		pipe.ZAdd(ctx, "queue:"+q+":group:parked:ready", redis.Z{Score: 0, Member: part})
 		pipe.SAdd(ctx, "queue:"+q+":partition:"+part+":groups", "parked")
-		if i%5000 == 0 {
+		if i%5000 == 4999 {
 			_, err := pipe.Exec(ctx)
 			require.NoError(t, err)
 			pipe = rdb.Pipeline()
@@ -219,9 +249,6 @@ func TestQueue_Groups_GetSpeedVsLegacyScan(t *testing.T) {
 	}
 	_, err := pipe.Exec(ctx)
 	require.NoError(t, err)
-	require.NoError(t, rdb.ZAdd(ctx, queueBlockedKey(q), redis.Z{
-		Score: float64(time.Now().Add(time.Hour).UnixMilli()), Member: "g:parked",
-	}).Err())
 
 	require.NoError(t, producer.Publish(ctx, &Task{
 		ID: "live", Partition: "!live:1", Groups: []string{"live"},

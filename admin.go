@@ -149,39 +149,27 @@ func (a *Admin) queueStats(ctx context.Context, queueName, partitionFilter strin
 	return stats, nil
 }
 
-// isPartitionBlocked: queue:blocked (p: / g:) или legacy partition:...:block.
+// isPartitionBlocked: blocked (partition) или groups score > now.
 func (a *Admin) isPartitionBlocked(ctx context.Context, queueName, partition string) bool {
 	nowMs := float64(time.Now().UnixMilli())
 	if t, err := a.redis.Time(ctx).Result(); err == nil {
 		nowMs = float64(t.UnixMilli())
 	}
 	blockedKey := "queue:" + queueName + ":blocked"
-	if score, err := a.redis.ZScore(ctx, blockedKey, "p:"+partition).Result(); err == nil && nowMs < score {
+	if score, err := a.redis.ZScore(ctx, blockedKey, partition).Result(); err == nil && nowMs < score {
 		return true
 	}
+	groupsKey := "queue:" + queueName + ":groups"
 	groups, _ := a.redis.SMembers(ctx, "queue:"+queueName+":partition:"+partition+":groups").Result()
 	if len(groups) == 0 {
 		groups = []string{DefaultGroup}
 	}
 	for _, g := range groups {
-		if score, err := a.redis.ZScore(ctx, blockedKey, "g:"+g).Result(); err == nil && nowMs < score {
+		if score, err := a.redis.ZScore(ctx, groupsKey, g).Result(); err == nil && nowMs < score {
 			return true
 		}
 	}
-	// legacy
-	blockKey := "queue:" + queueName + ":partition:" + partition + ":block"
-	val, err := a.redis.Get(ctx, blockKey).Result()
-	if err == redis.Nil || val == "" {
-		return false
-	}
-	if val == "1" {
-		return true
-	}
-	unlockAt, err := strconv.ParseFloat(val, 64)
-	if err != nil {
-		return true
-	}
-	return nowMs < unlockAt
+	return false
 }
 
 // BlockGroups паркует группы на waitTime секунд (см. Consumer.BlockGroups).
