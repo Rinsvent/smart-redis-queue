@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test & Coverage
+    runs-on: ubuntu-latest
+
+    services:
+      redis:
+        image: redis:6.2
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./... -count=1 -timeout 180s -race -coverprofile=coverage.out -covermode=atomic
+
+      - name: Coverage summary & badge
+        run: |
+          go tool cover -func=coverage.out | tee coverage.txt
+          TOTAL=$(go tool cover -func=coverage.out | awk '/^total:/ {print $3}')
+          PCT=${TOTAL%%%}
+          echo "### Coverage: ${TOTAL}" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Metric | Value |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| --- | --- |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Total | ${TOTAL} |" >> "$GITHUB_STEP_SUMMARY"
+
+          if awk "BEGIN {exit !(${PCT} >= 80)}"; then COLOR="#4c1"
+          elif awk "BEGIN {exit !(${PCT} >= 60)}"; then COLOR="#dfb317"
+          else COLOR="#e05d44"
+          fi
+
+          mkdir -p .github/badges
+          cat > .github/badges/coverage.svg <<EOF
+          <svg xmlns="http://www.w3.org/2000/svg" width="118" height="20" role="img" aria-label="coverage: ${TOTAL}">
+            <linearGradient id="s" x2="0" y2="100%">
+              <stop offset="0" stop-color="#bbb" stop-opacity=".1"/>
+              <stop offset="1" stop-opacity=".1"/>
+            </linearGradient>
+            <clipPath id="r"><rect width="118" height="20" rx="3" fill="#fff"/></clipPath>
+            <g clip-path="url(#r)">
+              <rect width="69" height="20" fill="#555"/>
+              <rect x="69" width="49" height="20" fill="${COLOR}"/>
+              <rect width="118" height="20" fill="url(#s)"/>
+            </g>
+            <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" text-rendering="geometricPrecision" font-size="110">
+              <text x="355" y="140" transform="scale(.1)" fill="#010101" fill-opacity=".3">coverage</text>
+              <text x="355" y="130" transform="scale(.1)">coverage</text>
+              <text x="925" y="140" transform="scale(.1)" fill="#010101" fill-opacity=".3">${TOTAL}</text>
+              <text x="925" y="130" transform="scale(.1)">${TOTAL}</text>
+            </g>
+          </svg>
+          EOF
+          sed -i 's/^[[:space:]]*//' .github/badges/coverage.svg
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: |
+            coverage.out
+            coverage.txt
+            .github/badges/coverage.svg
+          retention-days: 14
+
+      - name: Commit coverage badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github/badges/coverage.svg
+          if git diff --staged --quiet; then
+            echo "Coverage badge unchanged"
+            exit 0
+          fi
+          git commit -m "chore: update coverage badge [skip ci]"
+          git push

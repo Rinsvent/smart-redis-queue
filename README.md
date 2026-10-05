@@ -1,5 +1,8 @@
 # Smart Redis Queue
 
+[![CI](https://github.com/Rinsvent/smart-redis-queue/actions/workflows/ci.yml/badge.svg)](https://github.com/Rinsvent/smart-redis-queue/actions/workflows/ci.yml)
+[![coverage](https://raw.githubusercontent.com/Rinsvent/smart-redis-queue/main/.github/badges/coverage.svg)](https://github.com/Rinsvent/smart-redis-queue/actions/workflows/ci.yml)
+
 Очередь задач на Redis с поддержкой партиций, приоритетов, отложенного выполнения и строгих гарантий порядка.
 
 ## Возможности
@@ -275,6 +278,8 @@ make test-short
 # Покрытие
 make test-coverage
 ```
+
+CI (GitHub Actions) на каждый push/PR в `main`: сборка, `go test -race`, coverage в Job Summary и badge `.github/badges/coverage.svg` (обновляется на `main` без внешних сервисов).
 
 ## API
 
