@@ -136,8 +136,9 @@ for i = 0, taskCount - 1 do
 
     local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
 
+    -- SET NX возвращает false при занятом ключе (не 0).
     local ok = redis.call('SET', payloadKey, 0, 'NX')
-    if ok == 0 then
+    if not ok then
 		notAddedItems[#notAddedItems + 1] = i
     end
 end
@@ -251,14 +252,17 @@ local function getFromPartition(partition)
             end
             acquiredPartitionLocks[partition] = true
         elseif lockOwner ~= consumerId then
-            if checkDeadConsumerLocks then
-                -- Снимаем stale-lock только когда lockOwner уже удалён из consumers (ping его “признал мёртвым”).
-                -- Иначе можно нарушить порядок: задачи могли быть в обработке и ещё не возвращены в очередь.
-                if redis.call('SISMEMBER', consumersKey, lockOwner) == 0 then
-                    redis.call('DEL', partitionLockKey)
+            if checkDeadConsumerLocks and redis.call('SISMEMBER', consumersKey, lockOwner) == 0 then
+                -- stale-lock: владельца нет в consumers — забираем и продолжаем Get.
+                redis.call('DEL', partitionLockKey)
+                local lockAcquired = redis.call('SET', partitionLockKey, consumerId, 'NX')
+                if not lockAcquired then
+                    return nil
                 end
+                acquiredPartitionLocks[partition] = true
+            else
+                return nil
             end
-            return nil
         end
     end
 
