@@ -1,3 +1,6 @@
+// Example app (not part of the library test/coverage surface).
+//go:build ignore
+
 package main
 
 import (

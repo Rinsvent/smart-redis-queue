@@ -39,7 +39,8 @@ jobs:
         run: go build ./...
 
       - name: Test
-        run: go test ./... -count=1 -timeout 180s -race -coverprofile=coverage.out -covermode=atomic
+        # coverpkg — только библиотека: cmd/manager и examples не размывают badge.
+        run: go test ./... -count=1 -timeout 180s -race -coverprofile=coverage.out -covermode=atomic -coverpkg=github.com/Rinsvent/smart-redis-queue
 
       - name: Coverage summary & badge
         run: |
