@@ -166,6 +166,32 @@ pool.Consume(ctx, func(task *redisqueue.Task) error {
 })
 ```
 
+Паника в `handler` (nil-deref и т.п.) **не роняет процесс**: перехватывается, превращается в `HandlerPanicError` и идёт по той же ветке, что обычная ошибка → `Reject`. Остальные консьюмеры пула продолжают работу.
+
+### Middleware вокруг handler
+
+`Use` оборачивает `handler(task)` (логи, Sentry, метрики). Первый `Use` — внешний слой: видит `HandlerPanicError` как обычный `error`.
+
+```go
+pool.Use(func(next redisqueue.HandlerFunc) redisqueue.HandlerFunc {
+    return func(task *redisqueue.Task) error {
+        err := next(task)
+        var pe *redisqueue.HandlerPanicError
+        if errors.As(err, &pe) {
+            log.Printf("handler panic on %s: %v\n%s", task.ID, pe.Value, pe.Stack)
+            // sentry.CaptureException(pe) ...
+        } else if err != nil {
+            log.Printf("handler error on %s: %v", task.ID, err)
+        }
+        return err // nil → Ack, error/panic → Reject
+    }
+})
+
+pool.Consume(ctx, process)
+```
+
+То же API есть у `Consumer.Use`.
+
 ### Ручное управление (Get / Ack / Reject)
 
 ```go
@@ -310,6 +336,8 @@ CI (GitHub Actions) на каждый push/PR в `main`: сборка, `go test 
 | `Admin` | Обслуживание: Inspect, Purge, Retry, Remove, RemoveByTag, CountByTag, BlockGroups |
 | `Task` | Задача: ID, Partition, Priority, Payload, Scheduled, Tags, Groups |
 | `RejectWithDelay` | Ошибка для отложенного reject (`Delay`, `BlockGroups`) |
+| `HandlerPanicError` | Паника в handler/middleware → Reject (процесс жив) |
+| `HandlerMiddleware` / `Use` | Обертка вокруг handler (логи, Sentry) |
 | `Consumer.BlockGroups` | Парковка групп без задачи |
 
 ### Admin: удаление и теги

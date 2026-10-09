@@ -3,6 +3,7 @@ package redisqueue
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -1169,6 +1170,154 @@ func TestQueue_ConsumeWithHandler_Reject(t *testing.T) {
 
 	// Задача отклонена и вернулась в очередь, консьюмер выходил по ctx
 	assert.GreaterOrEqual(t, processed.Load(), int32(1))
+}
+
+func TestCallHandler_RecoversPanic(t *testing.T) {
+	err := callHandler(func(task *Task) error {
+		panic("boom")
+	}, &Task{ID: "t1"})
+	var pe *HandlerPanicError
+	require.ErrorAs(t, err, &pe)
+	assert.Equal(t, "boom", pe.Value)
+	assert.NotEmpty(t, pe.Stack)
+	assert.Contains(t, pe.Error(), "boom")
+}
+
+func TestQueue_Consume_HandlerPanic_RejectsAndContinues(t *testing.T) {
+	producer, consumer, _ := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	consumer.SetPollInterval(20 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, producer.Publish(ctx,
+		&Task{ID: "panic-1", Partition: "!p-panic", Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second)},
+		&Task{ID: "ok-1", Partition: "!p-ok", Payload: []byte("y"), Scheduled: time.Now().Add(-time.Second)},
+	))
+
+	var sawPanic, sawOK atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = consumer.Consume(ctx, func(task *Task) error {
+			if task.ID == "panic-1" {
+				if sawPanic.CompareAndSwap(false, true) {
+					panic("handler boom")
+				}
+				return fmt.Errorf("post-panic")
+			}
+			sawOK.Store(true)
+			return nil
+		})
+	}()
+
+	require.Eventually(t, func() bool {
+		return sawPanic.Load() && sawOK.Load()
+	}, 5*time.Second, 20*time.Millisecond, "обе задачи должны быть обработаны без падения процесса")
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Consume did not finish")
+	}
+
+	// panic-задача вернулась в очередь минимум с одним reject
+	got, err := consumer.Get(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "panic-1", got[0].ID)
+	assert.GreaterOrEqual(t, got[0].RejectCount, 1)
+	require.NoError(t, consumer.Ack(context.Background(), got[0].ID, 0))
+}
+
+func TestQueue_Consume_MiddlewareSeesHandlerPanic(t *testing.T) {
+	producer, consumer, _ := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	consumer.SetPollInterval(20 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var seenPanic atomic.Bool
+	consumer.Use(func(next HandlerFunc) HandlerFunc {
+		return func(task *Task) error {
+			err := next(task)
+			var pe *HandlerPanicError
+			if errors.As(err, &pe) {
+				seenPanic.Store(true)
+			}
+			return err
+		}
+	})
+
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "mw-panic", Partition: "!p1", Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
+	}))
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = consumer.Consume(ctx, func(task *Task) error {
+			panic("from handler")
+		})
+	}()
+
+	require.Eventually(t, seenPanic.Load, 3*time.Second, 20*time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Consume did not exit")
+	}
+}
+
+func TestQueue_ConsumerPool_HandlerPanicIsolated(t *testing.T) {
+	producer, pool, client := setupTestConsumerPool(t)
+	pool.SetCount(2)
+	pool.SetPrefetchCount(1)
+	pool.SetPollInterval(20 * time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	require.NoError(t, producer.Publish(ctx,
+		&Task{ID: "pool-panic", Partition: "!a", Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second)},
+		&Task{ID: "pool-ok", Partition: "!b", Payload: []byte("y"), Scheduled: time.Now().Add(-time.Second)},
+	))
+
+	var ackedOK, sawPanic atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pool.Consume(ctx, func(task *Task) error {
+			if task.ID == "pool-panic" {
+				if sawPanic.CompareAndSwap(false, true) {
+					panic("pool handler boom")
+				}
+				return fmt.Errorf("post-panic")
+			}
+			ackedOK.Store(true)
+			return nil
+		})
+	}()
+
+	require.Eventually(t, func() bool {
+		return sawPanic.Load() && ackedOK.Load()
+	}, 5*time.Second, 20*time.Millisecond, "пул должен пережить панику одного handler")
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("pool Consume did not finish")
+	}
+
+	c := NewConsumer(client, "test-pool-queue", "")
+	defer c.Close()
+	c.SetPrefetchCount(1)
+	got, err := c.Get(context.Background())
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "pool-panic", got[0].ID)
+	assert.GreaterOrEqual(t, got[0].RejectCount, 1)
+	require.NoError(t, c.Ack(context.Background(), got[0].ID, 0))
 }
 
 // TestQueue_Reject_OrderedPartition_PreservesOrder проверяет, что при reject задач из

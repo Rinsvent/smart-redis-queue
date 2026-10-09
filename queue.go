@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +40,45 @@ func (e *RejectWithDelay) Unwrap() error {
 // blockGroups — опциональные группы для BlockGroups при Reject.
 func NewRejectWithDelay(err error, delaySeconds float64, blockGroups ...string) *RejectWithDelay {
 	return &RejectWithDelay{Err: err, Delay: delaySeconds, BlockGroups: blockGroups}
+}
+
+// HandlerFunc — обработчик задачи для Consume.
+type HandlerFunc func(*Task) error
+
+// HandlerMiddleware оборачивает handler (логирование, Sentry, метрики и т.п.).
+// Первый Use — внешний слой: видит ошибку/панику внутреннего handler как обычный error.
+type HandlerMiddleware func(next HandlerFunc) HandlerFunc
+
+// HandlerPanicError — паника внутри handler (или middleware), перехваченная Consume.
+// Контракт тот же, что у обычной ошибки handler: задача уходит в Reject, цикл продолжается.
+type HandlerPanicError struct {
+	Value any
+	Stack []byte
+}
+
+func (e *HandlerPanicError) Error() string {
+	return fmt.Sprintf("handler panic: %v", e.Value)
+}
+
+// callHandler вызывает handler и переводит панику в HandlerPanicError.
+func callHandler(handler HandlerFunc, task *Task) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = &HandlerPanicError{Value: r, Stack: debug.Stack()}
+		}
+	}()
+	return handler(task)
+}
+
+// applyMiddlewares строит цепочку: recover вокруг user handler, затем middleware снаружи.
+func applyMiddlewares(middlewares []HandlerMiddleware, handler HandlerFunc) HandlerFunc {
+	next := HandlerFunc(func(task *Task) error {
+		return callHandler(handler, task)
+	})
+	for i := len(middlewares) - 1; i >= 0; i-- {
+		next = middlewares[i](next)
+	}
+	return next
 }
 
 // ErrTasksAlreadyExist возникает, когда одна или несколько задач уже существуют.
@@ -235,6 +275,7 @@ type Consumer struct {
 	// На новых инсталляциях false (дефолт). Удалим в следующем major.
 	legacyPartitionsFallback bool
 	idempotencyTtl           time.Duration
+	middlewares              []HandlerMiddleware
 	stopPing                 chan struct{}
 }
 
@@ -313,6 +354,12 @@ func (c *Consumer) SetIdempotencyTtl(n time.Duration) {
 	c.idempotencyTtl = n
 }
 
+// Use добавляет middleware вокруг handler в Consume.
+// Порядок: первый Use — внешний слой (успевает увидеть HandlerPanicError / обычный error).
+func (c *Consumer) Use(mw ...HandlerMiddleware) {
+	c.middlewares = append(c.middlewares, mw...)
+}
+
 // GetChan запускает цикл чтения очереди и возвращает канал с задачами.
 // Останавливается при отмене контекста или вызове Close.
 func (c *Consumer) GetChan(ctx context.Context) <-chan *Task {
@@ -356,6 +403,8 @@ func isOrderedPartition(partition string) bool {
 }
 
 // Consume запускает вечный цикл: Get → обработка handler → Ack при успехе, Reject при ошибке.
+// Паника в handler (или middleware) перехватывается, превращается в HandlerPanicError и
+// обрабатывается как обычная ошибка handler → Reject; процесс и цикл Consume не падают.
 // Гарантирует последовательную обработку задач в рамках одного консьюмера.
 // Для ordered-партиций (!): при reject первой задачи остальные из этой партиции в текущем
 // prefetch-батче также reject'ятся, чтобы сохранить порядок при возврате в очередь.
@@ -370,6 +419,7 @@ func isOrderedPartition(partition string) bool {
 func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error {
 	// Подтверждения не должны зависеть от отмены shutdown-контекста.
 	opCtx := context.WithoutCancel(ctx)
+	run := applyMiddlewares(c.middlewares, handler)
 
 	for {
 		select {
@@ -416,7 +466,7 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 				continue
 			}
 
-			if err := handler(task); err != nil {
+			if err := callHandler(run, task); err != nil {
 				if isOrderedPartition(task.Partition) {
 					rejectedPartitions[task.Partition] = true
 				}
@@ -604,6 +654,7 @@ type ConsumerPool struct {
 	prefetchCount               int
 	checkDeadConsumerLocksOnGet bool
 	idempotencyTtl              time.Duration
+	middlewares                 []HandlerMiddleware
 }
 
 // NewConsumerPool создает пул консьюмеров
@@ -652,10 +703,17 @@ func (p *ConsumerPool) SetIdempotencyTtl(n time.Duration) {
 	p.idempotencyTtl = n
 }
 
+// Use добавляет middleware вокруг handler (см. Consumer.Use).
+func (p *ConsumerPool) Use(mw ...HandlerMiddleware) {
+	p.middlewares = append(p.middlewares, mw...)
+}
+
 // Consume запускает count консьюмеров, блокируется до отмены контекста.
 // При отмене контекста все консьюмеры останавливаются, метод возвращает управление.
 // Если консьюмер завершается из-за ошибки Ack/Reject, запускается новый на его место —
 // число активных консьюмеров остаётся постоянным.
+// Паника в handler перехватывается (см. Consumer.Consume) — падает одна задача в Reject,
+// остальные консьюмеры пула продолжают работу.
 func (p *ConsumerPool) Consume(ctx context.Context, handler func(*Task) error) {
 	var wg sync.WaitGroup
 
@@ -683,6 +741,7 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c.prefetchCount = p.prefetchCount
 		c.checkDeadConsumerLocksOnGet = p.checkDeadConsumerLocksOnGet
 		c.idempotencyTtl = p.idempotencyTtl
+		c.middlewares = p.middlewares
 
 		err := c.Consume(ctx, handler)
 		c.Close()
