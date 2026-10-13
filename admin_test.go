@@ -57,6 +57,37 @@ func TestAdmin_ListQueues_ConsumersOnly(t *testing.T) {
 	assert.Contains(t, queues, "orphan-consumers-only")
 }
 
+func TestAdmin_ListPartitions_DiscoversBeyondSet(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "discover-parts-queue"
+
+	// В SET только одна партиция; вторая живёт только как priorities ZSET (типичный drift).
+	require.NoError(t, rdb.SAdd(ctx, "queue:"+q+":partitions", "!only-in-set").Err())
+	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":partition:!orphan:prio:priorities", redis.Z{Score: 0, Member: "0"}).Err())
+	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":partition:!orphan:prio:0", redis.Z{Score: 1, Member: "t1"}).Err())
+	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":group:_default:ready", redis.Z{Score: 0, Member: "!from-ready"}).Err())
+
+	parts, total, err := admin.ListPartitions(ctx, q, "", 1000)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, total, 3)
+	names := make([]string, len(parts))
+	for i, p := range parts {
+		names[i] = p.Partition
+	}
+	assert.Contains(t, names, "!only-in-set")
+	assert.Contains(t, names, "!orphan:prio")
+	assert.Contains(t, names, "!from-ready")
+
+	filtered, ftotal, err := admin.ListPartitions(ctx, q, "orphan", 1000)
+	require.NoError(t, err)
+	assert.Equal(t, 1, ftotal)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, "!orphan:prio", filtered[0].Partition)
+	assert.Equal(t, int64(1), filtered[0].Pending)
+}
+
 func TestAdmin_Inspect(t *testing.T) {
 	admin, rdb := setupAdminTest(t)
 	defer rdb.Close()

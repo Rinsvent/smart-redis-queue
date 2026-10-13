@@ -21,6 +21,7 @@ export const api = {
   refreshCatalog: () => call('RefreshCatalog'),
   listQueues: () => call('ListQueues'),
   inspectQueue: (name, db) => call('InspectQueue', name, db),
+  listPartitions: (name, db, filter) => call('ListPartitions', name, db, filter || ''),
   purge: (queue, partition, db) => call('Purge', queue, partition || '', db),
   retry: (queue, db) => call('Retry', queue, db),
   getTaskPayload: (queue, taskId, db) => call('GetTaskPayload', queue, taskId, db),

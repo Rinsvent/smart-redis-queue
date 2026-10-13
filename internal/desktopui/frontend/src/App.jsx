@@ -4,7 +4,9 @@ import {
   AppBar,
   Box,
   Button,
+  ButtonBase,
   Checkbox,
+  Chip,
   CircularProgress,
   CssBaseline,
   Dialog,
@@ -20,11 +22,10 @@ import {
   Select,
   Snackbar,
   Stack,
-  Tab,
-  Tabs,
   Table,
   TableBody,
   TableCell,
+  TableContainer,
   TableHead,
   TableRow,
   TextField,
@@ -92,11 +93,6 @@ function rateLabel(r) {
   return `~${p} msg/s processed · backlog ${sign}${b.toFixed(1)}/s`
 }
 
-function dbsLabel(dbs) {
-  if (!dbs?.length) return ''
-  return `db ${dbs.join(', ')}`
-}
-
 export default function App() {
   const [mode, setMode] = useState(() => localStorage.getItem('srq-theme') || 'light')
   const theme = useMemo(() => buildTheme(mode), [mode])
@@ -104,11 +100,18 @@ export default function App() {
   const [connections, setConnections] = useState([])
   const [activeId, setActiveId] = useState('')
   const [queues, setQueues] = useState([])
+  const [queueFilter, setQueueFilter] = useState('')
   const [selectedQueue, setSelectedQueue] = useState('')
   const [activeDb, setActiveDb] = useState(0)
   const [detail, setDetail] = useState(null)
+  const [partitions, setPartitions] = useState([])
+  const [partitionTotal, setPartitionTotal] = useState(0)
+  const [partitionTruncated, setPartitionTruncated] = useState(false)
+  const [partitionFilter, setPartitionFilter] = useState('')
+  const [partitionFilterDraft, setPartitionFilterDraft] = useState('')
   const [loading, setLoading] = useState(false)
   const [catalogLoading, setCatalogLoading] = useState(false)
+  const [partsLoading, setPartsLoading] = useState(false)
   const [snack, setSnack] = useState({ open: false, msg: '', severity: 'info' })
 
   const [addOpen, setAddOpen] = useState(false)
@@ -128,8 +131,15 @@ export default function App() {
 
   const [confirm, setConfirm] = useState(null)
   const pollRef = useRef(null)
+  const partFilterTimer = useRef(null)
 
   const notify = (msg, severity = 'info') => setSnack({ open: true, msg, severity })
+
+  const filteredQueues = useMemo(() => {
+    const q = queueFilter.trim().toLowerCase()
+    if (!q) return queues
+    return queues.filter((item) => item.name.toLowerCase().includes(q))
+  }, [queues, queueFilter])
 
   const loadConnections = useCallback(async () => {
     try {
@@ -149,7 +159,6 @@ export default function App() {
     }
     setLoading(true)
     try {
-      // EnsureActive дешёвый, если уже подключены; полный SCAN только при первом connect / Refresh.
       await api.ensureActive()
       const list = await api.listQueues()
       setQueues(list || [])
@@ -191,6 +200,27 @@ export default function App() {
     }
   }, [selectedQueue, activeDb])
 
+  const loadPartitions = useCallback(async () => {
+    if (!selectedQueue) {
+      setPartitions([])
+      setPartitionTotal(0)
+      setPartitionTruncated(false)
+      return
+    }
+    setPartsLoading(true)
+    try {
+      const r = await api.listPartitions(selectedQueue, activeDb, partitionFilter)
+      setPartitions(r?.partitions || [])
+      setPartitionTotal(r?.total || 0)
+      setPartitionTruncated(!!r?.truncated)
+    } catch (e) {
+      notify(String(e), 'error')
+      setPartitions([])
+    } finally {
+      setPartsLoading(false)
+    }
+  }, [selectedQueue, activeDb, partitionFilter])
+
   useEffect(() => {
     loadConnections()
   }, [loadConnections])
@@ -203,6 +233,7 @@ export default function App() {
     const item = queues.find((q) => q.name === selectedQueue)
     if (!item) {
       setDetail(null)
+      setPartitions([])
       return
     }
     if (!item.dbs?.includes(activeDb)) {
@@ -210,16 +241,30 @@ export default function App() {
       return
     }
     loadDetail()
+    loadPartitions()
     if (pollRef.current) clearInterval(pollRef.current)
-    pollRef.current = setInterval(loadDetail, 2000)
+    pollRef.current = setInterval(() => {
+      loadDetail()
+      loadPartitions()
+    }, 2000)
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
     }
-  }, [queues, selectedQueue, activeDb, loadDetail])
+  }, [queues, selectedQueue, activeDb, loadDetail, loadPartitions])
 
   useEffect(() => {
     localStorage.setItem('srq-theme', mode)
   }, [mode])
+
+  useEffect(() => {
+    if (partFilterTimer.current) clearTimeout(partFilterTimer.current)
+    partFilterTimer.current = setTimeout(() => {
+      setPartitionFilter(partitionFilterDraft.trim())
+    }, 300)
+    return () => {
+      if (partFilterTimer.current) clearTimeout(partFilterTimer.current)
+    }
+  }, [partitionFilterDraft])
 
   const selectedMeta = queues.find((q) => q.name === selectedQueue) || null
 
@@ -227,6 +272,8 @@ export default function App() {
     const item = queues.find((q) => q.name === name)
     setSelectedQueue(name)
     setActiveDb(item?.dbs?.[0] ?? 0)
+    setPartitionFilterDraft('')
+    setPartitionFilter('')
   }
 
   const onSelectConn = async (id) => {
@@ -281,8 +328,8 @@ export default function App() {
     if (!selectedQueue) return
     setConfirm({
       title: partition
-        ? `Purge partition ${partition}? (db ${activeDb})`
-        : `Purge queue ${selectedQueue}? (db ${activeDb})`,
+        ? `Purge partition ${partition}?`
+        : `Purge queue ${selectedQueue}?`,
       body: 'Все pending-задачи будут удалены на выбранной DB.',
       action: async () => {
         try {
@@ -290,6 +337,7 @@ export default function App() {
           notify(`Удалено задач: ${n}`, 'success')
           await refreshCatalog()
           loadDetail()
+          loadPartitions()
         } catch (e) {
           notify(String(e), 'error')
         }
@@ -300,13 +348,14 @@ export default function App() {
   const runRetry = () => {
     if (!selectedQueue) return
     setConfirm({
-      title: `Retry ${selectedQueue}? (db ${activeDb})`,
+      title: `Retry ${selectedQueue}?`,
       body: 'In-progress tasks вернутся в pending.',
       action: async () => {
         try {
           const n = await api.retry(selectedQueue, activeDb)
           notify(`Возвращено: ${n}`, 'success')
           loadDetail()
+          loadPartitions()
         } catch (e) {
           notify(String(e), 'error')
         }
@@ -341,6 +390,7 @@ export default function App() {
         )
         setTagResult(r)
         loadDetail()
+        loadPartitions()
       }
     } catch (e) {
       notify(String(e), 'error')
@@ -350,8 +400,8 @@ export default function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <Box sx={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
-        <AppBar position="sticky" color="transparent" elevation={0}>
+      <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+        <AppBar position="sticky" color="transparent" elevation={0} sx={{ flexShrink: 0 }}>
           <Toolbar sx={{ gap: 2, flexWrap: 'wrap' }}>
             <Typography variant="h6" sx={{ mr: 1, color: 'text.primary' }}>
               Smart Redis Queue
@@ -429,10 +479,10 @@ export default function App() {
           <Box
             sx={{
               flex: 1,
-              display: 'grid',
-              gridTemplateColumns: { xs: '1fr', md: '340px 1fr' },
-              gap: 0,
               minHeight: 0,
+              display: 'grid',
+              gridTemplateColumns: { xs: '1fr', md: '280px 1fr' },
+              gap: 0,
             }}
           >
             <Box
@@ -440,7 +490,9 @@ export default function App() {
                 borderRight: 1,
                 borderColor: 'divider',
                 p: 2,
-                overflow: 'auto',
+                display: 'flex',
+                flexDirection: 'column',
+                minHeight: 0,
                 bgcolor: 'background.paper',
               }}
             >
@@ -448,147 +500,254 @@ export default function App() {
                 <Typography variant="subtitle1">Очереди</Typography>
                 {(loading || catalogLoading) && <CircularProgress size={18} />}
               </Stack>
-              {queues.length === 0 ? (
-                <Typography variant="body2" color="text.secondary">
-                  Очереди не найдены. Нажмите Refresh в шапке (SCAN partitions + consumers по DB).
-                </Typography>
-              ) : (
-                <Stack spacing={0.5}>
-                  {queues.map((q) => (
-                    <Box
-                      key={q.name}
-                      onClick={() => onSelectQueue(q.name)}
-                      sx={{
-                        p: 1.25,
-                        borderRadius: 2,
-                        cursor: 'pointer',
-                        border: 1,
-                        borderColor: selectedQueue === q.name ? 'primary.main' : 'divider',
-                        bgcolor: selectedQueue === q.name ? 'action.selected' : 'transparent',
-                        '&:hover': { bgcolor: 'action.hover' },
-                      }}
-                    >
-                      <Typography fontWeight={600}>{q.name}</Typography>
-                      <Typography variant="caption" color="text.secondary" display="block">
-                        {dbsLabel(q.dbs)}
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary" display="block">
-                        pending {q.pending} · in-progress {q.inProgress} · cons {q.consumers}
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {rateLabel(q.rate)}
-                      </Typography>
-                    </Box>
-                  ))}
-                </Stack>
-              )}
+              <TextField
+                size="small"
+                placeholder="Фильтр…"
+                value={queueFilter}
+                onChange={(e) => setQueueFilter(e.target.value)}
+                sx={{ mb: 1.5 }}
+              />
+              <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
+                {filteredQueues.length === 0 ? (
+                  <Typography variant="body2" color="text.secondary">
+                    Нет очередей
+                  </Typography>
+                ) : (
+                  <Stack spacing={0.5}>
+                    {filteredQueues.map((q) => (
+                      <Box
+                        key={q.name}
+                        onClick={() => onSelectQueue(q.name)}
+                        sx={{
+                          px: 1.25,
+                          py: 1,
+                          borderRadius: 2,
+                          cursor: 'pointer',
+                          border: 1,
+                          borderColor: selectedQueue === q.name ? 'primary.main' : 'divider',
+                          bgcolor: selectedQueue === q.name ? 'action.selected' : 'transparent',
+                          '&:hover': { bgcolor: 'action.hover' },
+                        }}
+                      >
+                        <Typography fontWeight={600} noWrap title={q.name}>
+                          {q.name}
+                        </Typography>
+                      </Box>
+                    ))}
+                  </Stack>
+                )}
+              </Box>
             </Box>
 
-            <Box sx={{ p: 3, overflow: 'auto' }}>
+            <Box
+              sx={{
+                p: 2.5,
+                display: 'flex',
+                flexDirection: 'column',
+                minHeight: 0,
+                overflow: 'hidden',
+              }}
+            >
               {!selectedMeta ? (
                 <Typography color="text.secondary">Выберите очередь слева</Typography>
               ) : (
-                <Stack spacing={2.5}>
-                  <Box>
-                    <Typography variant="h5">{selectedMeta.name}</Typography>
-                    <Typography color="text.secondary">
-                      {detail ? rateLabel(detail.rate) : '—'}
-                    </Typography>
-                  </Box>
+                <>
+                  <Stack spacing={2} sx={{ flexShrink: 0 }}>
+                    <Stack
+                      direction={{ xs: 'column', sm: 'row' }}
+                      alignItems={{ sm: 'center' }}
+                      justifyContent="space-between"
+                      gap={1.5}
+                    >
+                      <Box>
+                        <Typography variant="h5">{selectedMeta.name}</Typography>
+                        <Typography color="text.secondary" variant="body2">
+                          {detail ? rateLabel(detail.rate) : '—'}
+                        </Typography>
+                      </Box>
+                      <Stack direction="row" alignItems="center" spacing={0.75} flexWrap="wrap" useFlexGap>
+                        <Typography variant="body2" color="text.secondary" sx={{ mr: 0.5 }}>
+                          DB:
+                        </Typography>
+                        {(selectedMeta.dbs || []).map((db) => {
+                          const active = db === activeDb
+                          return (
+                            <ButtonBase
+                              key={db}
+                              onClick={() => setActiveDb(db)}
+                              sx={{
+                                px: 1.25,
+                                py: 0.4,
+                                borderRadius: 1.5,
+                                border: 1,
+                                borderColor: active ? 'primary.main' : 'divider',
+                                bgcolor: active ? 'primary.main' : 'transparent',
+                                color: active ? 'primary.contrastText' : 'text.primary',
+                                fontWeight: 600,
+                                fontSize: 13,
+                                minWidth: 36,
+                              }}
+                            >
+                              {db}
+                            </ButtonBase>
+                          )
+                        })}
+                      </Stack>
+                    </Stack>
 
-                  {(selectedMeta.dbs || []).length > 0 && (
-                    <Tabs
-                      value={activeDb}
-                      onChange={(_, v) => setActiveDb(v)}
-                      variant="scrollable"
-                      scrollButtons="auto"
-                    >
-                      {(selectedMeta.dbs || []).map((db) => (
-                        <Tab key={db} value={db} label={`DB ${db}`} />
-                      ))}
-                    </Tabs>
-                  )}
+                    <Stack direction="row" spacing={3} flexWrap="wrap">
+                      <Stat label="Pending" value={detail?.pending} />
+                      <Stat label="In progress" value={detail?.inProgress} />
+                      <Stat label="Consumers" value={detail?.consumers} />
+                      <Stat label="Partitions" value={detail?.partitionTotal} />
+                    </Stack>
 
-                  <Stack direction="row" spacing={3} flexWrap="wrap">
-                    <Stat label="Pending" value={detail?.pending} />
-                    <Stat label="In progress" value={detail?.inProgress} />
-                    <Stat label="Consumers" value={detail?.consumers} />
-                    <Stat label="Partitions" value={(detail?.partitions || []).length} />
+                    {(detail?.groups || []).length > 0 && (
+                      <Box>
+                        <Typography variant="subtitle2" gutterBottom>
+                          Groups
+                        </Typography>
+                        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                          {detail.groups.map((g) => (
+                            <Chip
+                              key={g.name}
+                              size="small"
+                              color={g.blocked ? 'warning' : 'default'}
+                              label={`${g.name}: ready ${g.ready}${g.blocked ? ' · blocked' : ''}`}
+                            />
+                          ))}
+                        </Stack>
+                      </Box>
+                    )}
+
+                    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                      <Button
+                        variant="outlined"
+                        onClick={() => {
+                          loadDetail()
+                          loadPartitions()
+                        }}
+                      >
+                        Refresh
+                      </Button>
+                      <Button variant="outlined" color="warning" onClick={() => runPurge('')}>
+                        Purge queue
+                      </Button>
+                      <Button variant="outlined" onClick={runRetry}>
+                        Retry
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        onClick={() => {
+                          setPayloadResult(null)
+                          setPayloadId('')
+                          setPayloadOpen(true)
+                        }}
+                      >
+                        Payload by ID
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        onClick={() => {
+                          setTagMode('count')
+                          setTagResult(null)
+                          setTag('')
+                          setTagOpen(true)
+                        }}
+                      >
+                        Count by tag
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        color="warning"
+                        onClick={() => {
+                          setTagMode('remove')
+                          setTagResult(null)
+                          setTag('')
+                          setTagOpen(true)
+                        }}
+                      >
+                        Remove by tag
+                      </Button>
+                    </Stack>
+                    <Divider />
+                    <Stack direction="row" alignItems="center" spacing={1.5}>
+                      <Typography variant="subtitle1">Partitions</Typography>
+                      {partsLoading && <CircularProgress size={16} />}
+                      <Typography variant="caption" color="text.secondary">
+                        {partitionTruncated
+                          ? `показано ${partitions.length} из ${partitionTotal} (уточните фильтр)`
+                          : `${partitionTotal} найдено`}
+                      </Typography>
+                    </Stack>
+                    <TextField
+                      size="small"
+                      placeholder="Фильтр партиций (подстрока в Redis)…"
+                      value={partitionFilterDraft}
+                      onChange={(e) => setPartitionFilterDraft(e.target.value)}
+                      sx={{ maxWidth: 420 }}
+                    />
                   </Stack>
-                  <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                    <Button variant="outlined" onClick={loadDetail}>
-                      Refresh
-                    </Button>
-                    <Button variant="outlined" color="warning" onClick={() => runPurge('')}>
-                      Purge queue
-                    </Button>
-                    <Button variant="outlined" onClick={runRetry}>
-                      Retry
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      onClick={() => {
-                        setPayloadResult(null)
-                        setPayloadId('')
-                        setPayloadOpen(true)
-                      }}
-                    >
-                      Payload by ID
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      onClick={() => {
-                        setTagMode('count')
-                        setTagResult(null)
-                        setTag('')
-                        setTagOpen(true)
-                      }}
-                    >
-                      Count by tag
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      color="warning"
-                      onClick={() => {
-                        setTagMode('remove')
-                        setTagResult(null)
-                        setTag('')
-                        setTagOpen(true)
-                      }}
-                    >
-                      Remove by tag
-                    </Button>
-                  </Stack>
-                  <Divider />
-                  <Typography variant="subtitle1">Partitions (db {activeDb})</Typography>
-                  <Table size="small">
-                    <TableHead>
-                      <TableRow>
-                        <TableCell>ID</TableCell>
-                        <TableCell align="right">Pending</TableCell>
-                        <TableCell>Flags</TableCell>
-                        <TableCell align="right">Actions</TableCell>
-                      </TableRow>
-                    </TableHead>
-                    <TableBody>
-                      {(detail?.partitions || []).map((p) => (
-                        <TableRow key={p.id}>
-                          <TableCell>{p.id}</TableCell>
-                          <TableCell align="right">{p.pending}</TableCell>
-                          <TableCell>
-                            {[p.locked && 'locked', p.blocked && 'blocked'].filter(Boolean).join(', ') ||
-                              '—'}
-                          </TableCell>
-                          <TableCell align="right">
-                            <Button size="small" color="warning" onClick={() => runPurge(p.id)}>
-                              Purge
-                            </Button>
-                          </TableCell>
+
+                  <TableContainer
+                    sx={{
+                      flex: 1,
+                      minHeight: 0,
+                      mt: 1.5,
+                      border: 1,
+                      borderColor: 'divider',
+                      borderRadius: 2,
+                      bgcolor: 'background.paper',
+                    }}
+                  >
+                    <Table size="small" stickyHeader>
+                      <TableHead>
+                        <TableRow>
+                          <TableCell>ID</TableCell>
+                          <TableCell align="right">Pending</TableCell>
+                          <TableCell align="right">In prog</TableCell>
+                          <TableCell>Groups</TableCell>
+                          <TableCell>Flags</TableCell>
+                          <TableCell align="right">Actions</TableCell>
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </Stack>
+                      </TableHead>
+                      <TableBody>
+                        {partitions.length === 0 ? (
+                          <TableRow>
+                            <TableCell colSpan={6}>
+                              <Typography variant="body2" color="text.secondary">
+                                Партиции не найдены
+                              </Typography>
+                            </TableCell>
+                          </TableRow>
+                        ) : (
+                          partitions.map((p) => (
+                            <TableRow key={p.id}>
+                              <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                                {p.id}
+                              </TableCell>
+                              <TableCell align="right">{p.pending}</TableCell>
+                              <TableCell align="right">{p.inProgress}</TableCell>
+                              <TableCell>
+                                {(p.groups || []).join(', ') || '—'}
+                              </TableCell>
+                              <TableCell>
+                                {[p.locked && 'locked', p.blocked && 'blocked']
+                                  .filter(Boolean)
+                                  .join(', ') || '—'}
+                              </TableCell>
+                              <TableCell align="right">
+                                <Button size="small" color="warning" onClick={() => runPurge(p.id)}>
+                                  Purge
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          ))
+                        )}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                </>
               )}
             </Box>
           </Box>
@@ -627,7 +786,7 @@ export default function App() {
       </Dialog>
 
       <Dialog open={payloadOpen} onClose={() => setPayloadOpen(false)} fullWidth maxWidth="md">
-        <DialogTitle>Payload by ID (db {activeDb})</DialogTitle>
+        <DialogTitle>Payload by ID</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             <Stack direction="row" spacing={1}>
@@ -671,9 +830,7 @@ export default function App() {
       </Dialog>
 
       <Dialog open={tagOpen} onClose={() => setTagOpen(false)} fullWidth maxWidth="sm">
-        <DialogTitle>
-          {tagMode === 'count' ? 'Count by tag' : 'Remove by tag'} (db {activeDb})
-        </DialogTitle>
+        <DialogTitle>{tagMode === 'count' ? 'Count by tag' : 'Remove by tag'}</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             <TextField label="Tag" value={tag} onChange={(e) => setTag(e.target.value)} />

@@ -23,10 +23,20 @@ const (
 
 // PartitionView — партиция для UI.
 type PartitionView struct {
-	ID      string `json:"id"`
-	Pending int64  `json:"pending"`
-	Locked  bool   `json:"locked"`
-	Blocked bool   `json:"blocked"`
+	ID         string   `json:"id"`
+	Pending    int64    `json:"pending"`
+	InProgress int64    `json:"inProgress"`
+	Locked     bool     `json:"locked"`
+	Blocked    bool     `json:"blocked"`
+	Groups     []string `json:"groups"`
+}
+
+// GroupView — группа очереди.
+type GroupView struct {
+	Name    string  `json:"name"`
+	Ready   int64   `json:"ready"`
+	Blocked bool    `json:"blocked"`
+	Score   float64 `json:"score"`
 }
 
 // RateView — клиентская оценка скорости.
@@ -35,25 +45,30 @@ type RateView struct {
 	BacklogDeltaPerSec float64 `json:"backlogDeltaPerSec"`
 }
 
-// QueueListItem — схлопнутая очередь (одно имя, несколько DB).
+// QueueListItem — схлопнутая очередь (только имя + DB для сайдбара).
 type QueueListItem struct {
-	Name       string   `json:"name"`
-	DBs        []int    `json:"dbs"`
-	Pending    int64    `json:"pending"`    // stats с первой DB
-	InProgress int64    `json:"inProgress"` // stats с первой DB
-	Consumers  int      `json:"consumers"`
-	Rate       RateView `json:"rate"`
+	Name string `json:"name"`
+	DBs  []int  `json:"dbs"`
 }
 
-// QueueSnapshot — Inspect одной очереди на конкретной DB.
+// QueueSnapshot — сводка очереди на DB (без полного списка партиций).
 type QueueSnapshot struct {
-	Name       string          `json:"name"`
-	DB         int             `json:"db"`
-	Pending    int64           `json:"pending"`
-	InProgress int64           `json:"inProgress"`
-	Consumers  int             `json:"consumers"`
+	Name           string      `json:"name"`
+	DB             int         `json:"db"`
+	Pending        int64       `json:"pending"`
+	InProgress     int64       `json:"inProgress"`
+	Consumers      int         `json:"consumers"`
+	PartitionTotal int         `json:"partitionTotal"`
+	Groups         []GroupView `json:"groups"`
+	Rate           RateView    `json:"rate"`
+}
+
+// PartitionListResult — отфильтрованные партиции.
+type PartitionListResult struct {
 	Partitions []PartitionView `json:"partitions"`
-	Rate       RateView        `json:"rate"`
+	Total      int             `json:"total"`
+	Limit      int             `json:"limit"`
+	Truncated  bool            `json:"truncated"`
 }
 
 // TaskView — payload и мета по id.
@@ -451,13 +466,12 @@ func (a *App) catalogSnapshot() map[string][]int {
 
 // --- Queues ---
 
-// ListQueues возвращает схлопнутый каталог; stats — с первой DB каждой очереди.
+// ListQueues возвращает схлопнутый каталог (только имена + DB).
 func (a *App) ListQueues() ([]QueueListItem, error) {
 	if err := a.ensureConnected(); err != nil {
 		return nil, err
 	}
 	cat := a.catalogSnapshot()
-	// Если каталог пуст (первый заход / сбой) — один быстрый refresh.
 	if len(cat) == 0 {
 		_ = a.RefreshCatalog()
 		cat = a.catalogSnapshot()
@@ -471,27 +485,52 @@ func (a *App) ListQueues() ([]QueueListItem, error) {
 
 	out := make([]QueueListItem, 0, len(names))
 	for _, name := range names {
-		dbs := cat[name]
-		item := QueueListItem{Name: name, DBs: dbs}
-		if len(dbs) > 0 {
-			if snap, err := a.inspectOne(name, dbs[0]); err == nil {
-				item.Pending = snap.Pending
-				item.InProgress = snap.InProgress
-				item.Consumers = snap.Consumers
-				item.Rate = snap.Rate
-			}
-		}
-		out = append(out, item)
+		out = append(out, QueueListItem{Name: name, DBs: cat[name]})
 	}
 	return out, nil
 }
 
-// InspectQueue — полная статистика очереди на выбранной DB.
+// InspectQueue — сводка очереди на DB (без таблицы партиций).
 func (a *App) InspectQueue(name string, db int) (QueueSnapshot, error) {
 	if err := a.ensureConnected(); err != nil {
 		return QueueSnapshot{}, err
 	}
 	return a.inspectOne(name, db)
+}
+
+// ListPartitions — партиции с фильтром подстроки, max 1000.
+func (a *App) ListPartitions(name string, db int, filter string) (PartitionListResult, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return PartitionListResult{}, err
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 15*time.Second)
+	defer cancel()
+	parts, total, err := admin.ListPartitions(ctx, name, filter, redisqueue.MaxListPartitions)
+	if err != nil {
+		return PartitionListResult{}, err
+	}
+	out := make([]PartitionView, 0, len(parts))
+	for _, p := range parts {
+		groups := p.Groups
+		if groups == nil {
+			groups = []string{}
+		}
+		out = append(out, PartitionView{
+			ID:         p.Partition,
+			Pending:    p.Pending,
+			InProgress: p.InProgress,
+			Locked:     p.Locked,
+			Blocked:    p.Blocked,
+			Groups:     groups,
+		})
+	}
+	return PartitionListResult{
+		Partitions: out,
+		Total:      total,
+		Limit:      redisqueue.MaxListPartitions,
+		Truncated:  total > len(out),
+	}, nil
 }
 
 func (a *App) inspectOne(name string, db int) (QueueSnapshot, error) {
@@ -501,28 +540,27 @@ func (a *App) inspectOne(name string, db int) (QueueSnapshot, error) {
 	}
 	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), dbScanTimeout)
 	defer cancel()
-	stats, err := admin.Inspect(ctx, name, "")
+	s, err := admin.QueueOverview(ctx, name)
 	if err != nil {
 		return QueueSnapshot{}, err
 	}
-	snap := QueueSnapshot{Name: name, DB: db, Partitions: []PartitionView{}}
-	if len(stats) == 0 {
-		return snap, nil
+	snap := QueueSnapshot{
+		Name:           name,
+		DB:             db,
+		Pending:        s.TotalPending,
+		InProgress:     s.TotalInProgress,
+		Consumers:      len(s.Consumers),
+		PartitionTotal: s.PartitionTotal,
+		Groups:         []GroupView{},
 	}
-	s := stats[0]
-	parts := make([]PartitionView, 0, len(s.Partitions))
-	for _, p := range s.Partitions {
-		parts = append(parts, PartitionView{
-			ID:      p.Partition,
-			Pending: p.Pending,
-			Locked:  p.Locked,
-			Blocked: p.Blocked,
+	for _, g := range s.Groups {
+		snap.Groups = append(snap.Groups, GroupView{
+			Name:    g.Name,
+			Ready:   g.Ready,
+			Blocked: g.Blocked,
+			Score:   g.Score,
 		})
 	}
-	snap.Pending = s.TotalPending
-	snap.InProgress = s.TotalInProgress
-	snap.Consumers = len(s.Consumers)
-	snap.Partitions = parts
 
 	key := sampleKey(name, db)
 	now := time.Now()
