@@ -21,7 +21,7 @@
 
 ## Требования
 
-- Go 1.22+
+- Go 1.25+ (см. `go.mod`; desktop UI тянет Wails / `golang.org/x`)
 - Redis 6+
 
 ## Установка
@@ -286,6 +286,7 @@ make manager
 | `info` (alias: list, ls) | Информация об очередях: партиции, pending, in-progress, консьюмеры |
 | `purge` | Очистить очередь (или только указанную партицию) |
 | `retry` | Вернуть in-progress задачи в очередь (для зависших после падения консьюмера) |
+| `desktop` | GUI manager (Wails); `-tags wails,production,webkit2_41` (Ubuntu 24.04+) |
 
 ### Примеры
 
@@ -310,6 +311,45 @@ make manager
 ```
 
 Глобальные флаги: `-a` (addr), `-P` (password), `--db`. Переменные: `REDIS_ADDR`, `REDIS_PASSWORD`.
+
+### Desktop UI (Wails)
+
+GUI для профилей Redis-подключений, обзора очередей, purge/retry, payload по ID и операций по тегам.
+
+Сборка GUI вынесена за build-тег `wails`, чтобы обычный `go build ./...` и CI не требовали CGO/GTK.
+
+Требования:
+
+- Go 1.25+, CGO, зависимости Wails для вашей ОС ([дока Wails](https://wails.io/docs/gettingstarted/installation))
+- Node.js 18+ (для frontend; Vite 6)
+- Redis для проверки подключений из UI
+
+```bash
+# CLI Wails (один раз)
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+# Frontend
+cd internal/desktopui/frontend && npm install && npm run build && cd -
+
+# Запуск GUI
+# wails — наш тег; production — тег Wails; webkit2_41 — Ubuntu 24.04+ (webkit2gtk-4.1)
+# WEBKIT_DISABLE_DMABUF_RENDERER — обход GBM EGL abort на NVIDIA/Wayland
+WEBKIT_DISABLE_DMABUF_RENDERER=1 go run -tags wails,production,webkit2_41 ./cmd/manager desktop
+```
+
+Если всё ещё падает на Wayland: `GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 go run ...`
+
+На Ubuntu 22.04 / системах с `libwebkit2gtk-4.0-dev` тег `webkit2_41` не нужен.
+
+Зависимости ОС (Ubuntu 24.04):
+
+```bash
+sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev
+```
+
+Профили сохраняются в `~/.config/smart-redis-queue/connections.json` (или `os.UserConfigDir()`).
+
+Без `-tags wails` команда `desktop` возвращает понятную ошибку — это ожидаемо.
 
 ## Тесты
 

@@ -1,4 +1,4 @@
-.PHONY: build clean docker-up docker-down test test-short test-coverage example
+.PHONY: build clean docker-up docker-down test test-short test-coverage example manager desktop frontend
 
 # Библиотека: проверка сборки
 build:
@@ -7,6 +7,14 @@ build:
 # Собрать CLI manager
 manager:
 	go build -o bin/manager ./cmd/manager
+
+# Frontend для desktop UI (нужен Node.js 18+)
+frontend:
+	cd internal/desktopui/frontend && npm install && npm run build
+
+# GUI manager (CGO + Wails; webkit2_41 для Ubuntu 24.04+)
+desktop: frontend
+	go build -tags wails,production,webkit2_41 -o bin/manager-desktop ./cmd/manager
 
 clean:
 	rm -rf bin/ coverage.out coverage.html

@@ -65,6 +65,11 @@ func main() {
 				},
 				Action: runRetry,
 			},
+			{
+				Name:   "desktop",
+				Usage:  "GUI manager (Wails). Требует сборку с -tags wails",
+				Action: runDesktop,
+			},
 		},
 	}
 
