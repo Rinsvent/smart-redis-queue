@@ -13,11 +13,13 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  Divider,
   FormControl,
   FormControlLabel,
   IconButton,
   InputLabel,
+  ListItemIcon,
+  ListItemText,
+  Menu,
   MenuItem,
   Select,
   Snackbar,
@@ -35,13 +37,25 @@ import {
   createTheme,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
+import CheckIcon from '@mui/icons-material/Check'
 import DarkModeOutlinedIcon from '@mui/icons-material/DarkModeOutlined'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
+import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import LightModeOutlinedIcon from '@mui/icons-material/LightModeOutlined'
+import MoreVertIcon from '@mui/icons-material/MoreVert'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import { api } from './api'
 
 const FONT = '"DM Sans", "Segoe UI", sans-serif'
+
+const POLL_PRESETS = [
+  { label: 'Off', ms: 0 },
+  { label: '5s', ms: 5000 },
+  { label: '10s', ms: 10000 },
+  { label: '30s', ms: 30000 },
+  { label: '1m', ms: 60000 },
+  { label: '5m', ms: 300000 },
+]
 
 function buildTheme(mode) {
   const dark = mode === 'dark'
@@ -93,6 +107,12 @@ function rateLabel(r) {
   return `~${p} msg/s processed · backlog ${sign}${b.toFixed(1)}/s`
 }
 
+function readPollMs() {
+  const n = Number(localStorage.getItem('srq-poll-ms'))
+  if (Number.isFinite(n) && POLL_PRESETS.some((p) => p.ms === n)) return n
+  return 5000
+}
+
 export default function App() {
   const [mode, setMode] = useState(() => localStorage.getItem('srq-theme') || 'light')
   const theme = useMemo(() => buildTheme(mode), [mode])
@@ -112,6 +132,7 @@ export default function App() {
   const [loading, setLoading] = useState(false)
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [partsLoading, setPartsLoading] = useState(false)
+  const [pollMs, setPollMs] = useState(readPollMs)
   const [snack, setSnack] = useState({ open: false, msg: '', severity: 'info' })
 
   const [addOpen, setAddOpen] = useState(false)
@@ -130,6 +151,8 @@ export default function App() {
   const [tagResult, setTagResult] = useState(null)
 
   const [confirm, setConfirm] = useState(null)
+  const [actionsAnchor, setActionsAnchor] = useState(null)
+  const [pollAnchor, setPollAnchor] = useState(null)
   const pollRef = useRef(null)
   const partFilterTimer = useRef(null)
 
@@ -140,6 +163,8 @@ export default function App() {
     if (!q) return queues
     return queues.filter((item) => item.name.toLowerCase().includes(q))
   }, [queues, queueFilter])
+
+  const pollLabel = POLL_PRESETS.find((p) => p.ms === pollMs)?.label || 'Off'
 
   const loadConnections = useCallback(async () => {
     try {
@@ -221,6 +246,11 @@ export default function App() {
     }
   }, [selectedQueue, activeDb, partitionFilter])
 
+  const refreshSelected = useCallback(() => {
+    loadDetail()
+    loadPartitions()
+  }, [loadDetail, loadPartitions])
+
   useEffect(() => {
     loadConnections()
   }, [loadConnections])
@@ -234,27 +264,33 @@ export default function App() {
     if (!item) {
       setDetail(null)
       setPartitions([])
-      return
+      return undefined
     }
     if (!item.dbs?.includes(activeDb)) {
       setActiveDb(item.dbs?.[0] ?? 0)
-      return
+      return undefined
     }
     loadDetail()
     loadPartitions()
     if (pollRef.current) clearInterval(pollRef.current)
-    pollRef.current = setInterval(() => {
-      loadDetail()
-      loadPartitions()
-    }, 2000)
+    if (pollMs > 0) {
+      pollRef.current = setInterval(() => {
+        loadDetail()
+        loadPartitions()
+      }, pollMs)
+    }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
     }
-  }, [queues, selectedQueue, activeDb, loadDetail, loadPartitions])
+  }, [queues, selectedQueue, activeDb, loadDetail, loadPartitions, pollMs])
 
   useEffect(() => {
     localStorage.setItem('srq-theme', mode)
   }, [mode])
+
+  useEffect(() => {
+    localStorage.setItem('srq-poll-ms', String(pollMs))
+  }, [pollMs])
 
   useEffect(() => {
     if (partFilterTimer.current) clearTimeout(partFilterTimer.current)
@@ -326,18 +362,16 @@ export default function App() {
 
   const runPurge = (partition) => {
     if (!selectedQueue) return
+    setActionsAnchor(null)
     setConfirm({
-      title: partition
-        ? `Purge partition ${partition}?`
-        : `Purge queue ${selectedQueue}?`,
+      title: partition ? `Purge partition ${partition}?` : `Purge queue ${selectedQueue}?`,
       body: 'Все pending-задачи будут удалены на выбранной DB.',
       action: async () => {
         try {
           const n = await api.purge(selectedQueue, partition || '', activeDb)
           notify(`Удалено задач: ${n}`, 'success')
           await refreshCatalog()
-          loadDetail()
-          loadPartitions()
+          refreshSelected()
         } catch (e) {
           notify(String(e), 'error')
         }
@@ -347,6 +381,7 @@ export default function App() {
 
   const runRetry = () => {
     if (!selectedQueue) return
+    setActionsAnchor(null)
     setConfirm({
       title: `Retry ${selectedQueue}?`,
       body: 'In-progress tasks вернутся в pending.',
@@ -354,8 +389,7 @@ export default function App() {
         try {
           const n = await api.retry(selectedQueue, activeDb)
           notify(`Возвращено: ${n}`, 'success')
-          loadDetail()
-          loadPartitions()
+          refreshSelected()
         } catch (e) {
           notify(String(e), 'error')
         }
@@ -389,13 +423,16 @@ export default function App() {
           activeDb,
         )
         setTagResult(r)
-        loadDetail()
-        loadPartitions()
+        refreshSelected()
       }
     } catch (e) {
       notify(String(e), 'error')
     }
   }
+
+  const countLabel = partitionTruncated
+    ? `${partitions.length}/${partitionTotal}`
+    : String(partitionTotal)
 
   return (
     <ThemeProvider theme={theme}>
@@ -481,7 +518,7 @@ export default function App() {
               flex: 1,
               minHeight: 0,
               display: 'grid',
-              gridTemplateColumns: { xs: '1fr', md: '280px 1fr' },
+              gridTemplateColumns: { xs: '1fr', md: '260px 1fr' },
               gap: 0,
             }}
           >
@@ -489,51 +526,59 @@ export default function App() {
               sx={{
                 borderRight: 1,
                 borderColor: 'divider',
-                p: 2,
+                p: 1.5,
                 display: 'flex',
                 flexDirection: 'column',
                 minHeight: 0,
                 bgcolor: 'background.paper',
               }}
             >
-              <Stack direction="row" alignItems="center" justifyContent="space-between" mb={1}>
-                <Typography variant="subtitle1">Очереди</Typography>
-                {(loading || catalogLoading) && <CircularProgress size={18} />}
+              <Stack direction="row" alignItems="center" spacing={1} mb={1}>
+                <TextField
+                  size="small"
+                  fullWidth
+                  placeholder="Очереди"
+                  value={queueFilter}
+                  onChange={(e) => setQueueFilter(e.target.value)}
+                />
+                {loading && <CircularProgress size={16} />}
               </Stack>
-              <TextField
-                size="small"
-                placeholder="Фильтр…"
-                value={queueFilter}
-                onChange={(e) => setQueueFilter(e.target.value)}
-                sx={{ mb: 1.5 }}
-              />
               <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
                 {filteredQueues.length === 0 ? (
-                  <Typography variant="body2" color="text.secondary">
+                  <Typography variant="body2" color="text.secondary" sx={{ px: 1 }}>
                     Нет очередей
                   </Typography>
                 ) : (
-                  <Stack spacing={0.5}>
-                    {filteredQueues.map((q) => (
-                      <Box
-                        key={q.name}
-                        onClick={() => onSelectQueue(q.name)}
-                        sx={{
-                          px: 1.25,
-                          py: 1,
-                          borderRadius: 2,
-                          cursor: 'pointer',
-                          border: 1,
-                          borderColor: selectedQueue === q.name ? 'primary.main' : 'divider',
-                          bgcolor: selectedQueue === q.name ? 'action.selected' : 'transparent',
-                          '&:hover': { bgcolor: 'action.hover' },
-                        }}
-                      >
-                        <Typography fontWeight={600} noWrap title={q.name}>
-                          {q.name}
-                        </Typography>
-                      </Box>
-                    ))}
+                  <Stack spacing={0}>
+                    {filteredQueues.map((q) => {
+                      const active = selectedQueue === q.name
+                      return (
+                        <Box
+                          key={q.name}
+                          onClick={() => onSelectQueue(q.name)}
+                          sx={{
+                            px: 1.25,
+                            py: 0.65,
+                            cursor: 'pointer',
+                            borderRadius: 1,
+                            bgcolor: active ? 'action.selected' : 'transparent',
+                            '&:hover': { bgcolor: 'action.hover' },
+                          }}
+                        >
+                          <Typography
+                            noWrap
+                            title={q.name}
+                            sx={{
+                              fontSize: 13.5,
+                              fontWeight: active ? 700 : 500,
+                              color: active ? 'primary.main' : 'text.primary',
+                            }}
+                          >
+                            {q.name}
+                          </Typography>
+                        </Box>
+                      )
+                    })}
                   </Stack>
                 )}
               </Box>
@@ -552,21 +597,29 @@ export default function App() {
                 <Typography color="text.secondary">Выберите очередь слева</Typography>
               ) : (
                 <>
-                  <Stack spacing={2} sx={{ flexShrink: 0 }}>
+                  <Stack spacing={1.5} sx={{ flexShrink: 0 }}>
+                    <Box>
+                      <Typography variant="h5">{selectedMeta.name}</Typography>
+                      <Typography color="text.secondary" variant="body2">
+                        {detail ? rateLabel(detail.rate) : '—'}
+                      </Typography>
+                    </Box>
+
+                    <Stack direction="row" spacing={3} flexWrap="wrap">
+                      <Stat label="Pending" value={detail?.pending} />
+                      <Stat label="In progress" value={detail?.inProgress} />
+                      <Stat label="Consumers" value={detail?.consumers} />
+                    </Stack>
+
                     <Stack
-                      direction={{ xs: 'column', sm: 'row' }}
-                      alignItems={{ sm: 'center' }}
+                      direction="row"
+                      alignItems="center"
                       justifyContent="space-between"
-                      gap={1.5}
+                      gap={1}
+                      flexWrap="wrap"
                     >
-                      <Box>
-                        <Typography variant="h5">{selectedMeta.name}</Typography>
-                        <Typography color="text.secondary" variant="body2">
-                          {detail ? rateLabel(detail.rate) : '—'}
-                        </Typography>
-                      </Box>
                       <Stack direction="row" alignItems="center" spacing={0.75} flexWrap="wrap" useFlexGap>
-                        <Typography variant="body2" color="text.secondary" sx={{ mr: 0.5 }}>
+                        <Typography variant="body2" color="text.secondary" sx={{ mr: 0.25 }}>
                           DB:
                         </Typography>
                         {(selectedMeta.dbs || []).map((db) => {
@@ -577,7 +630,7 @@ export default function App() {
                               onClick={() => setActiveDb(db)}
                               sx={{
                                 px: 1.25,
-                                py: 0.4,
+                                py: 0.35,
                                 borderRadius: 1.5,
                                 border: 1,
                                 borderColor: active ? 'primary.main' : 'divider',
@@ -593,100 +646,65 @@ export default function App() {
                           )
                         })}
                       </Stack>
-                    </Stack>
-
-                    <Stack direction="row" spacing={3} flexWrap="wrap">
-                      <Stat label="Pending" value={detail?.pending} />
-                      <Stat label="In progress" value={detail?.inProgress} />
-                      <Stat label="Consumers" value={detail?.consumers} />
-                      <Stat label="Partitions" value={detail?.partitionTotal} />
+                      <IconButton
+                        size="small"
+                        onClick={(e) => setActionsAnchor(e.currentTarget)}
+                        title="Действия"
+                      >
+                        <MoreVertIcon />
+                      </IconButton>
                     </Stack>
 
                     {(detail?.groups || []).length > 0 && (
-                      <Box>
-                        <Typography variant="subtitle2" gutterBottom>
-                          Groups
-                        </Typography>
-                        <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                          {detail.groups.map((g) => (
-                            <Chip
-                              key={g.name}
-                              size="small"
-                              color={g.blocked ? 'warning' : 'default'}
-                              label={`${g.name}: ready ${g.ready}${g.blocked ? ' · blocked' : ''}`}
-                            />
-                          ))}
-                        </Stack>
-                      </Box>
+                      <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
+                        {detail.groups.map((g) => (
+                          <Chip
+                            key={g.name}
+                            size="small"
+                            color={g.blocked ? 'warning' : 'default'}
+                            label={`${g.name}: ready ${g.ready}${g.blocked ? ' · blocked' : ''}`}
+                          />
+                        ))}
+                      </Stack>
                     )}
 
-                    <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
-                      <Button
-                        variant="outlined"
-                        onClick={() => {
-                          loadDetail()
-                          loadPartitions()
-                        }}
+                    <Stack direction="row" alignItems="center" spacing={1}>
+                      <TextField
+                        size="small"
+                        fullWidth
+                        placeholder="Partitions"
+                        value={partitionFilterDraft}
+                        onChange={(e) => setPartitionFilterDraft(e.target.value)}
+                      />
+                      <Typography
+                        variant="body2"
+                        color="text.secondary"
+                        sx={{ minWidth: 52, textAlign: 'right', flexShrink: 0 }}
+                        title={
+                          partitionTruncated
+                            ? `Показано ${partitions.length} из ${partitionTotal}`
+                            : `${partitionTotal} партиций`
+                        }
                       >
-                        Refresh
-                      </Button>
-                      <Button variant="outlined" color="warning" onClick={() => runPurge('')}>
-                        Purge queue
-                      </Button>
-                      <Button variant="outlined" onClick={runRetry}>
-                        Retry
-                      </Button>
-                      <Button
-                        variant="outlined"
-                        onClick={() => {
-                          setPayloadResult(null)
-                          setPayloadId('')
-                          setPayloadOpen(true)
-                        }}
-                      >
-                        Payload by ID
-                      </Button>
-                      <Button
-                        variant="outlined"
-                        onClick={() => {
-                          setTagMode('count')
-                          setTagResult(null)
-                          setTag('')
-                          setTagOpen(true)
-                        }}
-                      >
-                        Count by tag
-                      </Button>
-                      <Button
-                        variant="outlined"
-                        color="warning"
-                        onClick={() => {
-                          setTagMode('remove')
-                          setTagResult(null)
-                          setTag('')
-                          setTagOpen(true)
-                        }}
-                      >
-                        Remove by tag
-                      </Button>
-                    </Stack>
-                    <Divider />
-                    <Stack direction="row" alignItems="center" spacing={1.5}>
-                      <Typography variant="subtitle1">Partitions</Typography>
-                      {partsLoading && <CircularProgress size={16} />}
-                      <Typography variant="caption" color="text.secondary">
-                        {partitionTruncated
-                          ? `показано ${partitions.length} из ${partitionTotal} (уточните фильтр)`
-                          : `${partitionTotal} найдено`}
+                        {countLabel}
                       </Typography>
+                      <IconButton
+                        size="small"
+                        onClick={refreshSelected}
+                        disabled={partsLoading}
+                        title="Обновить"
+                      >
+                        {partsLoading ? <CircularProgress size={18} /> : <RefreshIcon fontSize="small" />}
+                      </IconButton>
+                      <IconButton
+                        size="small"
+                        onClick={(e) => setPollAnchor(e.currentTarget)}
+                        title={`Автообновление: ${pollLabel}`}
+                        sx={{ ml: -0.5 }}
+                      >
+                        <KeyboardArrowDownIcon fontSize="small" />
+                      </IconButton>
                     </Stack>
-                    <TextField
-                      size="small"
-                      placeholder="Фильтр партиций (подстрока в Redis)…"
-                      value={partitionFilterDraft}
-                      onChange={(e) => setPartitionFilterDraft(e.target.value)}
-                      sx={{ maxWidth: 420 }}
-                    />
                   </Stack>
 
                   <TableContainer
@@ -728,9 +746,7 @@ export default function App() {
                               </TableCell>
                               <TableCell align="right">{p.pending}</TableCell>
                               <TableCell align="right">{p.inProgress}</TableCell>
-                              <TableCell>
-                                {(p.groups || []).join(', ') || '—'}
-                              </TableCell>
+                              <TableCell>{(p.groups || []).join(', ') || '—'}</TableCell>
                               <TableCell>
                                 {[p.locked && 'locked', p.blocked && 'blocked']
                                   .filter(Boolean)
@@ -753,6 +769,71 @@ export default function App() {
           </Box>
         )}
       </Box>
+
+      <Menu
+        anchorEl={actionsAnchor}
+        open={!!actionsAnchor}
+        onClose={() => setActionsAnchor(null)}
+      >
+        <MenuItem
+          onClick={() => {
+            setActionsAnchor(null)
+            runPurge('')
+          }}
+        >
+          Purge queue
+        </MenuItem>
+        <MenuItem onClick={runRetry}>Retry</MenuItem>
+        <MenuItem
+          onClick={() => {
+            setActionsAnchor(null)
+            setPayloadResult(null)
+            setPayloadId('')
+            setPayloadOpen(true)
+          }}
+        >
+          Payload by ID
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            setActionsAnchor(null)
+            setTagMode('count')
+            setTagResult(null)
+            setTag('')
+            setTagOpen(true)
+          }}
+        >
+          Count by tag
+        </MenuItem>
+        <MenuItem
+          onClick={() => {
+            setActionsAnchor(null)
+            setTagMode('remove')
+            setTagResult(null)
+            setTag('')
+            setTagOpen(true)
+          }}
+        >
+          Remove by tag
+        </MenuItem>
+      </Menu>
+
+      <Menu anchorEl={pollAnchor} open={!!pollAnchor} onClose={() => setPollAnchor(null)}>
+        {POLL_PRESETS.map((p) => (
+          <MenuItem
+            key={p.label}
+            onClick={() => {
+              setPollMs(p.ms)
+              setPollAnchor(null)
+            }}
+          >
+            <ListItemIcon sx={{ minWidth: 32 }}>
+              {pollMs === p.ms ? <CheckIcon fontSize="small" /> : null}
+            </ListItemIcon>
+            <ListItemText>{p.label}</ListItemText>
+          </MenuItem>
+        ))}
+      </Menu>
 
       <Dialog open={addOpen} onClose={() => setAddOpen(false)} fullWidth maxWidth="sm">
         <DialogTitle>Новое подключение Redis</DialogTitle>
