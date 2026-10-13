@@ -3,6 +3,7 @@ package redisqueue
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -39,38 +40,54 @@ type QueueStats struct {
 	Consumers       []string
 }
 
-// ListQueues возвращает имена всех очередей (обнаруживает по ключам queue:*:partitions)
+// ListQueues возвращает имена очередей (union SCAN queue:*:partitions и queue:*:consumers).
+// Так видны и «осиротевшие» очереди, у которых остались только consumers.
 func (a *Admin) ListQueues(ctx context.Context) ([]string, error) {
-	var queues []string
-	iter := a.redis.Scan(ctx, 0, "queue:*:partitions", 0).Iterator()
-	for iter.Next(ctx) {
-		key := iter.Val()
-		// queue:NAME:partitions -> NAME
-		if strings.HasPrefix(key, "queue:") && strings.HasSuffix(key, ":partitions") {
-			name := strings.TrimPrefix(strings.TrimSuffix(key, ":partitions"), "queue:")
+	seen := make(map[string]struct{})
+	for _, pattern := range []string{"queue:*:partitions", "queue:*:consumers"} {
+		suffix := ":partitions"
+		if strings.HasSuffix(pattern, ":consumers") {
+			suffix = ":consumers"
+		}
+		iter := a.redis.Scan(ctx, 0, pattern, 200).Iterator()
+		for iter.Next(ctx) {
+			key := iter.Val()
+			if !strings.HasPrefix(key, "queue:") || !strings.HasSuffix(key, suffix) {
+				continue
+			}
+			name := strings.TrimPrefix(strings.TrimSuffix(key, suffix), "queue:")
 			if name != "" {
-				queues = append(queues, name)
+				seen[name] = struct{}{}
 			}
 		}
+		if err := iter.Err(); err != nil {
+			return nil, err
+		}
 	}
-	if err := iter.Err(); err != nil {
-		return nil, err
+	queues := make([]string, 0, len(seen))
+	for name := range seen {
+		queues = append(queues, name)
 	}
+	sort.Strings(queues)
 	return queues, nil
 }
 
-// Inspect возвращает статистику по очередям с фильтрами
+// Inspect возвращает статистику по очередям с фильтрами.
+// Если задан queueFilter — ListQueues не вызывается (без лишнего SCAN).
 func (a *Admin) Inspect(ctx context.Context, queueFilter, partitionFilter string) ([]*QueueStats, error) {
-	queues, err := a.ListQueues(ctx)
-	if err != nil {
-		return nil, err
+	var queues []string
+	if queueFilter != "" {
+		queues = []string{queueFilter}
+	} else {
+		var err error
+		queues, err = a.ListQueues(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var result []*QueueStats
 	for _, q := range queues {
-		if queueFilter != "" && q != queueFilter {
-			continue
-		}
 		stats, err := a.queueStats(ctx, q, partitionFilter)
 		if err != nil {
 			return nil, fmt.Errorf("queue %s: %w", q, err)

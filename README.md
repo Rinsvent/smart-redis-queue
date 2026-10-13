@@ -314,9 +314,11 @@ make manager
 
 ### Desktop UI (Wails)
 
-GUI для профилей Redis-подключений, обзора очередей, purge/retry, payload по ID и операций по тегам.
+GUI для Redis-хостов (без выбора DB в профиле): обзор очередей по всем DB, purge/retry, payload по ID и операции по тегам.
 
 Сборка GUI вынесена за build-тег `wails`, чтобы обычный `go build ./...` и CI не требовали CGO/GTK.
+
+Профиль: `name` + `addr` + `password`. Каталог очередей строится SCAN’ом `queue:*:partitions` и `queue:*:consumers` по DB `0..N-1` (N из `CONFIG GET databases`, иначе 16). Обновление каталога — раз в 5 минут и кнопкой Refresh. Одноимённые очереди на разных DB схлопываются в списке; в карточке — табы по DB.
 
 Требования:
 
@@ -347,7 +349,7 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 go run -tags wails,production,webkit2_41 ./cmd/
 sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev
 ```
 
-Профили сохраняются в `~/.config/smart-redis-queue/connections.json` (или `os.UserConfigDir()`).
+Профили сохраняются в `~/.config/smart-redis-queue/connections.json` (или `os.UserConfigDir()`). Поле `db` в старых профилях игнорируется.
 
 Без `-tags wails` команда `desktop` возвращает понятную ошибку — это ожидаемо.
 

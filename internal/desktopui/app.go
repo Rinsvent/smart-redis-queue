@@ -3,11 +3,22 @@ package desktopui
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strconv"
 	"sync"
 	"time"
 
 	redisqueue "github.com/Rinsvent/smart-redis-queue"
 	"github.com/redis/go-redis/v9"
+)
+
+const (
+	catalogInterval   = 5 * time.Minute
+	defaultDBCount    = 16
+	maxDBCount        = 16
+	dbDialTimeout     = 2 * time.Second
+	dbScanTimeout     = 5 * time.Second
+	catalogMaxTimeout = 20 * time.Second
 )
 
 // PartitionView — партиция для UI.
@@ -24,9 +35,20 @@ type RateView struct {
 	BacklogDeltaPerSec float64 `json:"backlogDeltaPerSec"`
 }
 
-// QueueSnapshot — Inspect + скорость для UI.
+// QueueListItem — схлопнутая очередь (одно имя, несколько DB).
+type QueueListItem struct {
+	Name       string   `json:"name"`
+	DBs        []int    `json:"dbs"`
+	Pending    int64    `json:"pending"`    // stats с первой DB
+	InProgress int64    `json:"inProgress"` // stats с первой DB
+	Consumers  int      `json:"consumers"`
+	Rate       RateView `json:"rate"`
+}
+
+// QueueSnapshot — Inspect одной очереди на конкретной DB.
 type QueueSnapshot struct {
 	Name       string          `json:"name"`
+	DB         int             `json:"db"`
 	Pending    int64           `json:"pending"`
 	InProgress int64           `json:"inProgress"`
 	Consumers  int             `json:"consumers"`
@@ -55,26 +77,34 @@ type App struct {
 	ctx   context.Context
 	store *Store
 
-	mu     sync.Mutex
-	rdb    *redis.Client
-	admin  *redisqueue.Admin
-	connID string
+	mu       sync.Mutex
+	addr     string
+	password string
+	connID   string
+	clients  map[int]*redis.Client
 
-	// speed sampler state per queue
+	catalogMu sync.RWMutex
+	catalog   map[string][]int // queue name → DBs
+
+	loopMu     sync.Mutex
+	loopCancel context.CancelFunc
+
 	prevMu sync.Mutex
-	prev   map[string]sample
-	prevAt time.Time
+	prev   map[string]sample // key: name@db
 }
 
 type sample struct {
 	pending    int64
 	inProgress int64
+	at         time.Time
 }
 
 func NewApp(store *Store) *App {
 	return &App{
-		store: store,
-		prev:  map[string]sample{},
+		store:   store,
+		clients: map[int]*redis.Client{},
+		catalog: map[string][]int{},
+		prev:    map[string]sample{},
 	}
 }
 
@@ -89,6 +119,10 @@ func (a *App) ctxOrBackground() context.Context {
 	return context.Background()
 }
 
+func sampleKey(name string, db int) string {
+	return name + "@" + strconv.Itoa(db)
+}
+
 // --- Connections ---
 
 func (a *App) ListConnections() []Connection {
@@ -99,11 +133,11 @@ func (a *App) ActiveConnectionID() string {
 	return a.store.ActiveID()
 }
 
-func (a *App) AddConnection(name, addr, password string, db int) (Connection, error) {
-	if err := a.ping(addr, password, db); err != nil {
+func (a *App) AddConnection(name, addr, password string) (Connection, error) {
+	if err := a.ping(addr, password); err != nil {
 		return Connection{}, fmt.Errorf("connection failed: %w", err)
 	}
-	c, err := a.store.Add(name, addr, password, db)
+	c, err := a.store.Add(name, addr, password)
 	if err != nil {
 		return Connection{}, err
 	}
@@ -115,10 +149,11 @@ func (a *App) AddConnection(name, addr, password string, db int) (Connection, er
 
 func (a *App) RemoveConnection(id string) error {
 	a.mu.Lock()
-	if a.connID == id {
-		a.closeRedis()
-	}
+	same := a.connID == id
 	a.mu.Unlock()
+	if same {
+		a.disconnect()
+	}
 	return a.store.Remove(id)
 }
 
@@ -133,77 +168,120 @@ func (a *App) SelectConnection(id string) error {
 	return a.connect(*c)
 }
 
-func (a *App) TestConnection(addr, password string, db int) error {
-	return a.ping(addr, password, db)
+func (a *App) TestConnection(addr, password string) error {
+	return a.ping(addr, password)
 }
 
-func (a *App) ping(addr, password string, db int) error {
-	rdb := redis.NewClient(&redis.Options{Addr: addr, Password: password, DB: db})
+func (a *App) ping(addr, password string) error {
+	rdb := redis.NewClient(&redis.Options{Addr: addr, Password: password, DB: 0})
 	defer rdb.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), dbDialTimeout)
 	defer cancel()
 	return rdb.Ping(ctx).Err()
 }
 
 func (a *App) connect(c Connection) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.closeRedis()
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     c.Addr,
-		Password: c.Password,
-		DB:       c.DB,
-	})
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	a.disconnect()
+
+	rdb := redis.NewClient(&redis.Options{Addr: c.Addr, Password: c.Password, DB: 0})
+	ctx, cancel := context.WithTimeout(context.Background(), dbDialTimeout)
 	defer cancel()
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		_ = rdb.Close()
 		return err
 	}
-	a.rdb = rdb
-	a.admin = redisqueue.NewAdmin(rdb)
+
+	a.mu.Lock()
+	a.addr = c.Addr
+	a.password = c.Password
 	a.connID = c.ID
+	a.clients = map[int]*redis.Client{0: rdb}
+	a.mu.Unlock()
+
 	a.prevMu.Lock()
 	a.prev = map[string]sample{}
-	a.prevAt = time.Time{}
 	a.prevMu.Unlock()
+
+	if err := a.RefreshCatalog(); err != nil {
+		return err
+	}
+	a.startCatalogLoop()
 	return nil
 }
 
-func (a *App) closeRedis() {
-	if a.rdb != nil {
-		_ = a.rdb.Close()
-		a.rdb = nil
-		a.admin = nil
-		a.connID = ""
-	}
-}
+func (a *App) disconnect() {
+	a.stopCatalogLoop()
 
-func (a *App) ensureAdmin() (*redisqueue.Admin, error) {
 	a.mu.Lock()
-	if a.admin != nil {
-		admin := a.admin
-		a.mu.Unlock()
-		return admin, nil
+	for _, c := range a.clients {
+		_ = c.Close()
 	}
+	a.clients = map[int]*redis.Client{}
+	a.addr = ""
+	a.password = ""
+	a.connID = ""
 	a.mu.Unlock()
 
-	c, err := a.store.Active()
+	a.catalogMu.Lock()
+	a.catalog = map[string][]int{}
+	a.catalogMu.Unlock()
+}
+
+func (a *App) clientForDB(db int) (*redis.Client, error) {
+	a.mu.Lock()
+	if a.addr == "" {
+		a.mu.Unlock()
+		return nil, fmt.Errorf("no active connection")
+	}
+	if c, ok := a.clients[db]; ok {
+		a.mu.Unlock()
+		return c, nil
+	}
+	addr, password := a.addr, a.password
+	a.mu.Unlock()
+
+	c := redis.NewClient(&redis.Options{
+		Addr:         addr,
+		Password:     password,
+		DB:           db,
+		DialTimeout:  dbDialTimeout,
+		ReadTimeout:  dbScanTimeout,
+		WriteTimeout: dbDialTimeout,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), dbDialTimeout)
+	defer cancel()
+	if err := c.Ping(ctx).Err(); err != nil {
+		_ = c.Close()
+		return nil, fmt.Errorf("db %d: %w", db, err)
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if existing, ok := a.clients[db]; ok {
+		_ = c.Close()
+		return existing, nil
+	}
+	if a.addr == "" {
+		_ = c.Close()
+		return nil, fmt.Errorf("no active connection")
+	}
+	a.clients[db] = c
+	return c, nil
+}
+
+func (a *App) adminForDB(db int) (*redisqueue.Admin, error) {
+	rdb, err := a.clientForDB(db)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.connect(*c); err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	admin := a.admin
-	a.mu.Unlock()
-	return admin, nil
+	return redisqueue.NewAdmin(rdb), nil
 }
 
-// EnsureActive подключает активный профиль (вызывать при старте UI).
-func (a *App) EnsureActive() error {
-	if a.store.ActiveID() == "" {
+func (a *App) ensureConnected() error {
+	a.mu.Lock()
+	ok := a.addr != ""
+	a.mu.Unlock()
+	if ok {
 		return nil
 	}
 	c, err := a.store.Active()
@@ -213,94 +291,292 @@ func (a *App) EnsureActive() error {
 	return a.connect(*c)
 }
 
-// --- Queues ---
-
-func (a *App) ListQueues() ([]QueueSnapshot, error) {
-	admin, err := a.ensureAdmin()
-	if err != nil {
-		return nil, err
+// EnsureActive подключает активный профиль только если ещё не подключён к нему.
+func (a *App) EnsureActive() error {
+	id := a.store.ActiveID()
+	if id == "" {
+		return nil
 	}
-	ctx := a.ctxOrBackground()
-	stats, err := admin.Inspect(ctx, "", "")
-	if err != nil {
-		return nil, err
+	a.mu.Lock()
+	already := a.connID == id && a.addr != ""
+	a.mu.Unlock()
+	if already {
+		return nil
 	}
+	c, err := a.store.Active()
+	if err != nil {
+		return err
+	}
+	return a.connect(*c)
+}
 
-	now := time.Now()
-	a.prevMu.Lock()
-	defer a.prevMu.Unlock()
-	dt := now.Sub(a.prevAt).Seconds()
-	out := make([]QueueSnapshot, 0, len(stats))
-	next := map[string]sample{}
-
-	for _, s := range stats {
-		parts := make([]PartitionView, 0, len(s.Partitions))
-		for _, p := range s.Partitions {
-			parts = append(parts, PartitionView{
-				ID:      p.Partition,
-				Pending: p.Pending,
-				Locked:  p.Locked,
-				Blocked: p.Blocked,
-			})
-		}
-		snap := QueueSnapshot{
-			Name:       s.QueueName,
-			Pending:    s.TotalPending,
-			InProgress: s.TotalInProgress,
-			Consumers:  len(s.Consumers),
-			Partitions: parts,
-		}
-		cur := sample{pending: s.TotalPending, inProgress: s.TotalInProgress}
-		next[s.QueueName] = cur
-		if !a.prevAt.IsZero() && dt > 0 {
-			if prev, ok := a.prev[s.QueueName]; ok {
-				prevBacklog := prev.pending + prev.inProgress
-				curBacklog := cur.pending + cur.inProgress
-				snap.Rate.BacklogDeltaPerSec = float64(curBacklog-prevBacklog) / dt
-				// оценка: уменьшение pending ≈ обработка
-				processed := float64(prev.pending-cur.pending) / dt
-				if processed < 0 {
-					processed = 0
-				}
-				snap.Rate.ProcessedPerSec = processed
+func (a *App) startCatalogLoop() {
+	a.stopCatalogLoop()
+	ctx, cancel := context.WithCancel(a.ctxOrBackground())
+	a.loopMu.Lock()
+	a.loopCancel = cancel
+	a.loopMu.Unlock()
+	go func() {
+		t := time.NewTicker(catalogInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				_ = a.RefreshCatalog()
 			}
 		}
-		out = append(out, snap)
+	}()
+}
+
+func (a *App) stopCatalogLoop() {
+	a.loopMu.Lock()
+	defer a.loopMu.Unlock()
+	if a.loopCancel != nil {
+		a.loopCancel()
+		a.loopCancel = nil
 	}
-	a.prev = next
-	a.prevAt = now
+}
+
+func (a *App) databaseCount(ctx context.Context) int {
+	rdb, err := a.clientForDB(0)
+	if err != nil {
+		return defaultDBCount
+	}
+	res, err := rdb.ConfigGet(ctx, "databases").Result()
+	if err != nil {
+		return defaultDBCount
+	}
+	raw, ok := res["databases"]
+	if !ok || raw == "" {
+		return defaultDBCount
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		return defaultDBCount
+	}
+	if n > maxDBCount {
+		return maxDBCount
+	}
+	return n
+}
+
+// RefreshCatalog сканирует Redis DB (partitions + consumers) с таймаутами.
+func (a *App) RefreshCatalog() error {
+	if err := a.ensureConnected(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), catalogMaxTimeout)
+	defer cancel()
+
+	n := a.databaseCount(ctx)
+	type hit struct {
+		name string
+		db   int
+	}
+	hits := make(chan hit, n*4)
+	var wg sync.WaitGroup
+
+	for db := 0; db < n; db++ {
+		wg.Add(1)
+		go func(db int) {
+			defer wg.Done()
+			dbCtx, dbCancel := context.WithTimeout(ctx, dbScanTimeout)
+			defer dbCancel()
+
+			admin, err := a.adminForDB(db)
+			if err != nil {
+				return
+			}
+			names, err := admin.ListQueues(dbCtx)
+			if err != nil {
+				return
+			}
+			for _, name := range names {
+				select {
+				case hits <- hit{name: name, db: db}:
+				case <-dbCtx.Done():
+					return
+				}
+			}
+		}(db)
+	}
+
+	go func() {
+		wg.Wait()
+		close(hits)
+	}()
+
+	next := map[string][]int{}
+	for h := range hits {
+		next[h.name] = append(next[h.name], h.db)
+	}
+	for name := range next {
+		sort.Ints(next[name])
+		// dedupe if any
+		next[name] = uniqueInts(next[name])
+	}
+
+	a.catalogMu.Lock()
+	a.catalog = next
+	a.catalogMu.Unlock()
+	return nil
+}
+
+func uniqueInts(in []int) []int {
+	if len(in) < 2 {
+		return in
+	}
+	out := in[:1]
+	for _, v := range in[1:] {
+		if v != out[len(out)-1] {
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+func (a *App) catalogSnapshot() map[string][]int {
+	a.catalogMu.RLock()
+	defer a.catalogMu.RUnlock()
+	out := make(map[string][]int, len(a.catalog))
+	for k, v := range a.catalog {
+		cp := make([]int, len(v))
+		copy(cp, v)
+		out[k] = cp
+	}
+	return out
+}
+
+// --- Queues ---
+
+// ListQueues возвращает схлопнутый каталог; stats — с первой DB каждой очереди.
+func (a *App) ListQueues() ([]QueueListItem, error) {
+	if err := a.ensureConnected(); err != nil {
+		return nil, err
+	}
+	cat := a.catalogSnapshot()
+	// Если каталог пуст (первый заход / сбой) — один быстрый refresh.
+	if len(cat) == 0 {
+		_ = a.RefreshCatalog()
+		cat = a.catalogSnapshot()
+	}
+
+	names := make([]string, 0, len(cat))
+	for name := range cat {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	out := make([]QueueListItem, 0, len(names))
+	for _, name := range names {
+		dbs := cat[name]
+		item := QueueListItem{Name: name, DBs: dbs}
+		if len(dbs) > 0 {
+			if snap, err := a.inspectOne(name, dbs[0]); err == nil {
+				item.Pending = snap.Pending
+				item.InProgress = snap.InProgress
+				item.Consumers = snap.Consumers
+				item.Rate = snap.Rate
+			}
+		}
+		out = append(out, item)
+	}
 	return out, nil
 }
 
-func (a *App) Purge(queue, partition string) (int, error) {
-	admin, err := a.ensureAdmin()
+// InspectQueue — полная статистика очереди на выбранной DB.
+func (a *App) InspectQueue(name string, db int) (QueueSnapshot, error) {
+	if err := a.ensureConnected(); err != nil {
+		return QueueSnapshot{}, err
+	}
+	return a.inspectOne(name, db)
+}
+
+func (a *App) inspectOne(name string, db int) (QueueSnapshot, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return QueueSnapshot{}, err
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), dbScanTimeout)
+	defer cancel()
+	stats, err := admin.Inspect(ctx, name, "")
+	if err != nil {
+		return QueueSnapshot{}, err
+	}
+	snap := QueueSnapshot{Name: name, DB: db, Partitions: []PartitionView{}}
+	if len(stats) == 0 {
+		return snap, nil
+	}
+	s := stats[0]
+	parts := make([]PartitionView, 0, len(s.Partitions))
+	for _, p := range s.Partitions {
+		parts = append(parts, PartitionView{
+			ID:      p.Partition,
+			Pending: p.Pending,
+			Locked:  p.Locked,
+			Blocked: p.Blocked,
+		})
+	}
+	snap.Pending = s.TotalPending
+	snap.InProgress = s.TotalInProgress
+	snap.Consumers = len(s.Consumers)
+	snap.Partitions = parts
+
+	key := sampleKey(name, db)
+	now := time.Now()
+	cur := sample{pending: snap.Pending, inProgress: snap.InProgress, at: now}
+	a.prevMu.Lock()
+	defer a.prevMu.Unlock()
+	if prev, ok := a.prev[key]; ok {
+		dt := now.Sub(prev.at).Seconds()
+		if dt > 0 {
+			prevBacklog := prev.pending + prev.inProgress
+			curBacklog := cur.pending + cur.inProgress
+			snap.Rate.BacklogDeltaPerSec = float64(curBacklog-prevBacklog) / dt
+			processed := float64(prev.pending-cur.pending) / dt
+			if processed < 0 {
+				processed = 0
+			}
+			snap.Rate.ProcessedPerSec = processed
+		}
+	}
+	if a.prev == nil {
+		a.prev = map[string]sample{}
+	}
+	a.prev[key] = cur
+	return snap, nil
+}
+
+func (a *App) Purge(queue, partition string, db int) (int, error) {
+	admin, err := a.adminForDB(db)
 	if err != nil {
 		return 0, err
 	}
-	return admin.Purge(a.ctxOrBackground(), queue, partition)
+	n, err := admin.Purge(a.ctxOrBackground(), queue, partition)
+	if err != nil {
+		return 0, err
+	}
+	_ = a.RefreshCatalog()
+	return n, nil
 }
 
-func (a *App) Retry(queue string) (int, error) {
-	admin, err := a.ensureAdmin()
+func (a *App) Retry(queue string, db int) (int, error) {
+	admin, err := a.adminForDB(db)
 	if err != nil {
 		return 0, err
 	}
 	return admin.Retry(a.ctxOrBackground(), queue)
 }
 
-func (a *App) GetTaskPayload(queue, taskID string) (TaskView, error) {
-	a.mu.Lock()
-	rdb := a.rdb
-	a.mu.Unlock()
-	if rdb == nil {
-		if _, err := a.ensureAdmin(); err != nil {
-			return TaskView{}, err
-		}
-		a.mu.Lock()
-		rdb = a.rdb
-		a.mu.Unlock()
+func (a *App) GetTaskPayload(queue, taskID string, db int) (TaskView, error) {
+	rdb, err := a.clientForDB(db)
+	if err != nil {
+		return TaskView{}, err
 	}
-	ctx := a.ctxOrBackground()
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), dbScanTimeout)
+	defer cancel()
 	payload, err := rdb.Get(ctx, "queue:"+queue+":payload:"+taskID).Result()
 	if err == redis.Nil {
 		return TaskView{TaskID: taskID, Exists: false}, nil
@@ -319,16 +595,16 @@ func (a *App) GetTaskPayload(queue, taskID string) (TaskView, error) {
 	}, nil
 }
 
-func (a *App) CountByTag(queue, tag string) (int64, error) {
-	admin, err := a.ensureAdmin()
+func (a *App) CountByTag(queue, tag string, db int) (int64, error) {
+	admin, err := a.adminForDB(db)
 	if err != nil {
 		return 0, err
 	}
 	return admin.CountByTag(a.ctxOrBackground(), queue, tag)
 }
 
-func (a *App) RemoveByTag(queue, tag string, limit int, returnPayload bool) (TagRemoveResult, error) {
-	admin, err := a.ensureAdmin()
+func (a *App) RemoveByTag(queue, tag string, limit int, returnPayload bool, db int) (TagRemoveResult, error) {
+	admin, err := a.adminForDB(db)
 	if err != nil {
 		return TagRemoveResult{}, err
 	}

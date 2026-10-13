@@ -13,16 +13,18 @@ async function call(name, ...args) {
 export const api = {
   listConnections: () => call('ListConnections'),
   activeConnectionID: () => call('ActiveConnectionID'),
-  addConnection: (name, addr, password, db) => call('AddConnection', name, addr, password, db),
+  addConnection: (name, addr, password) => call('AddConnection', name, addr, password),
   removeConnection: (id) => call('RemoveConnection', id),
   selectConnection: (id) => call('SelectConnection', id),
-  testConnection: (addr, password, db) => call('TestConnection', addr, password, db),
+  testConnection: (addr, password) => call('TestConnection', addr, password),
   ensureActive: () => call('EnsureActive'),
+  refreshCatalog: () => call('RefreshCatalog'),
   listQueues: () => call('ListQueues'),
-  purge: (queue, partition) => call('Purge', queue, partition || ''),
-  retry: (queue) => call('Retry', queue),
-  getTaskPayload: (queue, taskId) => call('GetTaskPayload', queue, taskId),
-  countByTag: (queue, tag) => call('CountByTag', queue, tag),
-  removeByTag: (queue, tag, limit, returnPayload) =>
-    call('RemoveByTag', queue, tag, limit, returnPayload),
+  inspectQueue: (name, db) => call('InspectQueue', name, db),
+  purge: (queue, partition, db) => call('Purge', queue, partition || '', db),
+  retry: (queue, db) => call('Retry', queue, db),
+  getTaskPayload: (queue, taskId, db) => call('GetTaskPayload', queue, taskId, db),
+  countByTag: (queue, tag, db) => call('CountByTag', queue, tag, db),
+  removeByTag: (queue, tag, limit, returnPayload, db) =>
+    call('RemoveByTag', queue, tag, limit, returnPayload, db),
 }

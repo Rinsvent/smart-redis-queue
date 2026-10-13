@@ -10,13 +10,12 @@ import (
 	"sync"
 )
 
-// Connection — профиль Redis в GUI.
+// Connection — профиль Redis в GUI (хост + пароль, без выбора DB).
 type Connection struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
 	Addr     string `json:"addr"`
 	Password string `json:"password"`
-	DB       int    `json:"db"`
 }
 
 type storeFile struct {
@@ -111,7 +110,7 @@ func (s *Store) Active() (*Connection, error) {
 	return nil, fmt.Errorf("active connection not found")
 }
 
-func (s *Store) Add(name, addr, password string, db int) (Connection, error) {
+func (s *Store) Add(name, addr, password string) (Connection, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if name == "" {
@@ -125,7 +124,6 @@ func (s *Store) Add(name, addr, password string, db int) (Connection, error) {
 		Name:     name,
 		Addr:     addr,
 		Password: password,
-		DB:       db,
 	}
 	s.data.Connections = append(s.data.Connections, c)
 	s.data.ActiveID = c.ID

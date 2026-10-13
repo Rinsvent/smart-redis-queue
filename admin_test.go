@@ -45,6 +45,18 @@ func TestAdmin_ListQueues(t *testing.T) {
 	assert.Contains(t, queues, "admin-test-queue")
 }
 
+func TestAdmin_ListQueues_ConsumersOnly(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+
+	require.NoError(t, rdb.SAdd(ctx, "queue:orphan-consumers-only:consumers", "cid-1").Err())
+
+	queues, err := admin.ListQueues(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, queues, "orphan-consumers-only")
+}
+
 func TestAdmin_Inspect(t *testing.T) {
 	admin, rdb := setupAdminTest(t)
 	defer rdb.Close()
