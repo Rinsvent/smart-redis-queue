@@ -598,28 +598,39 @@ export default function App() {
               ) : (
                 <>
                   <Stack spacing={1.5} sx={{ flexShrink: 0 }}>
-                    <Box>
-                      <Typography variant="h5">{selectedMeta.name}</Typography>
-                      <Typography color="text.secondary" variant="body2">
-                        {detail ? rateLabel(detail.rate) : '—'}
-                      </Typography>
-                    </Box>
-
-                    <Stack direction="row" spacing={3} flexWrap="wrap">
-                      <Stat label="Pending" value={detail?.pending} />
-                      <Stat label="In progress" value={detail?.inProgress} />
-                      <Stat label="Consumers" value={detail?.consumers} />
-                    </Stack>
-
                     <Stack
                       direction="row"
                       alignItems="center"
-                      justifyContent="space-between"
-                      gap={1}
                       flexWrap="wrap"
+                      useFlexGap
+                      spacing={2}
+                      columnGap={3}
+                      rowGap={1}
                     >
-                      <Stack direction="row" alignItems="center" spacing={0.75} flexWrap="wrap" useFlexGap>
-                        <Typography variant="body2" color="text.secondary" sx={{ mr: 0.25 }}>
+                      <Box sx={{ minWidth: 0, flex: '1 1 160px' }}>
+                        <Typography variant="h5" noWrap title={selectedMeta.name}>
+                          {selectedMeta.name}
+                        </Typography>
+                        <Typography color="text.secondary" variant="body2" noWrap>
+                          {detail ? rateLabel(detail.rate) : '—'}
+                        </Typography>
+                      </Box>
+
+                      <Stack direction="row" spacing={2.5} alignItems="center" flexShrink={0}>
+                        <Stat label="Pending" value={detail?.pending} />
+                        <Stat label="In progress" value={detail?.inProgress} />
+                        <Stat label="Consumers" value={detail?.consumers} />
+                      </Stack>
+
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        spacing={0.75}
+                        flexWrap="wrap"
+                        useFlexGap
+                        sx={{ ml: { md: 'auto' } }}
+                      >
+                        <Typography variant="body2" color="text.secondary">
                           DB:
                         </Typography>
                         {(selectedMeta.dbs || []).map((db) => {
@@ -645,14 +656,14 @@ export default function App() {
                             </ButtonBase>
                           )
                         })}
+                        <IconButton
+                          size="small"
+                          onClick={(e) => setActionsAnchor(e.currentTarget)}
+                          title="Действия"
+                        >
+                          <MoreVertIcon />
+                        </IconButton>
                       </Stack>
-                      <IconButton
-                        size="small"
-                        onClick={(e) => setActionsAnchor(e.currentTarget)}
-                        title="Действия"
-                      >
-                        <MoreVertIcon />
-                      </IconButton>
                     </Stack>
 
                     {(detail?.groups || []).length > 0 && (
@@ -1011,11 +1022,13 @@ export default function App() {
 
 function Stat({ label, value }) {
   return (
-    <Box>
-      <Typography variant="caption" color="text.secondary">
+    <Box sx={{ lineHeight: 1.15 }}>
+      <Typography variant="caption" color="text.secondary" display="block">
         {label}
       </Typography>
-      <Typography variant="h5">{value ?? 0}</Typography>
+      <Typography variant="h6" component="div" sx={{ fontWeight: 700 }}>
+        {value ?? 0}
+      </Typography>
     </Box>
   )
 }
