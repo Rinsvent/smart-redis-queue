@@ -21,6 +21,7 @@ export const api = {
   refreshCatalog: () => call('RefreshCatalog'),
   listQueues: () => call('ListQueues'),
   inspectQueue: (name, db) => call('InspectQueue', name, db),
+  cancelQueries: () => call('CancelQueries'),
   listPartitions: (name, db, filter) => call('ListPartitions', name, db, filter || ''),
   listGroups: (name, db, filter) => call('ListGroups', name, db, filter || ''),
   listTags: (name, db, filter) => call('ListTags', name, db, filter || ''),

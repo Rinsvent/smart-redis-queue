@@ -182,8 +182,45 @@ export default function App() {
   const [pollAnchor, setPollAnchor] = useState(null)
   const pollRef = useRef(null)
   const filterTimer = useRef(null)
+  // Инкремент при смене очереди/DB/режима — игнор ответов от устаревших запросов.
+  const queryGen = useRef(0)
+  const selectionRef = useRef({ queue: '', db: 0, mode: 'partitions' })
+  selectionRef.current = { queue: selectedQueue, db: activeDb, mode: viewMode }
 
   const notify = (msg, severity = 'info') => setSnack({ open: true, msg, severity })
+
+  const isCanceled = (e) => {
+    const s = String(e || '').toLowerCase()
+    return s.includes('context canceled') || s.includes('canceled') || s.includes('cancelled')
+  }
+
+  const bumpQueryGen = () => {
+    queryGen.current += 1
+    return queryGen.current
+  }
+
+  const isStale = (gen, q, db, mode) => {
+    if (gen !== queryGen.current) return true
+    const cur = selectionRef.current
+    if (q !== cur.queue || db !== cur.db) return true
+    if (mode != null && mode !== cur.mode) return true
+    return false
+  }
+
+  const resetQueueView = () => {
+    bumpQueryGen()
+    setDetail(null)
+    setRows([])
+    setListTotal(0)
+    setListTruncated(false)
+    setTagsCount(null)
+    setListLoading(false)
+    try {
+      api.cancelQueries()
+    } catch {
+      /* binding may be missing in stub */
+    }
+  }
 
   const filteredQueues = useMemo(() => {
     const q = queueFilter.trim().toLowerCase()
@@ -250,10 +287,15 @@ export default function App() {
       setDetail(null)
       return
     }
+    const gen = queryGen.current
+    const q = selectedQueue
+    const db = activeDb
     try {
-      const snap = await api.inspectQueue(selectedQueue, activeDb)
+      const snap = await api.inspectQueue(q, db)
+      if (isStale(gen, q, db)) return
       setDetail(snap)
     } catch (e) {
+      if (isStale(gen, q, db) || isCanceled(e)) return
       notify(String(e), 'error')
       setDetail(null)
     }
@@ -266,31 +308,44 @@ export default function App() {
       setListTruncated(false)
       return
     }
+    const gen = queryGen.current
+    const q = selectedQueue
+    const db = activeDb
+    const mode = viewMode
+    const filter = listFilter
     setListLoading(true)
     try {
-      if (viewMode === 'groups') {
-        const r = await api.listGroups(selectedQueue, activeDb, listFilter)
-        setRows(r?.groups || [])
-        setListTotal(r?.total || 0)
-        setListTruncated(!!r?.truncated)
-      } else if (viewMode === 'tags') {
-        const r = await api.listTags(selectedQueue, activeDb, listFilter)
-        setRows(r?.tags || [])
-        setListTotal(0)
-        setListTruncated(!!r?.truncated)
+      let nextRows = []
+      let nextTotal = 0
+      let nextTrunc = false
+      if (mode === 'groups') {
+        const r = await api.listGroups(q, db, filter)
+        nextRows = r?.groups || []
+        nextTotal = r?.total || 0
+        nextTrunc = !!r?.truncated
+      } else if (mode === 'tags') {
+        const r = await api.listTags(q, db, filter)
+        nextRows = r?.tags || []
+        nextTotal = 0
+        nextTrunc = !!r?.truncated
       } else {
-        const r = await api.listPartitions(selectedQueue, activeDb, listFilter)
-        setRows(r?.partitions || [])
-        setListTotal(r?.total || 0)
-        setListTruncated(!!r?.truncated)
+        const r = await api.listPartitions(q, db, filter)
+        nextRows = r?.partitions || []
+        nextTotal = r?.total || 0
+        nextTrunc = !!r?.truncated
       }
+      if (isStale(gen, q, db, mode)) return
+      setRows(nextRows)
+      setListTotal(nextTotal)
+      setListTruncated(nextTrunc)
     } catch (e) {
+      if (isStale(gen, q, db, mode) || isCanceled(e)) return
       notify(String(e), 'error')
       setRows([])
       setListTotal(0)
       setListTruncated(false)
     } finally {
-      setListLoading(false)
+      if (!isStale(gen, q, db, mode)) setListLoading(false)
     }
   }, [selectedQueue, activeDb, listFilter, viewMode])
 
@@ -307,21 +362,24 @@ export default function App() {
     loadQueues()
   }, [loadQueues])
 
-  useEffect(() => {
-    setTagsCount(null)
-  }, [activeDb, selectedQueue])
-
+  // Смена очереди / DB: мгновенный сброс UI (onSelectQueue тоже сбрасывает).
   useEffect(() => {
     const item = queues.find((q) => q.name === selectedQueue)
     if (!item) {
       setDetail(null)
       setRows([])
-      return undefined
+      return
     }
     if (!item.dbs?.includes(activeDb)) {
       setActiveDb(item.dbs?.[0] ?? 0)
-      return undefined
     }
+  }, [queues, selectedQueue, activeDb])
+
+  // Загрузка + poll; устаревшие ответы режет isStale / CancelQueries.
+  useEffect(() => {
+    if (!selectedQueue) return undefined
+    const item = queues.find((q) => q.name === selectedQueue)
+    if (!item?.dbs?.includes(activeDb)) return undefined
     loadDetail()
     loadList()
     if (pollRef.current) clearInterval(pollRef.current)
@@ -358,32 +416,37 @@ export default function App() {
 
   const onSelectQueue = (name) => {
     const item = queues.find((q) => q.name === name)
+    resetQueueView()
     setSelectedQueue(name)
     setActiveDb(item?.dbs?.[0] ?? 0)
     setListFilterDraft('')
     setListFilter('')
-    setTagsCount(null)
   }
 
   const runCountTags = async () => {
     if (!selectedQueue || tagsCounting) return
+    const gen = queryGen.current
+    const q = selectedQueue
+    const db = activeDb
     setTagsCounting(true)
     try {
-      const n = await api.countTags(selectedQueue, activeDb)
+      const n = await api.countTags(q, db)
+      if (isStale(gen, q, db)) return
       setTagsCount(n)
     } catch (e) {
+      if (isStale(gen, q, db) || isCanceled(e)) return
       notify(String(e), 'error')
     } finally {
-      setTagsCounting(false)
+      if (!isStale(gen, q, db)) setTagsCounting(false)
     }
   }
 
   const onSelectConn = async (id) => {
     try {
       await api.selectConnection(id)
+      resetQueueView()
       setActiveId(id)
       setSelectedQueue('')
-      setDetail(null)
       notify('Connection selected')
     } catch (e) {
       notify(String(e), 'error')
@@ -810,10 +873,18 @@ export default function App() {
                         <Select
                           value={viewMode}
                           onChange={(e) => {
+                            bumpQueryGen()
+                            try {
+                              api.cancelQueries()
+                            } catch {
+                              /* ignore */
+                            }
                             setViewMode(e.target.value)
                             setListFilterDraft('')
                             setListFilter('')
                             setRows([])
+                            setListTotal(0)
+                            setListTruncated(false)
                             setTagsCount(null)
                           }}
                         >
@@ -943,22 +1014,19 @@ export default function App() {
                                         <DeleteOutlineIcon fontSize="small" />
                                       </IconButton>
                                     </Tooltip>
-                                    <Tooltip title="Block">
-                                      <IconButton size="small" onClick={() => openBlock(p.id)}>
-                                        <BlockIcon fontSize="small" />
-                                      </IconButton>
-                                    </Tooltip>
-                                    <Tooltip title="Unblock">
-                                      <span>
-                                        <IconButton
-                                          size="small"
-                                          disabled={!p.blocked}
-                                          onClick={() => runUnblock(p.id)}
-                                        >
+                                    {p.blocked ? (
+                                      <Tooltip title="Unblock">
+                                        <IconButton size="small" onClick={() => runUnblock(p.id)}>
                                           <LockOpenIcon fontSize="small" />
                                         </IconButton>
-                                      </span>
-                                    </Tooltip>
+                                      </Tooltip>
+                                    ) : (
+                                      <Tooltip title="Block">
+                                        <IconButton size="small" onClick={() => openBlock(p.id)}>
+                                          <BlockIcon fontSize="small" />
+                                        </IconButton>
+                                      </Tooltip>
+                                    )}
                                   </Stack>
                                 </TableCell>
                               </TableRow>

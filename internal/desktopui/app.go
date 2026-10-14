@@ -125,6 +125,11 @@ type App struct {
 	loopMu     sync.Mutex
 	loopCancel context.CancelFunc
 
+	// Отмена устаревших UI-запросов при смене очереди / новом list|inspect.
+	queryMu       sync.Mutex
+	listCancel    context.CancelFunc
+	inspectCancel context.CancelFunc
+
 	prevMu sync.Mutex
 	prev   map[string]sample // key: name@db
 }
@@ -153,6 +158,42 @@ func (a *App) ctxOrBackground() context.Context {
 		return a.ctx
 	}
 	return context.Background()
+}
+
+func (a *App) beginList(timeout time.Duration) (context.Context, context.CancelFunc) {
+	a.queryMu.Lock()
+	defer a.queryMu.Unlock()
+	if a.listCancel != nil {
+		a.listCancel()
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), timeout)
+	a.listCancel = cancel
+	return ctx, cancel
+}
+
+func (a *App) beginInspect(timeout time.Duration) (context.Context, context.CancelFunc) {
+	a.queryMu.Lock()
+	defer a.queryMu.Unlock()
+	if a.inspectCancel != nil {
+		a.inspectCancel()
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), timeout)
+	a.inspectCancel = cancel
+	return ctx, cancel
+}
+
+// CancelQueries отменяет in-flight List*/Inspect (смена очереди в UI).
+func (a *App) CancelQueries() {
+	a.queryMu.Lock()
+	defer a.queryMu.Unlock()
+	if a.listCancel != nil {
+		a.listCancel()
+		a.listCancel = nil
+	}
+	if a.inspectCancel != nil {
+		a.inspectCancel()
+		a.inspectCancel = nil
+	}
 }
 
 func sampleKey(name string, db int) string {
@@ -519,13 +560,13 @@ func (a *App) InspectQueue(name string, db int) (QueueSnapshot, error) {
 	return a.inspectOne(name, db)
 }
 
-// ListPartitions — партиции с фильтром подстроки, max 1000.
+// ListPartitions — партиции с фильтром подстроки, max MaxListPartitions.
 func (a *App) ListPartitions(name string, db int, filter string) (PartitionListResult, error) {
 	admin, err := a.adminForDB(db)
 	if err != nil {
 		return PartitionListResult{}, err
 	}
-	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 15*time.Second)
+	ctx, cancel := a.beginList(15 * time.Second)
 	defer cancel()
 	parts, total, err := admin.ListPartitions(ctx, name, filter, redisqueue.MaxListPartitions)
 	if err != nil {
@@ -560,7 +601,7 @@ func (a *App) ListGroups(name string, db int, filter string) (GroupListResult, e
 	if err != nil {
 		return GroupListResult{}, err
 	}
-	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 15*time.Second)
+	ctx, cancel := a.beginList(15 * time.Second)
 	defer cancel()
 	items, total, err := admin.ListGroups(ctx, name, filter, redisqueue.MaxListPartitions)
 	if err != nil {
@@ -589,7 +630,7 @@ func (a *App) ListTags(name string, db int, filter string) (TagListResult, error
 	if err != nil {
 		return TagListResult{}, err
 	}
-	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 15*time.Second)
+	ctx, cancel := a.beginList(15 * time.Second)
 	defer cancel()
 	items, _, err := admin.ListTags(ctx, name, filter, redisqueue.MaxListPartitions)
 	if err != nil {
@@ -612,7 +653,7 @@ func (a *App) CountTags(name string, db int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 5*time.Minute)
+	ctx, cancel := a.beginList(5 * time.Minute)
 	defer cancel()
 	return admin.CountTags(ctx, name)
 }
@@ -640,7 +681,7 @@ func (a *App) inspectOne(name string, db int) (QueueSnapshot, error) {
 	if err != nil {
 		return QueueSnapshot{}, err
 	}
-	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), dbScanTimeout)
+	ctx, cancel := a.beginInspect(dbScanTimeout)
 	defer cancel()
 	s, err := admin.QueueOverview(ctx, name)
 	if err != nil {
