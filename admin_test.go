@@ -57,6 +57,45 @@ func TestAdmin_ListQueues_ConsumersOnly(t *testing.T) {
 	assert.Contains(t, queues, "orphan-consumers-only")
 }
 
+func TestAdmin_BlockUnblockPartition(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "admin-block-part"
+	part := "!p1"
+
+	require.NoError(t, admin.BlockPartition(ctx, q, part, 30))
+	score, err := rdb.ZScore(ctx, "queue:"+q+":blocked", part).Result()
+	require.NoError(t, err)
+	assert.Greater(t, score, float64(time.Now().UnixMilli()))
+	assert.True(t, admin.isPartitionBlocked(ctx, q, part))
+
+	require.NoError(t, admin.UnblockPartition(ctx, q, part))
+	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:"+q+":blocked").Val())
+	assert.False(t, admin.isPartitionBlocked(ctx, q, part))
+}
+
+func TestAdmin_ListTags_Filter(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "admin-list-tags"
+	require.NoError(t, rdb.SAdd(ctx, "queue:"+q+":tag:camp", "t1", "t2").Err())
+	require.NoError(t, rdb.SAdd(ctx, "queue:"+q+":tag:keep", "t3").Err())
+
+	all, total, err := admin.ListTags(ctx, q, "", 1000)
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	require.Len(t, all, 2)
+
+	filtered, ftotal, err := admin.ListTags(ctx, q, "camp", 1000)
+	require.NoError(t, err)
+	assert.Equal(t, 1, ftotal)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, "camp", filtered[0].Tag)
+	assert.Equal(t, int64(2), filtered[0].Count)
+}
+
 func TestAdmin_ListPartitions_DiscoversBeyondSet(t *testing.T) {
 	admin, rdb := setupAdminTest(t)
 	defer rdb.Close()

@@ -314,11 +314,26 @@ make manager
 
 ### Desktop UI (Wails)
 
-GUI для Redis-хостов (без выбора DB в профиле): обзор очередей по всем DB, purge/retry, payload по ID и операции по тегам.
+GUI для Redis-хостов (без выбора DB в профиле): обзор очередей по всем DB, режимы Partitions / Groups / Tags, purge, block/unblock партиций (rate-limit ZSET `blocked`), retry, payload по ID и операции по тегам.
 
 Сборка GUI вынесена за build-тег `wails`, чтобы обычный `go build ./...` и CI не требовали CGO/GTK.
 
 Профиль: `name` + `addr` + `password`. Каталог очередей строится SCAN’ом `queue:*:partitions` и `queue:*:consumers` по DB `0..N-1` (N из `CONFIG GET databases`, иначе 16). Обновление каталога — раз в 5 минут и кнопкой Refresh. Одноимённые очереди на разных DB схлопываются в списке; в карточке — табы по DB.
+
+#### Готовые бинарники (GitHub Releases)
+
+На тег `v*` workflow собирает:
+
+| Asset | Платформа |
+| --- | --- |
+| `smart-redis-queue-desktop-linux-amd64` | Linux (Ubuntu 24.04+, webkit2gtk-4.1) |
+| `smart-redis-queue-desktop-windows-amd64.exe` | Windows 10 / 11 (WebView2) |
+
+Linux: при GBM/EGL abort на NVIDIA/Wayland запускайте с `WEBKIT_DISABLE_DMABUF_RENDERER=1` (при необходимости ещё `GDK_BACKEND=x11`).
+
+Windows: нужен [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (обычно уже есть на Win10/11). Windows 8 не поддерживается.
+
+#### Сборка из исходников
 
 Требования:
 

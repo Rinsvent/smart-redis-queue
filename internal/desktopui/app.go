@@ -71,6 +71,28 @@ type PartitionListResult struct {
 	Truncated  bool            `json:"truncated"`
 }
 
+// GroupListResult — отфильтрованные группы.
+type GroupListResult struct {
+	Groups    []GroupView `json:"groups"`
+	Total     int         `json:"total"`
+	Limit     int         `json:"limit"`
+	Truncated bool        `json:"truncated"`
+}
+
+// TagView — тег для UI.
+type TagView struct {
+	Tag   string `json:"tag"`
+	Count int64  `json:"count"`
+}
+
+// TagListResult — отфильтрованные теги.
+type TagListResult struct {
+	Tags      []TagView `json:"tags"`
+	Total     int       `json:"total"`
+	Limit     int       `json:"limit"`
+	Truncated bool      `json:"truncated"`
+}
+
 // TaskView — payload и мета по id.
 type TaskView struct {
 	TaskID    string `json:"taskId"`
@@ -531,6 +553,77 @@ func (a *App) ListPartitions(name string, db int, filter string) (PartitionListR
 		Limit:      redisqueue.MaxListPartitions,
 		Truncated:  total > len(out),
 	}, nil
+}
+
+// ListGroups — группы с фильтром подстроки.
+func (a *App) ListGroups(name string, db int, filter string) (GroupListResult, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return GroupListResult{}, err
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 15*time.Second)
+	defer cancel()
+	items, total, err := admin.ListGroups(ctx, name, filter, redisqueue.MaxListPartitions)
+	if err != nil {
+		return GroupListResult{}, err
+	}
+	out := make([]GroupView, 0, len(items))
+	for _, g := range items {
+		out = append(out, GroupView{
+			Name:    g.Name,
+			Ready:   g.Ready,
+			Blocked: g.Blocked,
+			Score:   g.Score,
+		})
+	}
+	return GroupListResult{
+		Groups:    out,
+		Total:     total,
+		Limit:     redisqueue.MaxListPartitions,
+		Truncated: total > len(out),
+	}, nil
+}
+
+// ListTags — теги с фильтром подстроки.
+func (a *App) ListTags(name string, db int, filter string) (TagListResult, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return TagListResult{}, err
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 15*time.Second)
+	defer cancel()
+	items, total, err := admin.ListTags(ctx, name, filter, redisqueue.MaxListPartitions)
+	if err != nil {
+		return TagListResult{}, err
+	}
+	out := make([]TagView, 0, len(items))
+	for _, t := range items {
+		out = append(out, TagView{Tag: t.Tag, Count: t.Count})
+	}
+	return TagListResult{
+		Tags:      out,
+		Total:     total,
+		Limit:     redisqueue.MaxListPartitions,
+		Truncated: total > len(out),
+	}, nil
+}
+
+// BlockPartition — rate-limit block на waitTimeSec секунд.
+func (a *App) BlockPartition(queue, partition string, waitTimeSec float64, db int) error {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return err
+	}
+	return admin.BlockPartition(a.ctxOrBackground(), queue, partition, waitTimeSec)
+}
+
+// UnblockPartition — снять из blocked.
+func (a *App) UnblockPartition(queue, partition string, db int) error {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return err
+	}
+	return admin.UnblockPartition(a.ctxOrBackground(), queue, partition)
 }
 
 func (a *App) inspectOne(name string, db int) (QueueSnapshot, error) {

@@ -22,6 +22,11 @@ export const api = {
   listQueues: () => call('ListQueues'),
   inspectQueue: (name, db) => call('InspectQueue', name, db),
   listPartitions: (name, db, filter) => call('ListPartitions', name, db, filter || ''),
+  listGroups: (name, db, filter) => call('ListGroups', name, db, filter || ''),
+  listTags: (name, db, filter) => call('ListTags', name, db, filter || ''),
+  blockPartition: (queue, partition, waitTimeSec, db) =>
+    call('BlockPartition', queue, partition, waitTimeSec, db),
+  unblockPartition: (queue, partition, db) => call('UnblockPartition', queue, partition, db),
   purge: (queue, partition, db) => call('Purge', queue, partition || '', db),
   retry: (queue, db) => call('Retry', queue, db),
   getTaskPayload: (queue, taskId, db) => call('GetTaskPayload', queue, taskId, db),

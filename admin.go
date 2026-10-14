@@ -353,6 +353,102 @@ func (a *Admin) BlockGroups(ctx context.Context, queueName string, waitTime floa
 	return blockGroups(ctx, a.redis, queueName, waitTime, groups...)
 }
 
+// TagStats — индекс тега (SCARD queue:…:tag:…).
+type TagStats struct {
+	Tag   string
+	Count int64
+}
+
+// BlockPartition паркует партицию в ZSET blocked на waitTime секунд (как Reject rate-limit).
+// Get не берёт задачи из этой партиции, пока now < unlockAt. Consumer :lock не трогаем.
+func (a *Admin) BlockPartition(ctx context.Context, queueName, partition string, waitTime float64) error {
+	if partition == "" {
+		return fmt.Errorf("partition is required")
+	}
+	if waitTime <= 0 {
+		return fmt.Errorf("waitTime must be > 0")
+	}
+	nowMs := float64(time.Now().UnixMilli())
+	if t, err := a.redis.Time(ctx).Result(); err == nil {
+		nowMs = float64(t.UnixMilli())
+	}
+	unlockAt := nowMs + waitTime*1000
+	return a.redis.ZAdd(ctx, "queue:"+queueName+":blocked", redis.Z{
+		Score:  unlockAt,
+		Member: partition,
+	}).Err()
+}
+
+// UnblockPartition снимает партицию из blocked — воркеры снова могут брать задачи.
+func (a *Admin) UnblockPartition(ctx context.Context, queueName, partition string) error {
+	if partition == "" {
+		return fmt.Errorf("partition is required")
+	}
+	return a.redis.ZRem(ctx, "queue:"+queueName+":blocked", partition).Err()
+}
+
+// ListGroups — группы очереди с фильтром подстроки, не больше limit (max 1000).
+func (a *Admin) ListGroups(ctx context.Context, queueName, substr string, limit int) ([]GroupStats, int, error) {
+	if limit <= 0 || limit > MaxListPartitions {
+		limit = MaxListPartitions
+	}
+	all := a.queueGroups(ctx, queueName)
+	matched := make([]GroupStats, 0, len(all))
+	for _, g := range all {
+		if substr == "" || strings.Contains(g.Name, substr) {
+			matched = append(matched, g)
+		}
+	}
+	total := len(matched)
+	if len(matched) > limit {
+		matched = matched[:limit]
+	}
+	return matched, total, nil
+}
+
+// ListTags — теги очереди (SCAN tag:* + SCARD) с фильтром подстроки, max limit.
+func (a *Admin) ListTags(ctx context.Context, queueName, substr string, limit int) ([]TagStats, int, error) {
+	if limit <= 0 || limit > MaxListPartitions {
+		limit = MaxListPartitions
+	}
+	prefix := "queue:" + queueName + ":tag:"
+	seen := make(map[string]struct{})
+	var tags []string
+	iter := a.redis.Scan(ctx, 0, prefix+"*", 200).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		tag := strings.TrimPrefix(key, prefix)
+		if tag == "" {
+			continue
+		}
+		if substr != "" && !strings.Contains(tag, substr) {
+			continue
+		}
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		tags = append(tags, tag)
+	}
+	if err := iter.Err(); err != nil {
+		return nil, 0, err
+	}
+	sort.Strings(tags)
+	total := len(tags)
+	if len(tags) > limit {
+		tags = tags[:limit]
+	}
+	out := make([]TagStats, 0, len(tags))
+	for _, tag := range tags {
+		n, _ := a.redis.SCard(ctx, prefix+tag).Result()
+		out = append(out, TagStats{Tag: tag, Count: n})
+	}
+	return out, total, nil
+}
+
 // TaskRemoval — результат удаления одной задачи (Remove / RemoveByTag).
 type TaskRemoval struct {
 	TaskID  string
