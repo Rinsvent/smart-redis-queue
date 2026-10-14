@@ -85,19 +85,22 @@ func TestAdmin_ListTags_Filter(t *testing.T) {
 
 	all, total, err := admin.ListTags(ctx, q, "", 100)
 	require.NoError(t, err)
-	assert.Equal(t, 2, total)
+	assert.Equal(t, 0, total) // total не считаем в ListTags
 	require.Len(t, all, 2)
 
-	// total — по базе (все теги), не по числу совпадений фильтра.
 	filtered, ftotal, err := admin.ListTags(ctx, q, "camp", 100)
 	require.NoError(t, err)
-	assert.Equal(t, 2, ftotal)
+	assert.Equal(t, 0, ftotal)
 	require.Len(t, filtered, 1)
 	assert.Equal(t, "camp", filtered[0].Tag)
 	assert.Equal(t, int64(2), filtered[0].Count)
+
+	n, err := admin.CountTags(ctx, q)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
 }
 
-func TestAdmin_ListTags_LimitAndDBTotal(t *testing.T) {
+func TestAdmin_ListTags_LimitNoTotal(t *testing.T) {
 	admin, rdb := setupAdminTest(t)
 	defer rdb.Close()
 	ctx := context.Background()
@@ -109,40 +112,86 @@ func TestAdmin_ListTags_LimitAndDBTotal(t *testing.T) {
 
 	got, total, err := admin.ListTags(ctx, q, "item-", 10)
 	require.NoError(t, err)
-	assert.Equal(t, 31, total)
+	assert.Equal(t, 0, total)
 	require.Len(t, got, 10)
-	assert.Equal(t, "item-00", got[0].Tag)
+
+	n, err := admin.CountTags(ctx, q)
+	require.NoError(t, err)
+	assert.Equal(t, 31, n)
 }
 
-func TestAdmin_ListPartitions_DiscoversBeyondSet(t *testing.T) {
+func TestAdmin_ListPartitions_SetOnlySCARD(t *testing.T) {
 	admin, rdb := setupAdminTest(t)
 	defer rdb.Close()
 	ctx := context.Background()
-	q := "discover-parts-queue"
+	q := "list-parts-set-only"
 
-	// В SET только одна партиция; вторая живёт только как priorities ZSET (типичный drift).
-	require.NoError(t, rdb.SAdd(ctx, "queue:"+q+":partitions", "!only-in-set").Err())
-	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":partition:!orphan:prio:priorities", redis.Z{Score: 0, Member: "0"}).Err())
-	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":partition:!orphan:prio:0", redis.Z{Score: 1, Member: "t1"}).Err())
-	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":group:_default:ready", redis.Z{Score: 0, Member: "!from-ready"}).Err())
+	// Только SET — orphan вне SET в list не видны.
+	require.NoError(t, rdb.SAdd(ctx, "queue:"+q+":partitions", "!a", "!b-orphan-name", "!c").Err())
+	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":partition:!ghost:priorities", redis.Z{Score: 0, Member: "0"}).Err())
+	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":partition:!b-orphan-name:priorities", redis.Z{Score: 0, Member: "0"}).Err())
+	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":partition:!b-orphan-name:0", redis.Z{Score: 1, Member: "t1"}).Err())
 
 	parts, total, err := admin.ListPartitions(ctx, q, "", 100)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, total, 3)
+	assert.Equal(t, 3, total)
+	require.Len(t, parts, 3)
 	names := make([]string, len(parts))
 	for i, p := range parts {
 		names[i] = p.Partition
 	}
-	assert.Contains(t, names, "!only-in-set")
-	assert.Contains(t, names, "!orphan:prio")
-	assert.Contains(t, names, "!from-ready")
+	assert.NotContains(t, names, "!ghost")
 
 	filtered, ftotal, err := admin.ListPartitions(ctx, q, "orphan", 100)
 	require.NoError(t, err)
-	assert.Equal(t, total, ftotal) // total — по базе, не по фильтру
+	assert.Equal(t, 3, ftotal) // SCARD всего SET
 	require.Len(t, filtered, 1)
-	assert.Equal(t, "!orphan:prio", filtered[0].Partition)
+	assert.Equal(t, "!b-orphan-name", filtered[0].Partition)
 	assert.Equal(t, int64(1), filtered[0].Pending)
+}
+
+func TestAdmin_ListPartitions_Limit(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "list-parts-limit"
+	members := make([]interface{}, 0, 150)
+	for i := 0; i < 150; i++ {
+		members = append(members, fmt.Sprintf("p%03d", i))
+	}
+	require.NoError(t, rdb.SAdd(ctx, "queue:"+q+":partitions", members...).Err())
+
+	parts, total, err := admin.ListPartitions(ctx, q, "", 100)
+	require.NoError(t, err)
+	assert.Equal(t, 150, total)
+	require.Len(t, parts, 100)
+}
+
+func TestAdmin_ListGroups_ZCardAndFilter(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "list-groups-q"
+	now := float64(time.Now().UnixMilli())
+	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":groups",
+		redis.Z{Score: now, Member: "alpha"},
+		redis.Z{Score: now + 60_000, Member: "beta-camp"},
+		redis.Z{Score: now, Member: "gamma"},
+	).Err())
+	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":group:beta-camp:ready", redis.Z{Score: 0, Member: "!p"}).Err())
+
+	all, total, err := admin.ListGroups(ctx, q, "", 100)
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+	require.Len(t, all, 3)
+
+	filtered, ftotal, err := admin.ListGroups(ctx, q, "camp", 100)
+	require.NoError(t, err)
+	assert.Equal(t, 3, ftotal)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, "beta-camp", filtered[0].Name)
+	assert.Equal(t, int64(1), filtered[0].Ready)
+	assert.True(t, filtered[0].Blocked)
 }
 
 func TestAdmin_Inspect(t *testing.T) {

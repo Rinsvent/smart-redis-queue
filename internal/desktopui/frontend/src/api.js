@@ -24,6 +24,7 @@ export const api = {
   listPartitions: (name, db, filter) => call('ListPartitions', name, db, filter || ''),
   listGroups: (name, db, filter) => call('ListGroups', name, db, filter || ''),
   listTags: (name, db, filter) => call('ListTags', name, db, filter || ''),
+  countTags: (name, db) => call('CountTags', name, db),
   blockPartition: (queue, partition, waitTimeSec, db) =>
     call('BlockPartition', queue, partition, waitTimeSec, db),
   unblockPartition: (queue, partition, db) => call('UnblockPartition', queue, partition, db),

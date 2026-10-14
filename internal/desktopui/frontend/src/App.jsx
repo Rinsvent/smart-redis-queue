@@ -38,6 +38,7 @@ import {
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
 import BlockIcon from '@mui/icons-material/Block'
+import CalculateOutlinedIcon from '@mui/icons-material/CalculateOutlined'
 import CheckIcon from '@mui/icons-material/Check'
 import DarkModeOutlinedIcon from '@mui/icons-material/DarkModeOutlined'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
@@ -149,6 +150,8 @@ export default function App() {
   const [listTruncated, setListTruncated] = useState(false)
   const [listFilter, setListFilter] = useState('')
   const [listFilterDraft, setListFilterDraft] = useState('')
+  const [tagsCount, setTagsCount] = useState(null)
+  const [tagsCounting, setTagsCounting] = useState(false)
   const [loading, setLoading] = useState(false)
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [listLoading, setListLoading] = useState(false)
@@ -269,7 +272,7 @@ export default function App() {
       } else if (viewMode === 'tags') {
         const r = await api.listTags(selectedQueue, activeDb, listFilter)
         setRows(r?.tags || [])
-        setListTotal(r?.total || 0)
+        setListTotal(0)
         setListTruncated(!!r?.truncated)
       } else {
         const r = await api.listPartitions(selectedQueue, activeDb, listFilter)
@@ -299,6 +302,10 @@ export default function App() {
   useEffect(() => {
     loadQueues()
   }, [loadQueues])
+
+  useEffect(() => {
+    setTagsCount(null)
+  }, [activeDb, selectedQueue])
 
   useEffect(() => {
     const item = queues.find((q) => q.name === selectedQueue)
@@ -351,6 +358,20 @@ export default function App() {
     setActiveDb(item?.dbs?.[0] ?? 0)
     setListFilterDraft('')
     setListFilter('')
+    setTagsCount(null)
+  }
+
+  const runCountTags = async () => {
+    if (!selectedQueue || tagsCounting) return
+    setTagsCounting(true)
+    try {
+      const n = await api.countTags(selectedQueue, activeDb)
+      setTagsCount(n)
+    } catch (e) {
+      notify(String(e), 'error')
+    } finally {
+      setTagsCounting(false)
+    }
   }
 
   const onSelectConn = async (id) => {
@@ -527,10 +548,26 @@ export default function App() {
     })
   }
 
-  const countLabel = listTruncated ? `${rows.length}/${listTotal}` : String(listTotal)
-  const countTitle = listTruncated
-    ? `Showing ${rows.length} of ${listTotal}`
-    : `${listTotal} matches`
+  const countLabel =
+    viewMode === 'tags'
+      ? tagsCount == null
+        ? listTruncated
+          ? `${rows.length}+`
+          : String(rows.length)
+        : listTruncated
+          ? `${rows.length}/${tagsCount}`
+          : String(tagsCount)
+      : listTruncated
+        ? `${rows.length}/${listTotal}`
+        : String(listTotal)
+  const countTitle =
+    viewMode === 'tags'
+      ? tagsCount == null
+        ? 'Click calculate to count all tags'
+        : `Showing ${rows.length} of ${tagsCount}`
+      : listTruncated
+        ? `Showing ${rows.length} of ${listTotal}`
+        : `${listTotal} in Redis`
 
   return (
     <ThemeProvider theme={theme}>
@@ -773,6 +810,7 @@ export default function App() {
                             setListFilterDraft('')
                             setListFilter('')
                             setRows([])
+                            setTagsCount(null)
                           }}
                         >
                           {VIEW_MODES.map((m) => (
@@ -789,14 +827,42 @@ export default function App() {
                         value={listFilterDraft}
                         onChange={(e) => setListFilterDraft(e.target.value)}
                       />
-                      <Typography
-                        variant="body2"
-                        color="text.secondary"
-                        sx={{ minWidth: 52, textAlign: 'right', flexShrink: 0 }}
-                        title={countTitle}
-                      >
-                        {countLabel}
-                      </Typography>
+                      {viewMode === 'tags' ? (
+                        <Stack direction="row" alignItems="center" spacing={0.5} flexShrink={0}>
+                          <Typography
+                            variant="body2"
+                            color="text.secondary"
+                            sx={{ minWidth: 36, textAlign: 'right' }}
+                            title={countTitle}
+                          >
+                            {countLabel}
+                          </Typography>
+                          <Tooltip title="Count all tags (SCAN)">
+                            <span>
+                              <IconButton
+                                size="small"
+                                onClick={runCountTags}
+                                disabled={!selectedQueue || tagsCounting}
+                              >
+                                {tagsCounting ? (
+                                  <CircularProgress size={16} />
+                                ) : (
+                                  <CalculateOutlinedIcon fontSize="small" />
+                                )}
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                        </Stack>
+                      ) : (
+                        <Typography
+                          variant="body2"
+                          color="text.secondary"
+                          sx={{ minWidth: 52, textAlign: 'right', flexShrink: 0 }}
+                          title={countTitle}
+                        >
+                          {countLabel}
+                        </Typography>
+                      )}
                       <IconButton
                         size="small"
                         onClick={refreshSelected}

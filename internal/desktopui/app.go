@@ -85,12 +85,11 @@ type TagView struct {
 	Count int64  `json:"count"`
 }
 
-// TagListResult — отфильтрованные теги.
+// TagListResult — страница тегов (total не считается; см. CountTags).
 type TagListResult struct {
 	Tags      []TagView `json:"tags"`
-	Total     int       `json:"total"`
 	Limit     int       `json:"limit"`
-	Truncated bool      `json:"truncated"`
+	Truncated bool      `json:"truncated"` // true если набрали полный limit — возможно есть ещё
 }
 
 // TaskView — payload и мета по id.
@@ -584,7 +583,7 @@ func (a *App) ListGroups(name string, db int, filter string) (GroupListResult, e
 	}, nil
 }
 
-// ListTags — теги с фильтром подстроки.
+// ListTags — теги с фильтром подстроки (без total; CountTags по клику).
 func (a *App) ListTags(name string, db int, filter string) (TagListResult, error) {
 	admin, err := a.adminForDB(db)
 	if err != nil {
@@ -592,7 +591,7 @@ func (a *App) ListTags(name string, db int, filter string) (TagListResult, error
 	}
 	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 15*time.Second)
 	defer cancel()
-	items, total, err := admin.ListTags(ctx, name, filter, redisqueue.MaxListPartitions)
+	items, _, err := admin.ListTags(ctx, name, filter, redisqueue.MaxListPartitions)
 	if err != nil {
 		return TagListResult{}, err
 	}
@@ -602,10 +601,20 @@ func (a *App) ListTags(name string, db int, filter string) (TagListResult, error
 	}
 	return TagListResult{
 		Tags:      out,
-		Total:     total,
 		Limit:     redisqueue.MaxListPartitions,
-		Truncated: total > len(out),
+		Truncated: len(out) >= redisqueue.MaxListPartitions,
 	}, nil
+}
+
+// CountTags — полное число тегов (итеративный SCAN).
+func (a *App) CountTags(name string, db int) (int, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return 0, err
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 5*time.Minute)
+	defer cancel()
+	return admin.CountTags(ctx, name)
 }
 
 // BlockPartition — rate-limit block на waitTimeSec секунд.
