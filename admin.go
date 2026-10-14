@@ -24,6 +24,9 @@ func NewAdmin(redisClient *redis.Client) *Admin {
 // MaxListPartitions — лимит выдачи ListPartitions / ListGroups / ListTags.
 const MaxListPartitions = 100
 
+// MaxListFilterLen — макс. длина подстроки/glob-фильтра (защита от гигантского MATCH).
+const MaxListFilterLen = 256
+
 // scanMatchCount — COUNT hint для SSCAN/ZSCAN/SCAN (батч, не лимит выборки).
 const scanMatchCount = 200
 
@@ -198,14 +201,11 @@ func (a *Admin) ListPartitions(ctx context.Context, queueName, substr string, li
 	return parts, total, nil
 }
 
-// sscanMembers собирает до limit members SET через SSCAN MATCH (*substr* после escapeRedisGlob).
-// Фильтр только на стороне Redis — без дополнительного Contains в Go.
+// sscanMembers собирает до limit members SET через SSCAN MATCH.
+// substr — фрагмент Redis glob (можно * ? [abc]); итоговый паттерн *{substr}*.
 // Останавливается как только набрано limit — весь SET не читает.
 func (a *Admin) sscanMembers(ctx context.Context, key, substr string, limit int) ([]string, error) {
-	match := "*"
-	if substr != "" {
-		match = "*" + escapeRedisGlob(substr) + "*"
-	}
+	match := listMatchGlob(substr)
 	seen := make(map[string]struct{}, limit)
 	out := make([]string, 0, limit)
 	var cursor uint64
@@ -388,8 +388,7 @@ func (a *Admin) ListGroups(ctx context.Context, queueName, substr string, limit 
 			out = append(out, a.groupStatsFromZ(ctx, queueName, z, nowMs))
 		}
 	} else {
-		// Фильтр только MATCH *substr* (escapeRedisGlob) — без Contains в Go.
-		match := "*" + escapeRedisGlob(substr) + "*"
+		match := listMatchGlob(substr)
 		seen := make(map[string]struct{}, limit)
 		out = make([]GroupStats, 0, limit)
 		var cursor uint64
@@ -427,12 +426,8 @@ func (a *Admin) ListTags(ctx context.Context, queueName, substr string, limit in
 		limit = MaxListPartitions
 	}
 	prefix := "queue:" + queueName + ":tag:"
-	pattern := prefix + "*"
-	if substr != "" {
-		pattern = prefix + "*" + escapeRedisGlob(substr) + "*"
-	}
-
-	// Фильтр только SCAN MATCH pattern — без Contains в Go.
+	// substr — glob-фрагмент; ключ = prefix + tag → MATCH prefix+*{substr}*
+	pattern := prefix + listMatchGlob(substr)
 	seen := make(map[string]struct{}, limit)
 	tags := make([]string, 0, limit)
 	var cursor uint64
@@ -500,20 +495,17 @@ func (a *Admin) CountTags(ctx context.Context, queueName string) (int, error) {
 	return len(seen), nil
 }
 
-// escapeRedisGlob экранирует meta-символы Redis MATCH, чтобы substr искался буквально.
-func escapeRedisGlob(s string) string {
-	var b strings.Builder
-	b.Grow(len(s) * 2)
-	for _, r := range s {
-		switch r {
-		case '\\', '*', '?', '[', ']':
-			b.WriteByte('\\')
-			b.WriteRune(r)
-		default:
-			b.WriteRune(r)
-		}
+// listMatchGlob строит паттерн Redis MATCH из пользовательского фильтра.
+// Пусто → "*"; иначе "*{filter}*" (filter — glob: * ? [abc] допустимы).
+// Это не инъекция команд: MATCH — аргумент SSCAN/ZSCAN/SCAN через go-redis.
+func listMatchGlob(filter string) string {
+	if filter == "" {
+		return "*"
 	}
-	return b.String()
+	if len(filter) > MaxListFilterLen {
+		filter = filter[:MaxListFilterLen]
+	}
+	return "*" + filter + "*"
 }
 
 // TaskRemoval — результат удаления одной задачи (Remove / RemoveByTag).

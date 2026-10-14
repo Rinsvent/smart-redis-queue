@@ -167,6 +167,26 @@ func TestAdmin_ListPartitions_Limit(t *testing.T) {
 	require.Len(t, parts, 100)
 }
 
+func TestAdmin_ListPartitions_GlobFilter(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "list-parts-glob"
+	require.NoError(t, rdb.SAdd(ctx, "queue:"+q+":partitions",
+		"user:1", "user:2", "order:9", "user:99").Err())
+
+	// glob: user:* → *user:** в MATCH
+	got, total, err := admin.ListPartitions(ctx, q, "user:*", 100)
+	require.NoError(t, err)
+	assert.Equal(t, 4, total)
+	require.Len(t, got, 3)
+	names := make([]string, len(got))
+	for i, p := range got {
+		names[i] = p.Partition
+	}
+	assert.ElementsMatch(t, []string{"user:1", "user:2", "user:99"}, names)
+}
+
 func TestAdmin_ListGroups_ZCardAndFilter(t *testing.T) {
 	admin, rdb := setupAdminTest(t)
 	defer rdb.Close()

@@ -194,7 +194,11 @@ export default function App() {
   const pollLabel = POLL_PRESETS.find((p) => p.ms === pollMs)?.label || 'Off'
 
   const filterPlaceholder =
-    viewMode === 'groups' ? 'Filter groups' : viewMode === 'tags' ? 'Filter tags' : 'Filter partitions'
+    viewMode === 'groups'
+      ? 'Filter groups (glob * ?)'
+      : viewMode === 'tags'
+        ? 'Filter tags (glob * ?)'
+        : 'Filter partitions (glob * ?)'
 
   const loadConnections = useCallback(async () => {
     try {
