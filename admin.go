@@ -198,7 +198,8 @@ func (a *Admin) ListPartitions(ctx context.Context, queueName, substr string, li
 	return parts, total, nil
 }
 
-// sscanMembers собирает до limit members SET через SSCAN; match=*substr* если substr не пуст.
+// sscanMembers собирает до limit members SET через SSCAN MATCH (*substr* после escapeRedisGlob).
+// Фильтр только на стороне Redis — без дополнительного Contains в Go.
 // Останавливается как только набрано limit — весь SET не читает.
 func (a *Admin) sscanMembers(ctx context.Context, key, substr string, limit int) ([]string, error) {
 	match := "*"
@@ -215,9 +216,6 @@ func (a *Admin) sscanMembers(ctx context.Context, key, substr string, limit int)
 		}
 		for _, m := range keys {
 			if m == "" {
-				continue
-			}
-			if substr != "" && !strings.Contains(m, substr) {
 				continue
 			}
 			if _, ok := seen[m]; ok {
@@ -390,6 +388,7 @@ func (a *Admin) ListGroups(ctx context.Context, queueName, substr string, limit 
 			out = append(out, a.groupStatsFromZ(ctx, queueName, z, nowMs))
 		}
 	} else {
+		// Фильтр только MATCH *substr* (escapeRedisGlob) — без Contains в Go.
 		match := "*" + escapeRedisGlob(substr) + "*"
 		seen := make(map[string]struct{}, limit)
 		out = make([]GroupStats, 0, limit)
@@ -402,7 +401,7 @@ func (a *Admin) ListGroups(ctx context.Context, queueName, substr string, limit 
 			// ZScan returns [member, score, member, score, ...]
 			for i := 0; i+1 < len(keys) && len(out) < limit; i += 2 {
 				name := keys[i]
-				if name == "" || !strings.Contains(name, substr) {
+				if name == "" {
 					continue
 				}
 				if _, ok := seen[name]; ok {
@@ -433,6 +432,7 @@ func (a *Admin) ListTags(ctx context.Context, queueName, substr string, limit in
 		pattern = prefix + "*" + escapeRedisGlob(substr) + "*"
 	}
 
+	// Фильтр только SCAN MATCH pattern — без Contains в Go.
 	seen := make(map[string]struct{}, limit)
 	tags := make([]string, 0, limit)
 	var cursor uint64
@@ -447,9 +447,6 @@ func (a *Admin) ListTags(ctx context.Context, queueName, substr string, limit in
 			}
 			tag := strings.TrimPrefix(key, prefix)
 			if tag == "" {
-				continue
-			}
-			if substr != "" && !strings.Contains(tag, substr) {
 				continue
 			}
 			if _, ok := seen[tag]; ok {
