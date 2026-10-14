@@ -21,8 +21,9 @@ func NewAdmin(redisClient *redis.Client) *Admin {
 	return &Admin{redis: redisClient}
 }
 
-// MaxListPartitions — лимит выдачи ListPartitions (уточняйте фильтр, если нужно больше).
-const MaxListPartitions = 1000
+// MaxListPartitions — лимит выдачи ListPartitions / ListGroups / ListTags.
+// total в этих методах — полное число сущностей в Redis (без фильтра); в срез попадает ≤ MaxListPartitions совпадений.
+const MaxListPartitions = 100
 
 // PartitionStats статистика по партиции
 type PartitionStats struct {
@@ -171,8 +172,8 @@ func (a *Admin) QueueOverview(ctx context.Context, queueName string) (*QueueStat
 	return stats, nil
 }
 
-// ListPartitions возвращает партиции с фильтром по подстроке (Contains), не больше limit (max 1000).
-// total — число совпадений до обрезки limit.
+// ListPartitions возвращает партиции с фильтром по подстроке (Contains), не больше limit (max 100).
+// total — число партиций в Redis до фильтра; в parts — до limit совпадений.
 func (a *Admin) ListPartitions(ctx context.Context, queueName, substr string, limit int) (parts []PartitionStats, total int, err error) {
 	if limit <= 0 || limit > MaxListPartitions {
 		limit = MaxListPartitions
@@ -181,15 +182,16 @@ func (a *Admin) ListPartitions(ctx context.Context, queueName, substr string, li
 	if err != nil {
 		return nil, 0, err
 	}
-	matched := make([]string, 0, len(ids))
+	total = len(ids)
+	matched := make([]string, 0, min(limit, len(ids)))
 	for _, id := range ids {
-		if substr == "" || strings.Contains(id, substr) {
-			matched = append(matched, id)
+		if substr != "" && !strings.Contains(id, substr) {
+			continue
 		}
-	}
-	total = len(matched)
-	if len(matched) > limit {
-		matched = matched[:limit]
+		matched = append(matched, id)
+		if len(matched) >= limit {
+			break
+		}
 	}
 
 	consumers, _ := a.redis.SMembers(ctx, "queue:"+queueName+":consumers").Result()
@@ -387,34 +389,91 @@ func (a *Admin) UnblockPartition(ctx context.Context, queueName, partition strin
 	return a.redis.ZRem(ctx, "queue:"+queueName+":blocked", partition).Err()
 }
 
-// ListGroups — группы очереди с фильтром подстроки, не больше limit (max 1000).
+// ListGroups — группы очереди с фильтром подстроки, не больше limit (max 100).
+// total — число групп в Redis до фильтра.
 func (a *Admin) ListGroups(ctx context.Context, queueName, substr string, limit int) ([]GroupStats, int, error) {
 	if limit <= 0 || limit > MaxListPartitions {
 		limit = MaxListPartitions
 	}
 	all := a.queueGroups(ctx, queueName)
-	matched := make([]GroupStats, 0, len(all))
+	total := len(all)
+	matched := make([]GroupStats, 0, min(limit, len(all)))
 	for _, g := range all {
-		if substr == "" || strings.Contains(g.Name, substr) {
-			matched = append(matched, g)
+		if substr != "" && !strings.Contains(g.Name, substr) {
+			continue
 		}
-	}
-	total := len(matched)
-	if len(matched) > limit {
-		matched = matched[:limit]
+		matched = append(matched, g)
+		if len(matched) >= limit {
+			break
+		}
 	}
 	return matched, total, nil
 }
 
-// ListTags — теги очереди (SCAN tag:* + SCARD) с фильтром подстроки, max limit.
+// ListTags — теги очереди (SCAN tag:* + SCARD по выборке).
+// Фильтр подстроки — через MATCH *substr* (полный обход курсора, не один COUNT-батч).
+// total — число тегов в Redis до фильтра; в срез — до limit совпадений (после сортировки).
 func (a *Admin) ListTags(ctx context.Context, queueName, substr string, limit int) ([]TagStats, int, error) {
 	if limit <= 0 || limit > MaxListPartitions {
 		limit = MaxListPartitions
 	}
 	prefix := "queue:" + queueName + ":tag:"
+
+	var (
+		total int
+		tags  []string
+		err   error
+	)
+	if substr == "" {
+		tags, err = a.scanTagNames(ctx, prefix, prefix+"*", "")
+		total = len(tags)
+	} else {
+		total, err = a.countTagKeys(ctx, prefix)
+		if err != nil {
+			return nil, 0, err
+		}
+		tags, err = a.scanTagNames(ctx, prefix, prefix+"*"+escapeRedisGlob(substr)+"*", substr)
+	}
+	if err != nil {
+		return nil, 0, err
+	}
+	sort.Strings(tags)
+	if len(tags) > limit {
+		tags = tags[:limit]
+	}
+	out := make([]TagStats, 0, len(tags))
+	for _, tag := range tags {
+		n, _ := a.redis.SCard(ctx, prefix+tag).Result()
+		out = append(out, TagStats{Tag: tag, Count: n})
+	}
+	return out, total, nil
+}
+
+func (a *Admin) countTagKeys(ctx context.Context, prefix string) (int, error) {
+	seen := make(map[string]struct{})
+	iter := a.redis.Scan(ctx, 0, prefix+"*", 500).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		tag := strings.TrimPrefix(key, prefix)
+		if tag == "" {
+			continue
+		}
+		seen[tag] = struct{}{}
+	}
+	if err := iter.Err(); err != nil {
+		return 0, err
+	}
+	return len(seen), nil
+}
+
+// scanTagNames обходит SCAN до курсора 0. pattern — Redis MATCH; substr — доп. Contains (пусто = все).
+func (a *Admin) scanTagNames(ctx context.Context, prefix, pattern, substr string) ([]string, error) {
 	seen := make(map[string]struct{})
 	var tags []string
-	iter := a.redis.Scan(ctx, 0, prefix+"*", 200).Iterator()
+	iter := a.redis.Scan(ctx, 0, pattern, 500).Iterator()
 	for iter.Next(ctx) {
 		key := iter.Val()
 		if !strings.HasPrefix(key, prefix) {
@@ -434,19 +493,25 @@ func (a *Admin) ListTags(ctx context.Context, queueName, substr string, limit in
 		tags = append(tags, tag)
 	}
 	if err := iter.Err(); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	sort.Strings(tags)
-	total := len(tags)
-	if len(tags) > limit {
-		tags = tags[:limit]
+	return tags, nil
+}
+
+// escapeRedisGlob экранирует meta-символы Redis MATCH, чтобы substr искался буквально.
+func escapeRedisGlob(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) * 2)
+	for _, r := range s {
+		switch r {
+		case '\\', '*', '?', '[', ']':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		default:
+			b.WriteRune(r)
+		}
 	}
-	out := make([]TagStats, 0, len(tags))
-	for _, tag := range tags {
-		n, _ := a.redis.SCard(ctx, prefix+tag).Result()
-		out = append(out, TagStats{Tag: tag, Count: n})
-	}
-	return out, total, nil
+	return b.String()
 }
 
 // TaskRemoval — результат удаления одной задачи (Remove / RemoveByTag).

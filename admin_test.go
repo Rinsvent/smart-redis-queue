@@ -83,17 +83,35 @@ func TestAdmin_ListTags_Filter(t *testing.T) {
 	require.NoError(t, rdb.SAdd(ctx, "queue:"+q+":tag:camp", "t1", "t2").Err())
 	require.NoError(t, rdb.SAdd(ctx, "queue:"+q+":tag:keep", "t3").Err())
 
-	all, total, err := admin.ListTags(ctx, q, "", 1000)
+	all, total, err := admin.ListTags(ctx, q, "", 100)
 	require.NoError(t, err)
 	assert.Equal(t, 2, total)
 	require.Len(t, all, 2)
 
-	filtered, ftotal, err := admin.ListTags(ctx, q, "camp", 1000)
+	// total — по базе (все теги), не по числу совпадений фильтра.
+	filtered, ftotal, err := admin.ListTags(ctx, q, "camp", 100)
 	require.NoError(t, err)
-	assert.Equal(t, 1, ftotal)
+	assert.Equal(t, 2, ftotal)
 	require.Len(t, filtered, 1)
 	assert.Equal(t, "camp", filtered[0].Tag)
 	assert.Equal(t, int64(2), filtered[0].Count)
+}
+
+func TestAdmin_ListTags_LimitAndDBTotal(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "admin-list-tags-limit"
+	for i := 0; i < 30; i++ {
+		require.NoError(t, rdb.SAdd(ctx, fmt.Sprintf("queue:%s:tag:item-%02d", q, i), "t").Err())
+	}
+	require.NoError(t, rdb.SAdd(ctx, "queue:"+q+":tag:other", "t").Err())
+
+	got, total, err := admin.ListTags(ctx, q, "item-", 10)
+	require.NoError(t, err)
+	assert.Equal(t, 31, total)
+	require.Len(t, got, 10)
+	assert.Equal(t, "item-00", got[0].Tag)
 }
 
 func TestAdmin_ListPartitions_DiscoversBeyondSet(t *testing.T) {
@@ -108,7 +126,7 @@ func TestAdmin_ListPartitions_DiscoversBeyondSet(t *testing.T) {
 	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":partition:!orphan:prio:0", redis.Z{Score: 1, Member: "t1"}).Err())
 	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":group:_default:ready", redis.Z{Score: 0, Member: "!from-ready"}).Err())
 
-	parts, total, err := admin.ListPartitions(ctx, q, "", 1000)
+	parts, total, err := admin.ListPartitions(ctx, q, "", 100)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, total, 3)
 	names := make([]string, len(parts))
@@ -119,9 +137,9 @@ func TestAdmin_ListPartitions_DiscoversBeyondSet(t *testing.T) {
 	assert.Contains(t, names, "!orphan:prio")
 	assert.Contains(t, names, "!from-ready")
 
-	filtered, ftotal, err := admin.ListPartitions(ctx, q, "orphan", 1000)
+	filtered, ftotal, err := admin.ListPartitions(ctx, q, "orphan", 100)
 	require.NoError(t, err)
-	assert.Equal(t, 1, ftotal)
+	assert.Equal(t, total, ftotal) // total — по базе, не по фильтру
 	require.Len(t, filtered, 1)
 	assert.Equal(t, "!orphan:prio", filtered[0].Partition)
 	assert.Equal(t, int64(1), filtered[0].Pending)
