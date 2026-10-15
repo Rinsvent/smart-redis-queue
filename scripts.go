@@ -174,6 +174,8 @@ local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. 
 
 local acquiredPartitionLocks = {}
 local partitionHadTask = {}
+-- R4/D4: партиции с головой score>now — не заходим снова до конца этого Get
+local deferredPartitions = {}
 
 -- Регистрируем/обновляем консьюмера
 redis.call('SADD', consumersKey, consumerId)
@@ -302,7 +304,10 @@ local function getFromPartition(partition)
 		end
 	end
 
-	if not found then
+	-- дошли сюда без return: либо пусто, либо только future head(s)
+	if found then
+		deferredPartitions[partition] = true
+	else
 		removePartitionFromIndexes(partition)
 	end
     
@@ -310,6 +315,9 @@ local function getFromPartition(partition)
 end
 
 local function tryCollectFromPartition(partition)
+	if deferredPartitions[partition] then
+		return nil
+	end
 	if isAdmissionBlocked(partition) then
 		return nil
 	end

@@ -347,6 +347,63 @@ func TestQueue_Get_Scheduled(t *testing.T) {
 	assert.Equal(t, "task-1", got[0].ID)
 }
 
+// TestQueue_Get_DeferredPartition_SkipsFutureHeadInSameGet (R4/D4):
+// партиции только с scheduled>now не блокируют набор готовых в том же Get (prefetch).
+func TestQueue_Get_DeferredPartition_SkipsFutureHeadInSameGet(t *testing.T) {
+	producer, consumer, _ := setupTestQueue(t)
+	consumer.SetPrefetchCount(5)
+	ctx := context.Background()
+	future := time.Now().Add(10 * time.Minute)
+	ready := time.Now().Add(-time.Second)
+
+	for i := 1; i <= 8; i++ {
+		require.NoError(t, producer.Publish(ctx, &Task{
+			ID: fmt.Sprintf("fut-%d", i), Partition: fmt.Sprintf("fut-p-%d", i),
+			Payload: []byte("f"), Scheduled: future,
+		}))
+	}
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "ready-1", Partition: "ready-p", Payload: []byte("r"), Scheduled: ready,
+	}))
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "ready-2", Partition: "ready-p2", Payload: []byte("r"), Scheduled: ready,
+	}))
+
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	ids := []string{got[0].ID, got[1].ID}
+	assert.ElementsMatch(t, []string{"ready-1", "ready-2"}, ids)
+
+	got2, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, got2, "future ещё не готовы")
+}
+
+// TestQueue_Get_DeferredPartition_LowerPriorityReady: future на высоком priority
+// не мешает взять готовое на более низком в той же партиции.
+func TestQueue_Get_DeferredPartition_LowerPriorityReady(t *testing.T) {
+	producer, consumer, _ := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	ctx := context.Background()
+	part := "mixed-prio"
+
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "hi-future", Partition: part, Priority: 10,
+		Payload: []byte("f"), Scheduled: time.Now().Add(10 * time.Minute),
+	}))
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "lo-ready", Partition: part, Priority: 0,
+		Payload: []byte("r"), Scheduled: time.Now().Add(-time.Second),
+	}))
+
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "lo-ready", got[0].ID)
+	require.NoError(t, consumer.Ack(ctx, "lo-ready", 0))
+}
+
 func TestQueue_Ack(t *testing.T) {
 	producer, consumer, _ := setupTestQueue(t)
 	ctx := context.Background()
