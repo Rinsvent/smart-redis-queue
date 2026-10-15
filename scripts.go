@@ -228,7 +228,11 @@ local function removePartitionFromIndexes(partition)
 		redis.call('ZREM', readyKey, partition)
 		if redis.call('ZCARD', readyKey) == 0 then
 			redis.call('DEL', readyKey)
-			redis.call('ZREM', groupsKey, g)
+			-- не снимаем rate-limit: ZREM groups только если score <= now
+			local gs = redis.call('ZSCORE', groupsKey, g)
+			if (not gs) or (tonumber(gs) <= now) then
+				redis.call('ZREM', groupsKey, g)
+			end
 		end
 	end
 	redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
@@ -765,6 +769,9 @@ if redis.call('ZCARD', queueKey) == 0 then
 	redis.call('ZREM', prioritiesKey, priority)
 	if redis.call('ZCARD', prioritiesKey) == 0 then
 		redis.call('SREM', "queue:" .. queueName .. ":partitions", partition)
+		local t = redis.call('TIME')
+		local nowMs = t[1] * 1000 + math.floor(t[2] / 1000)
+		local groupsKey = "queue:" .. queueName .. ":groups"
 		local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
 		for gi = 1, #pgroups do
 			local g = pgroups[gi]
@@ -772,7 +779,10 @@ if redis.call('ZCARD', queueKey) == 0 then
 			redis.call('ZREM', readyKey, partition)
 			if redis.call('ZCARD', readyKey) == 0 then
 				redis.call('DEL', readyKey)
-				redis.call('ZREM', "queue:" .. queueName .. ":groups", g)
+				local gs = redis.call('ZSCORE', groupsKey, g)
+				if (not gs) or (tonumber(gs) <= nowMs) then
+					redis.call('ZREM', groupsKey, g)
+				end
 			end
 		end
 		redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
@@ -849,6 +859,9 @@ local function removeOne(taskId)
 		redis.call('ZREM', prioritiesKey, priority)
 		if redis.call('ZCARD', prioritiesKey) == 0 then
 			redis.call('SREM', "queue:" .. queueName .. ":partitions", partition)
+			local t = redis.call('TIME')
+			local nowMs = t[1] * 1000 + math.floor(t[2] / 1000)
+			local groupsKey = "queue:" .. queueName .. ":groups"
 			local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
 			for gi = 1, #pgroups do
 				local g = pgroups[gi]
@@ -856,7 +869,10 @@ local function removeOne(taskId)
 				redis.call('ZREM', readyKey, partition)
 				if redis.call('ZCARD', readyKey) == 0 then
 					redis.call('DEL', readyKey)
-					redis.call('ZREM', "queue:" .. queueName .. ":groups", g)
+					local gs = redis.call('ZSCORE', groupsKey, g)
+					if (not gs) or (tonumber(gs) <= nowMs) then
+						redis.call('ZREM', groupsKey, g)
+					end
 				end
 			end
 			redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")

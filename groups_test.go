@@ -94,6 +94,77 @@ func TestQueue_Groups_MultiGroupAdmission(t *testing.T) {
 	assert.Empty(t, got2)
 }
 
+// TestQueue_Groups_BlockSurvivesEmptyReady_Remove: Remove последней waiting-задачи
+// чистит ready, но не должен ZREM группу со score > now (rate-limit).
+//
+// Тот же ZREM был и в Get.removePartitionFromIndexes, но при живом блоке Get его
+// не вызывает: collectOne обходит только группы с score≤now, а isAdmissionBlocked
+// режет партицию, если любая её группа в блоке — до пустого ZSET / cleanup не доходим.
+// Поэтому интеграционный Get-тест на этот баг не ставится; покрытие — Remove/RemoveByTag
+// (+ тот же guard в getScript на случай истечения блока / смены admission).
+func TestQueue_Groups_BlockSurvivesEmptyReady_Remove(t *testing.T) {
+	producer, consumer, rdb := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	ctx := context.Background()
+	q := "test-queue"
+	admin := NewAdmin(rdb)
+
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "t1", Partition: "p1", Groups: []string{"gBlock"},
+		Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
+	}))
+	require.NoError(t, consumer.BlockGroups(ctx, 30, "gBlock"))
+
+	scoreBefore, err := rdb.ZScore(ctx, "queue:"+q+":groups", "gBlock").Result()
+	require.NoError(t, err)
+	assert.Greater(t, scoreBefore, float64(time.Now().UnixMilli()))
+
+	rem, err := admin.Remove(ctx, q, "t1")
+	require.NoError(t, err)
+	require.Equal(t, RemovalStatusRemoved, rem.Status)
+
+	scoreAfter, err := rdb.ZScore(ctx, "queue:"+q+":groups", "gBlock").Result()
+	require.NoError(t, err, "блок группы не должен сниматься при пустом ready")
+	assert.Greater(t, scoreAfter, float64(time.Now().UnixMilli()))
+	assert.InDelta(t, scoreBefore, scoreAfter, 1)
+
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "t2", Partition: "p2", Groups: []string{"gBlock"},
+		Payload: []byte("y"), Scheduled: time.Now().Add(-time.Second),
+	}))
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, got, "группа всё ещё заблокирована")
+}
+
+// TestQueue_Groups_BlockSurvivesEmptyReady_RemoveByTag: то же для RemoveByTag Lua.
+func TestQueue_Groups_BlockSurvivesEmptyReady_RemoveByTag(t *testing.T) {
+	producer, consumer, rdb := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	ctx := context.Background()
+	q := "test-queue"
+	admin := NewAdmin(rdb)
+
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "tagged", Partition: "p-tag", Groups: []string{"gTag"}, Tags: []string{"kill"},
+		Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
+	}))
+	require.NoError(t, consumer.BlockGroups(ctx, 30, "gTag"))
+
+	scoreBefore, err := rdb.ZScore(ctx, "queue:"+q+":groups", "gTag").Result()
+	require.NoError(t, err)
+
+	removed, err := admin.RemoveByTag(ctx, q, "kill", RemoveByTagOptions{Limit: 10})
+	require.NoError(t, err)
+	require.Len(t, removed, 1)
+	assert.Equal(t, RemovalStatusRemoved, removed[0].Status)
+
+	scoreAfter, err := rdb.ZScore(ctx, "queue:"+q+":groups", "gTag").Result()
+	require.NoError(t, err)
+	assert.Greater(t, scoreAfter, float64(time.Now().UnixMilli()))
+	assert.InDelta(t, scoreBefore, scoreAfter, 1)
+}
+
 func TestQueue_Get_CleansEmptyPartitionIndexes(t *testing.T) {
 	producer, consumer, rdb := setupTestQueue(t)
 	consumer.SetPrefetchCount(1)
