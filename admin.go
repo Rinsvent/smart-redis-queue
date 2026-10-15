@@ -763,10 +763,9 @@ func (a *Admin) returnTaskToQueue(ctx context.Context, queueName, taskID, consum
 		a.redis.ZAdd(ctx, "queue:"+queueName+":group:"+g+":ready", redis.Z{Score: 0, Member: partition})
 	}
 
-	consumerPartitionCountKey := "queue:" + queueName + ":consumer:" + consumerID + ":partition:" + partition + ":count"
-	a.redis.Decr(ctx, consumerPartitionCountKey)
-
 	if len(partition) > 0 && partition[0] == '!' {
+		countKey := "queue:" + queueName + ":consumer:" + consumerID + ":partition:" + partition + ":count"
+		a.redis.Del(ctx, countKey)
 		lockKey := "queue:" + queueName + ":partition:" + partition + ":lock"
 		a.redis.Del(ctx, lockKey)
 	}

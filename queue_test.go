@@ -81,6 +81,10 @@ func partitionLockKey(queueName, partition string) string {
 	return fmt.Sprintf("queue:%s:partition:%s:lock", queueName, partition)
 }
 
+func consumerPartitionCountKey(queueName, consumerID, partition string) string {
+	return fmt.Sprintf("queue:%s:consumer:%s:partition:%s:count", queueName, consumerID, partition)
+}
+
 func queueBlockedKey(queueName string) string {
 	return fmt.Sprintf("queue:%s:blocked", queueName)
 }
@@ -1318,6 +1322,64 @@ func TestQueue_ConsumerPool_HandlerPanicIsolated(t *testing.T) {
 	assert.Equal(t, "pool-panic", got[0].ID)
 	assert.GreaterOrEqual(t, got[0].RejectCount, 1)
 	require.NoError(t, c.Ack(context.Background(), got[0].ID, 0))
+}
+
+// TestQueue_CountKey_OnlyForOrderedPartition: :count создаётся только для !-партиций.
+func TestQueue_CountKey_OnlyForOrderedPartition(t *testing.T) {
+	producer, consumer, rdb := setupTestQueue(t)
+	consumer.SetPrefetchCount(2)
+	ctx := context.Background()
+	cid := consumer.ConsumerID()
+
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "plain-1", Partition: "plain", Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
+	}))
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "plain-2", Partition: "plain", Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
+	}))
+
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.NotEmpty(t, got)
+	assert.Equal(t, int64(0), rdb.Exists(ctx, consumerPartitionCountKey("test-queue", cid, "plain")).Val(),
+		"non-ordered не должен создавать :count")
+
+	for _, task := range got {
+		require.NoError(t, consumer.Ack(ctx, task.ID, 0))
+	}
+	assert.Equal(t, int64(0), rdb.Exists(ctx, consumerPartitionCountKey("test-queue", cid, "plain")).Val())
+}
+
+// TestQueue_CountKey_OrderedPrefetchUnlock: prefetch 2 → count=2, Ack по одному снимает lock.
+func TestQueue_CountKey_OrderedPrefetchUnlock(t *testing.T) {
+	producer, consumer, rdb := setupTestQueue(t)
+	consumer.SetPrefetchCount(2)
+	ctx := context.Background()
+	cid := consumer.ConsumerID()
+	part := "!cnt"
+	base := time.Now().Add(-10 * time.Second)
+	for i := 1; i <= 2; i++ {
+		require.NoError(t, producer.Publish(ctx, &Task{
+			ID: fmt.Sprintf("c%d", i), Partition: part, Payload: []byte("x"),
+			Scheduled: base.Add(time.Duration(i) * time.Millisecond),
+		}))
+	}
+
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	countKey := consumerPartitionCountKey("test-queue", cid, part)
+	assert.Equal(t, "2", rdb.Get(ctx, countKey).Val())
+	assert.Equal(t, int64(1), rdb.Exists(ctx, partitionLockKey("test-queue", part)).Val())
+
+	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	assert.Equal(t, "1", rdb.Get(ctx, countKey).Val())
+	assert.Equal(t, int64(1), rdb.Exists(ctx, partitionLockKey("test-queue", part)).Val(),
+		"lock жив, пока есть in-flight")
+
+	require.NoError(t, consumer.Ack(ctx, got[1].ID, 0))
+	assert.Equal(t, int64(0), rdb.Exists(ctx, countKey).Val())
+	assert.Equal(t, int64(0), rdb.Exists(ctx, partitionLockKey("test-queue", part)).Val())
 }
 
 // TestQueue_Reject_OrderedPartition_PreservesOrder проверяет, что при reject задач из

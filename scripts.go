@@ -265,6 +265,7 @@ local function getFromPartition(partition)
         end
     end
 
+	-- :count только для ordered (!): нужен, чтобы снять :lock при prefetch>1
 	local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partition .. ":count"
 	local found = false
 	local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partition .. ":priorities"
@@ -282,7 +283,9 @@ local function getFromPartition(partition)
 				redis.call('ZREM', partitionQueueKey, taskId)
 				-- value = original ZSET score (Reject/ping reclaim без priority+1)
 				redis.call('HSET', consumerTasksKey, taskId, tostring(taskScore))
-				redis.call('INCR', consumerPartitionCountKey)
+				if needsLock then
+					redis.call('INCR', consumerPartitionCountKey)
+				end
 				partitionHadTask[partition] = true
 				local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
 				local payload = redis.call('GET', payloadKey)
@@ -434,19 +437,19 @@ end
 
 -- Получаем партицию
 local partitionCode = redis.call('GET', partitionKey) or "base"
-local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partitionCode .. ":count"
-local consumerPartitionCount = redis.call('DECR', consumerPartitionCountKey) or 0
-if consumerPartitionCount <= 0 then
-	redis.call('DEL', consumerPartitionCountKey)
-end
 
--- Разблокируем партицию только если она с префиксом "!" (заблокированная)
-if partitionCode:sub(1, 1) == "!" and consumerPartitionCount == 0 then
-    local partitionLockKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":lock"
-    local lockOwner = redis.call('GET', partitionLockKey)
-    if lockOwner == consumerId then
-        redis.call('DEL', partitionLockKey)
-    end
+-- :count / :lock только для ordered (!)
+if partitionCode:sub(1, 1) == "!" then
+	local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partitionCode .. ":count"
+	local consumerPartitionCount = redis.call('DECR', consumerPartitionCountKey) or 0
+	if consumerPartitionCount <= 0 then
+		redis.call('DEL', consumerPartitionCountKey)
+		local partitionLockKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":lock"
+		local lockOwner = redis.call('GET', partitionLockKey)
+		if lockOwner == consumerId then
+			redis.call('DEL', partitionLockKey)
+		end
+	end
 end
 
 -- Удаляем payload, ключ партиции и reject_count
@@ -548,19 +551,18 @@ for gi = 1, #pgroups do
 	redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, partitionCode)
 end
 
-local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partitionCode .. ":count"
-local consumerPartitionCount = redis.call('DECR', consumerPartitionCountKey) or 0
-if consumerPartitionCount <= 0 then
-	redis.call('DEL', consumerPartitionCountKey)
-end
-
--- Разблокируем партицию только если она с префиксом "!"
-if needsLockUnlock and consumerPartitionCount == 0 then
-    local partitionLockKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":lock"
-    local lockOwner = redis.call('GET', partitionLockKey)
-    if lockOwner == consumerId then
-        redis.call('DEL', partitionLockKey)
-    end
+-- :count / :lock только для ordered (!)
+if needsLockUnlock then
+	local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partitionCode .. ":count"
+	local consumerPartitionCount = redis.call('DECR', consumerPartitionCountKey) or 0
+	if consumerPartitionCount <= 0 then
+		redis.call('DEL', consumerPartitionCountKey)
+		local partitionLockKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":lock"
+		local lockOwner = redis.call('GET', partitionLockKey)
+		if lockOwner == consumerId then
+			redis.call('DEL', partitionLockKey)
+		end
+	end
 end
 
 -- При waitTime > 0: ordered → blocked; группы → score в groups
@@ -695,9 +697,8 @@ for i = 1, #consumers do
 					redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, taskPartition)
 				end
 
-				local countKey = "queue:" .. queueName .. ":consumer:" .. lockOwner .. ":partition:" .. taskPartition .. ":count"
-				redis.call('DEL', countKey)
 				if taskPartition:sub(1, 1) == "!" then
+					redis.call('DEL', "queue:" .. queueName .. ":consumer:" .. lockOwner .. ":partition:" .. taskPartition .. ":count")
 					unlockedParts[taskPartition] = true
 				end
 			end
