@@ -735,6 +735,12 @@ func (a *Admin) returnTaskToQueue(ctx context.Context, queueName, taskID, consum
 
 	now, _ := a.redis.Time(ctx).Result()
 	score := float64(now.UnixMilli())
+	// meta = original ZSET score (после Get); иначе now
+	if meta, err := a.redis.HGet(ctx, "queue:"+queueName+":consumer:"+consumerID+":tasks", taskID).Result(); err == nil {
+		if s, err := strconv.ParseFloat(meta, 64); err == nil {
+			score = s
+		}
+	}
 
 	partitionQueueKey := "queue:" + queueName + ":partition:" + partition + ":" + priorityStr
 	a.redis.ZAdd(ctx, partitionQueueKey, redis.Z{Score: score, Member: taskID})

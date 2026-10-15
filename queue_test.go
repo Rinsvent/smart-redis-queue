@@ -1329,12 +1329,13 @@ func TestQueue_Reject_OrderedPartition_PreservesOrder(t *testing.T) {
 	ctx := context.Background()
 
 	partition := "!ordered"
+	base := time.Now().Add(-10 * time.Second)
 	for i := 1; i <= 5; i++ {
 		err := producer.Publish(ctx, &Task{
 			ID:        fmt.Sprintf("task-%d", i),
 			Partition: partition,
 			Payload:   []byte(fmt.Sprintf("p%d", i)),
-			Scheduled: time.Now().Add(-time.Second),
+			Scheduled: base.Add(time.Duration(i) * time.Millisecond),
 		})
 		require.NoError(t, err)
 	}
@@ -1353,13 +1354,15 @@ func TestQueue_Reject_OrderedPartition_PreservesOrder(t *testing.T) {
 	err = consumer.Reject(ctx, "task-2", 0)
 	require.NoError(t, err)
 
-	// Следующие Get должны вернуть 1, 2, 3, 4, 5 по порядку (reject с priority+1 обрабатываются первыми)
+	// Следующие Get должны вернуть 1, 2, 3, 4, 5 по порядку (тот же priority + original score)
 	var order []string
+	deadline := time.Now().Add(5 * time.Second)
 	for len(order) < 5 {
+		require.True(t, time.Now().Before(deadline), "timeout waiting for tasks, got %v", order)
 		got, err := consumer.Get(ctx)
 		require.NoError(t, err)
 		if len(got) == 0 {
-			time.Sleep(50 * time.Millisecond)
+			time.Sleep(20 * time.Millisecond)
 			continue
 		}
 		for _, task := range got {
@@ -1370,6 +1373,122 @@ func TestQueue_Reject_OrderedPartition_PreservesOrder(t *testing.T) {
 
 	assert.Equal(t, []string{"task-1", "task-2", "task-3", "task-4", "task-5"}, order,
 		"порядок должен сохраниться после reject")
+}
+
+// TestQueue_Reject_Ordered_RestoresBeforeRemaining: Get(1,2), reject только 1,
+// в очереди остаются 3,4 — следующий Get должен дать 1 до 3/4 (original score).
+func TestQueue_Reject_Ordered_RestoresBeforeRemaining(t *testing.T) {
+	producer, consumer, rdb := setupTestQueue(t)
+	consumer.SetPrefetchCount(2)
+	ctx := context.Background()
+	part := "!ord-mid"
+	base := time.Now().Add(-10 * time.Second)
+	for i := 1; i <= 4; i++ {
+		require.NoError(t, producer.Publish(ctx, &Task{
+			ID:        fmt.Sprintf("t%d", i),
+			Partition: part,
+			Payload:   []byte("x"),
+			Scheduled: base.Add(time.Duration(i) * time.Millisecond),
+		}))
+	}
+
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	assert.Equal(t, "t1", got[0].ID)
+	assert.Equal(t, "t2", got[1].ID)
+
+	require.NoError(t, consumer.Reject(ctx, "t1", 0))
+	// t2 ещё in-flight; priority не должен расти
+	prio, err := rdb.Get(ctx, "queue:test-queue:priority:t1").Result()
+	require.NoError(t, err)
+	assert.Equal(t, "0", prio)
+	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:test-queue:reject_seq").Val())
+
+	// prefetch 2: t1 (restored) + следующая по score (t3). t2 всё ещё in-flight.
+	got2, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got2, 2)
+	assert.Equal(t, "t1", got2[0].ID, "t1 с original score раньше t3/t4")
+	assert.Equal(t, "t3", got2[1].ID)
+
+	require.NoError(t, consumer.Ack(ctx, "t2", 0))
+	for _, task := range got2 {
+		require.NoError(t, consumer.Ack(ctx, task.ID, 0))
+	}
+
+	// осталась только t4
+	var rest []string
+	deadline := time.Now().Add(3 * time.Second)
+	for len(rest) < 1 {
+		require.True(t, time.Now().Before(deadline), "timeout waiting for t4, got %v", rest)
+		g, err := consumer.Get(ctx)
+		require.NoError(t, err)
+		if len(g) == 0 {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		for _, task := range g {
+			rest = append(rest, task.ID)
+			require.NoError(t, consumer.Ack(ctx, task.ID, 0))
+		}
+	}
+	assert.Equal(t, []string{"t4"}, rest)
+}
+
+// TestQueue_Ping_DeadConsumer_ReclaimsAllOrdered: prefetch 2, consumer «умирает»,
+// ping возвращает обе задачи с original score — порядок 1,2,3.
+func TestQueue_Ping_DeadConsumer_ReclaimsAllOrdered(t *testing.T) {
+	cfg := RedisConfig{Addr: "localhost:6379", Password: "", DB: 5}
+	client, err := newClient(cfg)
+	if err != nil {
+		t.Skipf("Redis not available: %v", err)
+	}
+	ctx := context.Background()
+	client.FlushDB(ctx)
+
+	q := fmt.Sprintf("dead-ord-%d", time.Now().UnixNano())
+	producer := NewProducer(client, q)
+	c1 := NewConsumer(client, q, "")
+	c1.SetPrefetchCount(2)
+	part := "!p"
+	base := time.Now().Add(-10 * time.Second)
+	for i := 1; i <= 3; i++ {
+		require.NoError(t, producer.Publish(ctx, &Task{
+			ID:        fmt.Sprintf("d%d", i),
+			Partition: part,
+			Payload:   []byte("x"),
+			Scheduled: base.Add(time.Duration(i) * time.Millisecond),
+		}))
+	}
+
+	got, err := c1.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+
+	c1.Close()
+	require.NoError(t, client.Del(ctx, consumerKey(q, c1.ConsumerID())).Err())
+	require.NoError(t, client.Del(ctx, unlockKey(q)).Err())
+
+	c2 := newConsumer(client, q, "", false)
+	t.Cleanup(func() { c2.Close() })
+	c2.SetPrefetchCount(3)
+	require.NoError(t, c2.ping(ctx))
+
+	var order []string
+	for len(order) < 3 {
+		g, err := c2.Get(ctx)
+		require.NoError(t, err)
+		if len(g) == 0 {
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		for _, task := range g {
+			order = append(order, task.ID)
+			require.NoError(t, c2.Ack(ctx, task.ID, 0))
+		}
+	}
+	assert.Equal(t, []string{"d1", "d2", "d3"}, order)
 }
 
 // TestQueue_Consume_OrderedPartition_RejectCascade проверяет, что при reject первой задачи
@@ -1449,7 +1568,7 @@ func TestQueue_Consume_OrderedPartition_RejectCascade(t *testing.T) {
 }
 
 // TestQueue_Reject_OrderedPartition_RepeatedRejects проверяет, что при повторных reject
-// одной задачи порядок не нарушается (priority увеличивается: 0→1→2…).
+// одной задачи она снова доступна (тот же priority + original score).
 func TestQueue_Reject_OrderedPartition_RepeatedRejects(t *testing.T) {
 	producer, consumer, _ := setupTestQueue(t)
 	consumer.SetPrefetchCount(1)

@@ -281,7 +281,8 @@ local function getFromPartition(partition)
 			local taskScore = tonumber(tasks[2])
 			if taskScore <= now then
 				redis.call('ZREM', partitionQueueKey, taskId)
-				redis.call('HSET', consumerTasksKey, taskId, now)
+				-- value = original ZSET score (Reject/ping reclaim без priority+1)
+				redis.call('HSET', consumerTasksKey, taskId, tostring(taskScore))
 				redis.call('INCR', consumerPartitionCountKey)
 				partitionHadTask[partition] = true
 				local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
@@ -481,8 +482,8 @@ return 1
 `)
 
 // getRejectScript возвращает Lua скрипт для отклонения задачи.
-// Для ordered-партиций (префикс "!"): priority+1, задача в конец очереди с новым приоритетом —
-// при Get сначала берутся задачи с большим приоритетом, порядок сохраняется.
+// Возврат в тот же priority с originalScore из consumer:tasks.
+// Так prefetch/reject и dead-reclaim не ломают порядок без priority+1 / reject_seq.
 // При waitTime > 0: ordered → blocked {partition}; группы → score unlockAt в groups.
 // ARGV[1] = queue name
 // ARGV[2] = task ID
@@ -501,8 +502,8 @@ local queueKey = "queue:" .. queueName
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
 
 -- Проверяем что задача в processing и принадлежит этому консьюмеру
-local processingAt = redis.call('HGET', consumerTasksKey, taskId)
-if processingAt == false then
+local meta = redis.call('HGET', consumerTasksKey, taskId)
+if meta == false then
     return 0
 end
 
@@ -516,37 +517,27 @@ if priorityVal then
     priority = tonumber(priorityVal) or 0
 end
 
--- Используем текущее время для возврата задачи
 local now = redis.call('TIME')
 local nowMs = now[1] * 1000 + math.floor(now[2] / 1000)
--- Чистое время для blocked (без tie-break reject_seq)
 local blockNowMs = nowMs
 
-local newPriority = priority
+-- originalScore в meta; если нет/битое — nowMs
+local score = tonumber(meta) or nowMs
+
 local needsLockUnlock = partitionCode:sub(1, 1) == "!"
 
 -- Инкрементируем счётчик reject для расчёта задержки при следующих попытках
 local rejectCountKey = "queue:" .. queueName .. ":reject_count:" .. taskId
 redis.call('INCR', rejectCountKey)
 
-if needsLockUnlock then
-    -- Ordered partition: увеличиваем приоритет, задача попадёт в конец "reject"-очереди
-    -- и будет обработана первой при следующем Get (приоритеты по убыванию)
-    newPriority = priority + 1
-    redis.call('SET', priorityKey, tostring(newPriority))
-    -- Тай-брейк для порядка при нескольких reject в одну миллисекунду
-    local seq = redis.call('INCR', "queue:" .. queueName .. ":reject_seq")
-    nowMs = nowMs + seq * 0.000001
-end
-
--- Возвращаем задачу обратно в очередь
-local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. newPriority
-redis.call('ZADD', partitionQueueKey, nowMs, taskId)
+-- Возвращаем задачу обратно в очередь (тот же priority + исходный score)
+local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. priority
+redis.call('ZADD', partitionQueueKey, score, taskId)
 local partitionsKey = "queue:" .. queueName .. ":partitions"
 local groupsKey = "queue:" .. queueName .. ":groups"
 redis.call('SADD', partitionsKey, partitionCode)
 local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
-redis.call('ZADD', prioritiesKey, newPriority, tostring(newPriority))
+redis.call('ZADD', prioritiesKey, priority, tostring(priority))
 
 -- ready = «есть/была работа». Блок группы — score в groups (не трогаем, если уже > now).
 local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups")
@@ -665,13 +656,14 @@ for i = 1, #consumers do
 	local lastPing = redis.call('GET', lockOwnerKey)
 
 	if lastPing == false then
-		 -- Консьюмер мертв - разблокируем партицию и возвращаем задачу
+		-- Консьюмер мёртв — возвращаем ВСЕ in-flight задачи с originalScore (без priority+1)
 		local lockOwnerTasksKey = "queue:" .. queueName .. ":consumer:" .. lockOwner .. ":tasks"
 		local tasksData = redis.call('HGETALL', lockOwnerTasksKey)
-		
-		-- Ищем задачу из этой партиции в hash (HGETALL возвращает {key1, val1, key2, val2, ...})
+		local unlockedParts = {}
+
 		for j = 1, #tasksData, 2 do
 			local taskToReturn = tasksData[j]
+			local meta = tasksData[j + 1]
 			if taskToReturn then
 				local taskPartitionKey = "queue:" .. queueName .. ":partition:" .. taskToReturn
 				local taskPartition = redis.call('GET', taskPartitionKey)
@@ -686,35 +678,15 @@ for i = 1, #consumers do
 					taskPriority = tonumber(taskPriorityVal) or 0
 				end
 
-				local newTaskPriority = taskPriority
-				local needsLockUnlock = taskPartition:sub(1, 1) == "!"
+				local score = tonumber(meta) or now
 
-				if needsLockUnlock then
-					-- Ordered partition: увеличиваем приоритет, задача попадёт в конец "reject"-очереди
-					-- и будет обработана первой при следующем Get (приоритеты по убыванию)
-					newTaskPriority = taskPriority + 1
-					redis.call('SET', taskPriorityKey, tostring(newTaskPriority))
-					-- Тай-брейк для порядка при нескольких reject в одну миллисекунду
-					local seq = redis.call('INCR', "queue:" .. queueName .. ":reject_seq")
-					now = now + seq * 0.000001
-				end
-
-				-- Разблокируем партицию только если она с префиксом "!"
-				if taskPartition:sub(1, 1) == "!" then
-					local partitionLockKey = "queue:" .. queueName .. ":partition:" .. taskPartition .. ":lock"
-					redis.call('DEL', partitionLockKey)
-				end
-
-				redis.call('HDEL', lockOwnerTasksKey, taskToReturn)
-
-				local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. taskPartition .. ":" .. newTaskPriority
-				redis.call('ZADD', partitionQueueKey, now, taskToReturn)
+				local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. taskPartition .. ":" .. taskPriority
+				redis.call('ZADD', partitionQueueKey, score, taskToReturn)
 				local partitionsKey = "queue:" .. queueName .. ":partitions"
 				redis.call('SADD', partitionsKey, taskPartition)
 				local prioritiesKey = "queue:" .. queueName .. ":partition:" .. taskPartition .. ":priorities"
-				redis.call('ZADD', prioritiesKey, newTaskPriority, tostring(newTaskPriority))
+				redis.call('ZADD', prioritiesKey, taskPriority, tostring(taskPriority))
 
-				-- Восстанавливаем group/ready (как при Reject без парковки)
 				local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. taskPartition .. ":groups")
 				if #pgroups == 0 then
 					pgroups = {"_default"}
@@ -728,11 +700,18 @@ for i = 1, #consumers do
 					redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, taskPartition)
 				end
 
-				break
+				local countKey = "queue:" .. queueName .. ":consumer:" .. lockOwner .. ":partition:" .. taskPartition .. ":count"
+				redis.call('DEL', countKey)
+				if taskPartition:sub(1, 1) == "!" then
+					unlockedParts[taskPartition] = true
+				end
 			end
 		end
-		
-		-- Очищаем мусор от мертвого консьюмера (все оставшиеся задачи обработаем ниже)
+
+		for part, _ in pairs(unlockedParts) do
+			redis.call('DEL', "queue:" .. queueName .. ":partition:" .. part .. ":lock")
+		end
+		redis.call('DEL', lockOwnerTasksKey)
 		redis.call('SREM', consumersKey, lockOwner)
 	end
 end
