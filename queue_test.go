@@ -1378,6 +1378,9 @@ func TestQueue_CountKey_OrderedPrefetchUnlock(t *testing.T) {
 		"lock жив, пока есть in-flight")
 
 	require.NoError(t, consumer.Ack(ctx, got[1].ID, 0))
+	// DECR→0 сразу DEL: ключа нет (не value "0")
+	_, err = rdb.Get(ctx, countKey).Result()
+	assert.ErrorIs(t, err, redis.Nil)
 	assert.Equal(t, int64(0), rdb.Exists(ctx, countKey).Val())
 	assert.Equal(t, int64(0), rdb.Exists(ctx, partitionLockKey("test-queue", part)).Val())
 }
