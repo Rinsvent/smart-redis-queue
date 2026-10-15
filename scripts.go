@@ -168,7 +168,6 @@ local currentUnix = currentTime[1]
 local now = currentUnix * 1000 + math.floor(currentTime[2] / 1000)
 
 -- Формируем ключи
-local queueKey = "queue:" .. queueName
 local partitionsKey = "queue:" .. queueName .. ":partitions"
 local consumersKey = "queue:" .. queueName .. ":consumers"
 local consumerKey = "queue:" .. queueName .. ":consumer:" .. consumerId
@@ -287,11 +286,10 @@ local function getFromPartition(partition)
 				partitionHadTask[partition] = true
 				local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
 				local payload = redis.call('GET', payloadKey)
-				local taskPartitionKey = "queue:" .. queueName .. ":partition:" .. taskId
-				local taskPartition = redis.call('GET', taskPartitionKey) or "base"
 				local rejectCountKey = "queue:" .. queueName .. ":reject_count:" .. taskId
 				local rejectCount = tonumber(redis.call('GET', rejectCountKey)) or 0
-				return {taskId, taskPartition, payload or "", tostring(rejectCount)}
+				-- partition уже известен (мы внутри getFromPartition); GET partition:{id} не нужен
+				return {taskId, partition, payload or "", tostring(rejectCount)}
 			end
 		else
 			redis.call('ZREM', prioritiesKey, maxPriority)
@@ -436,7 +434,6 @@ end
 
 -- Получаем партицию
 local partitionCode = redis.call('GET', partitionKey) or "base"
-local priority = redis.call('GET', priorityKey) or 0
 local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partitionCode .. ":count"
 local consumerPartitionCount = redis.call('DECR', consumerPartitionCountKey) or 0
 if consumerPartitionCount <= 0 then
@@ -497,8 +494,6 @@ local consumerId = ARGV[3]
 local waitTime = tonumber(ARGV[4]) or 0
 local blockGroupsStr = ARGV[5] or ""
 
--- Формируем ключи
-local queueKey = "queue:" .. queueName
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
 
 -- Проверяем что задача в processing и принадлежит этому консьюмеру
