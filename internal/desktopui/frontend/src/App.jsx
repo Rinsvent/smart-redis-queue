@@ -42,12 +42,34 @@ import CalculateOutlinedIcon from '@mui/icons-material/CalculateOutlined'
 import CheckIcon from '@mui/icons-material/Check'
 import DarkModeOutlinedIcon from '@mui/icons-material/DarkModeOutlined'
 import DeleteOutlineIcon from '@mui/icons-material/DeleteOutline'
+import ExpandLessIcon from '@mui/icons-material/ExpandLess'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import KeyboardArrowDownIcon from '@mui/icons-material/KeyboardArrowDown'
 import LightModeOutlinedIcon from '@mui/icons-material/LightModeOutlined'
 import LockOpenIcon from '@mui/icons-material/LockOpen'
 import MoreVertIcon from '@mui/icons-material/MoreVert'
 import RefreshIcon from '@mui/icons-material/Refresh'
+import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined'
+import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined'
 import { api } from './api'
+import RatesChart, { buildChartSeries } from './RatesChart'
+
+const WATCH_KEY = 'srq-watch-tags'
+const CHART_OPEN_KEY = 'srq-chart-open'
+const STATS_WINDOW_SEC = 3600
+const WATCH_POLL_MS = 5000
+
+function loadWatchMap() {
+  try {
+    return JSON.parse(localStorage.getItem(WATCH_KEY) || '{}')
+  } catch {
+    return {}
+  }
+}
+
+function watchKey(connId, queue, db) {
+  return `${connId || ''}::${queue}::${db}`
+}
 
 const FONT = '"DM Sans", "Segoe UI", sans-serif'
 
@@ -152,6 +174,10 @@ export default function App() {
   const [listFilterDraft, setListFilterDraft] = useState('')
   const [tagsCount, setTagsCount] = useState(null)
   const [tagsCounting, setTagsCounting] = useState(false)
+  const [chartOpen, setChartOpen] = useState(() => localStorage.getItem(CHART_OPEN_KEY) !== '0')
+  const [redisStats, setRedisStats] = useState([])
+  const [watchMap, setWatchMap] = useState(loadWatchMap)
+  const [watchSeries, setWatchSeries] = useState({}) // tag → [{sec,n}]
   const [loading, setLoading] = useState(false)
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [listLoading, setListLoading] = useState(false)
@@ -215,6 +241,8 @@ export default function App() {
     setListTruncated(false)
     setTagsCount(null)
     setListLoading(false)
+    setRedisStats([])
+    setWatchSeries({})
     try {
       api.cancelQueries()
     } catch {
@@ -401,6 +429,96 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('srq-poll-ms', String(pollMs))
   }, [pollMs])
+
+  useEffect(() => {
+    localStorage.setItem(CHART_OPEN_KEY, chartOpen ? '1' : '0')
+  }, [chartOpen])
+
+  useEffect(() => {
+    localStorage.setItem(WATCH_KEY, JSON.stringify(watchMap))
+  }, [watchMap])
+
+  const watchedTags = useMemo(() => {
+    if (!selectedQueue) return []
+    return watchMap[watchKey(activeId, selectedQueue, activeDb)] || []
+  }, [watchMap, activeId, selectedQueue, activeDb])
+
+  const chartSeries = useMemo(() => {
+    const to = Math.floor(Date.now() / 1000)
+    const from = to - Math.min(STATS_WINDOW_SEC, 600) // show last 10m for readability
+    const watches = watchedTags.map((tag) => ({
+      tag,
+      points: watchSeries[tag] || [],
+    }))
+    return buildChartSeries(redisStats, from, to, watches)
+  }, [redisStats, watchSeries, watchedTags])
+
+  const toggleWatchTag = (tag) => {
+    const k = watchKey(activeId, selectedQueue, activeDb)
+    setWatchMap((prev) => {
+      const cur = new Set(prev[k] || [])
+      if (cur.has(tag)) cur.delete(tag)
+      else cur.add(tag)
+      return { ...prev, [k]: [...cur] }
+    })
+  }
+
+  const loadRedisStats = useCallback(async () => {
+    if (!selectedQueue) {
+      setRedisStats([])
+      return
+    }
+    const gen = queryGen.current
+    const q = selectedQueue
+    const db = activeDb
+    try {
+      const pts = await api.listQueueStats(q, db, STATS_WINDOW_SEC)
+      if (isStale(gen, q, db)) return
+      setRedisStats(pts || [])
+    } catch (e) {
+      if (isStale(gen, q, db) || isCanceled(e)) return
+    }
+  }, [selectedQueue, activeDb])
+
+  const pollWatchedTags = useCallback(async () => {
+    if (!selectedQueue || watchedTags.length === 0) return
+    const gen = queryGen.current
+    const q = selectedQueue
+    const db = activeDb
+    const sec = Math.floor(Date.now() / 1000)
+    const next = {}
+    await Promise.all(
+      watchedTags.map(async (tag) => {
+        try {
+          const n = await api.countByTag(q, tag, db)
+          next[tag] = n
+        } catch {
+          /* ignore */
+        }
+      }),
+    )
+    if (isStale(gen, q, db)) return
+    setWatchSeries((prev) => {
+      const out = { ...prev }
+      for (const [tag, n] of Object.entries(next)) {
+        const arr = [...(out[tag] || []), { sec, n }]
+        const cutoff = sec - STATS_WINDOW_SEC
+        out[tag] = arr.filter((p) => p.sec >= cutoff)
+      }
+      return out
+    })
+  }, [selectedQueue, activeDb, watchedTags])
+
+  useEffect(() => {
+    if (!selectedQueue) return undefined
+    loadRedisStats()
+    pollWatchedTags()
+    const id = setInterval(() => {
+      loadRedisStats()
+      pollWatchedTags()
+    }, WATCH_POLL_MS)
+    return () => clearInterval(id)
+  }, [selectedQueue, activeDb, loadRedisStats, pollWatchedTags])
 
   useEffect(() => {
     if (filterTimer.current) clearTimeout(filterTimer.current)
@@ -813,9 +931,23 @@ export default function App() {
                         <Typography variant="h5" noWrap title={selectedMeta.name}>
                           {selectedMeta.name}
                         </Typography>
-                        <Typography color="text.secondary" variant="body2" noWrap>
-                          {detail ? rateLabel(detail.rate) : '—'}
-                        </Typography>
+                        <Stack direction="row" alignItems="center" spacing={0.25}>
+                          <Typography color="text.secondary" variant="body2" noWrap>
+                            {detail ? rateLabel(detail.rate) : '—'}
+                          </Typography>
+                          <IconButton
+                            size="small"
+                            onClick={() => setChartOpen((v) => !v)}
+                            title={chartOpen ? 'Hide chart' : 'Show chart'}
+                            sx={{ ml: 0.25 }}
+                          >
+                            {chartOpen ? (
+                              <ExpandLessIcon fontSize="small" />
+                            ) : (
+                              <ExpandMoreIcon fontSize="small" />
+                            )}
+                          </IconButton>
+                        </Stack>
                       </Box>
 
                       <Stack direction="row" spacing={2.5} alignItems="center" flexShrink={0}>
@@ -867,6 +999,22 @@ export default function App() {
                         </IconButton>
                       </Stack>
                     </Stack>
+
+                    {chartOpen && (
+                      <Box
+                        sx={{
+                          width: '100%',
+                          border: 1,
+                          borderColor: 'divider',
+                          borderRadius: 2,
+                          bgcolor: 'background.paper',
+                          px: 1.5,
+                          py: 1,
+                        }}
+                      >
+                        <RatesChart series={chartSeries} height={140} />
+                      </Box>
+                    )}
 
                     <Stack direction="row" alignItems="center" spacing={1}>
                       <FormControl size="small" sx={{ minWidth: 130, flexShrink: 0 }}>
@@ -1099,15 +1247,26 @@ export default function App() {
                                 </TableCell>
                                 <TableCell align="right">{t.count}</TableCell>
                                 <TableCell align="right">
-                                  <Tooltip title="Remove by tag">
-                                    <IconButton
-                                      size="small"
-                                      color="warning"
-                                      onClick={() => runRemoveTag(t.tag)}
-                                    >
-                                      <DeleteOutlineIcon fontSize="small" />
-                                    </IconButton>
-                                  </Tooltip>
+                                  <Stack direction="row" spacing={0} justifyContent="flex-end">
+                                    <Tooltip title={watchedTags.includes(t.tag) ? 'Unwatch' : 'Watch'}>
+                                      <IconButton size="small" onClick={() => toggleWatchTag(t.tag)}>
+                                        {watchedTags.includes(t.tag) ? (
+                                          <VisibilityOffOutlinedIcon fontSize="small" />
+                                        ) : (
+                                          <VisibilityOutlinedIcon fontSize="small" />
+                                        )}
+                                      </IconButton>
+                                    </Tooltip>
+                                    <Tooltip title="Remove by tag">
+                                      <IconButton
+                                        size="small"
+                                        color="warning"
+                                        onClick={() => runRemoveTag(t.tag)}
+                                      >
+                                        <DeleteOutlineIcon fontSize="small" />
+                                      </IconButton>
+                                    </Tooltip>
+                                  </Stack>
                                 </TableCell>
                               </TableRow>
                             ))

@@ -205,6 +205,25 @@ for task := range ch {
 }
 ```
 
+### Метрики очереди (opt-in)
+
+По умолчанию **выключены** — hot path без оверхеда. Включаются на воркере:
+
+```go
+consumer.SetStatsRetention(time.Hour)          // g/a/r раз в секунду в Redis
+consumer.SetTagsStats("all", "campaign:spring") // опционально: SCARD этих тегов раз в ~1s
+
+// то же на пуле
+pool.SetStatsRetention(time.Hour)
+pool.SetTagsStats("all")
+```
+
+- **get / ack / reject** — аккумулятор в Go (привязка к unix-секунде события), flush `HINCRBY` в `queue:{q}:stats:{sec}`; несколько хостов суммируются.
+- **TagsStats** — отдельная goroutine (~1s, как ping): только `SCARD queue:{q}:tag:{tag}` для указанных тегов → поля `t:{tag}`. Полный обход групп/партиций не делается.
+- Чтобы видеть «total», тегируйте задачи (например `all`) и добавьте тег в `SetTagsStats` — выбор скорость vs статистика за пользователем.
+- Ключи: `queue:{q}:stats:{unixSec}` (HASH, TTL=retention), `queue:{q}:stats:index` (ZSET).
+- Desktop: график (get/ack/reject + теги из Redis); плюс **Watch** у тега в UI — локальный poll `CountByTag` раз в 5s в `localStorage`, без записи в Redis.
+
 ### Теги
 
 Теги задаются при публикации. Разделитель в Lua/Redis — `#` (`TagSeparator`); символ `#` внутри значения тега запрещён.

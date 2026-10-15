@@ -766,3 +766,55 @@ func (a *Admin) returnTaskToQueue(ctx context.Context, queueName, taskID, consum
 	}
 	return nil
 }
+
+// QueueStatPoint — секундный bucket метрик воркера (queue:{q}:stats:{sec}).
+type QueueStatPoint struct {
+	Sec    int64
+	Get    int64
+	Ack    int64
+	Reject int64
+	Tags   map[string]int64 // tag → SCARD snapshot (поля t:{tag})
+}
+
+// ListQueueStats читает точки за [fromSec, toSec] по stats:index.
+func (a *Admin) ListQueueStats(ctx context.Context, queueName string, fromSec, toSec int64) ([]QueueStatPoint, error) {
+	if toSec < fromSec {
+		fromSec, toSec = toSec, fromSec
+	}
+	indexKey := "queue:" + queueName + ":stats:index"
+	members, err := a.redis.ZRangeByScore(ctx, indexKey, &redis.ZRangeBy{
+		Min: strconv.FormatInt(fromSec, 10),
+		Max: strconv.FormatInt(toSec, 10),
+	}).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]QueueStatPoint, 0, len(members))
+	for _, m := range members {
+		sec, err := strconv.ParseInt(m, 10, 64)
+		if err != nil {
+			continue
+		}
+		key := "queue:" + queueName + ":stats:" + m
+		fields, err := a.redis.HGetAll(ctx, key).Result()
+		if err != nil {
+			continue
+		}
+		pt := QueueStatPoint{Sec: sec, Tags: map[string]int64{}}
+		for k, v := range fields {
+			n, _ := strconv.ParseInt(v, 10, 64)
+			switch {
+			case k == "g":
+				pt.Get = n
+			case k == "a":
+				pt.Ack = n
+			case k == "r":
+				pt.Reject = n
+			case strings.HasPrefix(k, "t:"):
+				pt.Tags[strings.TrimPrefix(k, "t:")] = n
+			}
+		}
+		out = append(out, pt)
+	}
+	return out, nil
+}

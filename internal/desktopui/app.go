@@ -108,6 +108,15 @@ type TagRemoveResult struct {
 	Payloads []string `json:"payloads,omitempty"`
 }
 
+// StatPointView — секунда метрик для графика.
+type StatPointView struct {
+	Sec    int64            `json:"sec"`
+	Get    int64            `json:"get"`
+	Ack    int64            `json:"ack"`
+	Reject int64            `json:"reject"`
+	Tags   map[string]int64 `json:"tags,omitempty"`
+}
+
 // App — биндинги Wails / логика desktop manager.
 type App struct {
 	ctx   context.Context
@@ -656,6 +665,40 @@ func (a *App) CountTags(name string, db int) (int, error) {
 	ctx, cancel := a.beginList(5 * time.Minute)
 	defer cancel()
 	return admin.CountTags(ctx, name)
+}
+
+// ListQueueStats — секундные bucket'ы воркерных метрик за lastSec (default/max 3600).
+func (a *App) ListQueueStats(name string, db int, lastSec int) ([]StatPointView, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return nil, err
+	}
+	if lastSec <= 0 || lastSec > 3600 {
+		lastSec = 3600
+	}
+	to := time.Now().Unix()
+	from := to - int64(lastSec)
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 15*time.Second)
+	defer cancel()
+	pts, err := admin.ListQueueStats(ctx, name, from, to)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StatPointView, 0, len(pts))
+	for _, p := range pts {
+		tags := p.Tags
+		if tags == nil {
+			tags = map[string]int64{}
+		}
+		out = append(out, StatPointView{
+			Sec:    p.Sec,
+			Get:    p.Get,
+			Ack:    p.Ack,
+			Reject: p.Reject,
+			Tags:   tags,
+		})
+	}
+	return out, nil
 }
 
 // BlockPartition — rate-limit block на waitTimeSec секунд.
