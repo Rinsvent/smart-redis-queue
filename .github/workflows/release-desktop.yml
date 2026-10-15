@@ -1,0 +1,121 @@
+name: Release Desktop
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release-linux:
+    name: Linux amd64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: internal/desktopui/frontend/package-lock.json
+
+      - name: Install GTK / WebKit
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Build frontend
+        working-directory: internal/desktopui/frontend
+        run: npm ci && npm run build
+
+      - name: Build desktop binary
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go build -tags wails,production,webkit2_41 \
+            -ldflags "-s -w" \
+            -o smart-redis-queue-desktop-linux-amd64 \
+            ./cmd/manager
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-amd64
+          path: smart-redis-queue-desktop-linux-amd64
+
+  release-windows:
+    name: Windows amd64
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: internal/desktopui/frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: internal/desktopui/frontend
+        run: npm ci && npm run build
+
+      - name: Build desktop binary
+        shell: bash
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go build -tags wails,production \
+            -ldflags "-s -w -H windowsgui" \
+            -o smart-redis-queue-desktop-windows-amd64.exe \
+            ./cmd/manager
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-amd64
+          path: smart-redis-queue-desktop-windows-amd64.exe
+
+  publish:
+    name: GitHub Release
+    needs: [release-linux, release-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Pack
+        run: |
+          mkdir -p release
+          cp dist/linux-amd64/smart-redis-queue-desktop-linux-amd64 release/
+          cp dist/windows-amd64/smart-redis-queue-desktop-windows-amd64.exe release/
+          chmod +x release/smart-redis-queue-desktop-linux-amd64
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/smart-redis-queue-desktop-linux-amd64
+            release/smart-redis-queue-desktop-windows-amd64.exe
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -21,7 +21,7 @@
 
 ## Требования
 
-- Go 1.22+
+- Go 1.25+ (см. `go.mod`; desktop UI тянет Wails / `golang.org/x`)
 - Redis 6+
 
 ## Установка
@@ -205,6 +205,25 @@ for task := range ch {
 }
 ```
 
+### Метрики очереди (opt-in)
+
+По умолчанию **выключены** — hot path без оверхеда. Включаются на воркере:
+
+```go
+consumer.SetStatsRetention(time.Hour)          // g/a/r раз в секунду в Redis
+consumer.SetTagsStats("all", "campaign:spring") // опционально: SCARD этих тегов раз в ~1s
+
+// то же на пуле
+pool.SetStatsRetention(time.Hour)
+pool.SetTagsStats("all")
+```
+
+- **get / ack / reject** — аккумулятор в Go (привязка к unix-секунде события), flush `HINCRBY` в `queue:{q}:stats:{sec}`; несколько хостов суммируются.
+- **TagsStats** — отдельная goroutine (~1s, как ping): только `SCARD queue:{q}:tag:{tag}` для указанных тегов → поля `t:{tag}`. Полный обход групп/партиций не делается.
+- Чтобы видеть «total», тегируйте задачи (например `all`) и добавьте тег в `SetTagsStats` — выбор скорость vs статистика за пользователем.
+- Ключи: `queue:{q}:stats:{unixSec}` (HASH, TTL=retention), `queue:{q}:stats:index` (ZSET).
+- Desktop: график (get/ack/reject + теги из Redis); плюс **Watch** у тега в UI — локальный poll `CountByTag` раз в 5s в `localStorage`, без записи в Redis.
+
 ### Теги
 
 Теги задаются при публикации. Разделитель в Lua/Redis — `#` (`TagSeparator`); символ `#` внутри значения тега запрещён.
@@ -286,6 +305,7 @@ make manager
 | `info` (alias: list, ls) | Информация об очередях: партиции, pending, in-progress, консьюмеры |
 | `purge` | Очистить очередь (или только указанную партицию) |
 | `retry` | Вернуть in-progress задачи в очередь (для зависших после падения консьюмера) |
+| `desktop` | GUI manager (Wails); `-tags wails,production,webkit2_41` (Ubuntu 24.04+) |
 
 ### Примеры
 
@@ -310,6 +330,62 @@ make manager
 ```
 
 Глобальные флаги: `-a` (addr), `-P` (password), `--db`. Переменные: `REDIS_ADDR`, `REDIS_PASSWORD`.
+
+### Desktop UI (Wails)
+
+GUI для Redis-хостов (без выбора DB в профиле): обзор очередей по всем DB, режимы Partitions / Groups / Tags, purge, block/unblock партиций (rate-limit ZSET `blocked`), retry, payload по ID и операции по тегам.
+
+Сборка GUI вынесена за build-тег `wails`, чтобы обычный `go build ./...` и CI не требовали CGO/GTK.
+
+Профиль: `name` + `addr` + `password`. Каталог очередей строится SCAN’ом `queue:*:partitions` и `queue:*:consumers` по DB `0..N-1` (N из `CONFIG GET databases`, иначе 16). Обновление каталога — раз в 5 минут и кнопкой Refresh. Одноимённые очереди на разных DB схлопываются в списке; в карточке — табы по DB.
+
+#### Готовые бинарники (GitHub Releases)
+
+На тег `v*` workflow собирает:
+
+| Asset | Платформа |
+| --- | --- |
+| `smart-redis-queue-desktop-linux-amd64` | Linux (Ubuntu 24.04+, webkit2gtk-4.1) |
+| `smart-redis-queue-desktop-windows-amd64.exe` | Windows 10 / 11 (WebView2) |
+
+Linux: при GBM/EGL abort на NVIDIA/Wayland запускайте с `WEBKIT_DISABLE_DMABUF_RENDERER=1` (при необходимости ещё `GDK_BACKEND=x11`).
+
+Windows: нужен [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (обычно уже есть на Win10/11). Windows 8 не поддерживается.
+
+#### Сборка из исходников
+
+Требования:
+
+- Go 1.25+, CGO, зависимости Wails для вашей ОС ([дока Wails](https://wails.io/docs/gettingstarted/installation))
+- Node.js 18+ (для frontend; Vite 6)
+- Redis для проверки подключений из UI
+
+```bash
+# CLI Wails (один раз)
+go install github.com/wailsapp/wails/v2/cmd/wails@latest
+
+# Frontend
+cd internal/desktopui/frontend && npm install && npm run build && cd -
+
+# Запуск GUI
+# wails — наш тег; production — тег Wails; webkit2_41 — Ubuntu 24.04+ (webkit2gtk-4.1)
+# WEBKIT_DISABLE_DMABUF_RENDERER — обход GBM EGL abort на NVIDIA/Wayland
+WEBKIT_DISABLE_DMABUF_RENDERER=1 go run -tags wails,production,webkit2_41 ./cmd/manager desktop
+```
+
+Если всё ещё падает на Wayland: `GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 go run ...`
+
+На Ubuntu 22.04 / системах с `libwebkit2gtk-4.0-dev` тег `webkit2_41` не нужен.
+
+Зависимости ОС (Ubuntu 24.04):
+
+```bash
+sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev
+```
+
+Профили сохраняются в `~/.config/smart-redis-queue/connections.json` (или `os.UserConfigDir()`). Поле `db` в старых профилях игнорируется.
+
+Без `-tags wails` команда `desktop` возвращает понятную ошибку — это ожидаемо.
 
 ## Тесты
 

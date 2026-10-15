@@ -277,6 +277,8 @@ type Consumer struct {
 	idempotencyTtl           time.Duration
 	middlewares              []HandlerMiddleware
 	stopPing                 chan struct{}
+	stats                    *StatsSink
+	statsOwn                 bool // true — Close останавливает stats loop
 }
 
 // NewConsumer создает нового консьюмера и запускает ping горутину.
@@ -317,9 +319,39 @@ func (c *Consumer) ConsumerID() string {
 	return c.consumerID
 }
 
-// Close останавливает ping горутину
+// Close останавливает ping (и stats loop, если sink принадлежит этому consumer).
 func (c *Consumer) Close() {
-	close(c.stopPing)
+	select {
+	case <-c.stopPing:
+	default:
+		close(c.stopPing)
+	}
+	if c.statsOwn && c.stats != nil {
+		c.stats.Stop()
+	}
+}
+
+func (c *Consumer) ensureStats() *StatsSink {
+	if c.stats == nil {
+		c.stats = newStatsSink(c.redis, c.queueName)
+		c.statsOwn = true
+	}
+	return c.stats
+}
+
+// SetStatsRetention включает запись g/a/r (+ sample тегов) с TTL точек. 0 = выкл (default).
+func (c *Consumer) SetStatsRetention(d time.Duration) {
+	s := c.ensureStats()
+	s.setRetention(d)
+	if d > 0 && c.statsOwn {
+		s.ensureLoop()
+	}
+}
+
+// SetTagsStats — теги для секундного SCARD-сэмпла в Redis (поле t:{tag}). Пусто = только g/a/r.
+// Метрики должны быть включены через SetStatsRetention.
+func (c *Consumer) SetTagsStats(tags ...string) {
+	c.ensureStats().setTags(tags)
 }
 
 // SetPollInterval задает интервал ожидания при отсутствии задач в очереди
@@ -571,6 +603,9 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 		})
 	}
 
+	if c.stats != nil {
+		c.stats.addGet(int64(len(tasks)))
+	}
 	return tasks, nil
 }
 
@@ -593,6 +628,9 @@ func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl time.D
 		return fmt.Errorf("task not found in processing or not owned by this consumer")
 	}
 
+	if c.stats != nil {
+		c.stats.addAck(1)
+	}
 	return nil
 }
 
@@ -621,6 +659,9 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, 
 		return fmt.Errorf("task not found in processing or not owned by this consumer")
 	}
 
+	if c.stats != nil {
+		c.stats.addReject(1)
+	}
 	return nil
 }
 
@@ -655,6 +696,24 @@ type ConsumerPool struct {
 	checkDeadConsumerLocksOnGet bool
 	idempotencyTtl              time.Duration
 	middlewares                 []HandlerMiddleware
+	stats                       *StatsSink
+}
+
+func (p *ConsumerPool) ensureStats() *StatsSink {
+	if p.stats == nil {
+		p.stats = newStatsSink(p.redis, p.queueName)
+	}
+	return p.stats
+}
+
+// SetStatsRetention — см. Consumer.SetStatsRetention. Loop стартует в Consume.
+func (p *ConsumerPool) SetStatsRetention(d time.Duration) {
+	p.ensureStats().setRetention(d)
+}
+
+// SetTagsStats — см. Consumer.SetTagsStats.
+func (p *ConsumerPool) SetTagsStats(tags ...string) {
+	p.ensureStats().setTags(tags)
 }
 
 // NewConsumerPool создает пул консьюмеров
@@ -715,6 +774,11 @@ func (p *ConsumerPool) Use(mw ...HandlerMiddleware) {
 // Паника в handler перехватывается (см. Consumer.Consume) — падает одна задача в Reject,
 // остальные консьюмеры пула продолжают работу.
 func (p *ConsumerPool) Consume(ctx context.Context, handler func(*Task) error) {
+	if p.stats != nil && p.stats.enabled() {
+		p.stats.ensureLoop()
+		defer p.stats.Stop()
+	}
+
 	var wg sync.WaitGroup
 
 	for i := 0; i < p.count; i++ {
@@ -742,6 +806,8 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c.checkDeadConsumerLocksOnGet = p.checkDeadConsumerLocksOnGet
 		c.idempotencyTtl = p.idempotencyTtl
 		c.middlewares = p.middlewares
+		c.stats = p.stats
+		c.statsOwn = false
 
 		err := c.Consume(ctx, handler)
 		c.Close()

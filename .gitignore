@@ -4,3 +4,5 @@ bin/
 coverage.out
 coverage.html
 *.test
+node_modules/
+internal/desktopui/frontend/node_modules/

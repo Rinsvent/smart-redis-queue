@@ -41,10 +41,10 @@ func main() {
 			{
 				Name:    "info",
 				Aliases: []string{"i", "list", "ls"},
-				Usage:   "Информация об очередях: партиции, pending, in-progress",
+				Usage:   "Информация об очередях: до 100 партиций (SCARD total), pending, in-progress",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "queue", Aliases: []string{"q"}, Value: "", Usage: "фильтр по имени очереди"},
-					&cli.StringFlag{Name: "partition", Aliases: []string{"p"}, Value: "", Usage: "фильтр по партиции"},
+					&cli.StringFlag{Name: "partition", Aliases: []string{"p"}, Value: "", Usage: "подстрока фильтра партиций (SSCAN MATCH)"},
 				},
 				Action: runInfo,
 			},
@@ -64,6 +64,11 @@ func main() {
 					&cli.StringFlag{Name: "queue", Aliases: []string{"q"}, Required: true, Usage: "имя очереди"},
 				},
 				Action: runRetry,
+			},
+			{
+				Name:   "desktop",
+				Usage:  "GUI manager (Wails). Требует сборку с -tags wails",
+				Action: runDesktop,
 			},
 		},
 	}
@@ -87,6 +92,7 @@ func runInfo(ctx context.Context, c *cli.Command) error {
 	defer rdb.Close()
 
 	admin := redisqueue.NewAdmin(rdb)
+	// -partition — подстрока; Inspect → ListPartitions (≤100), total=SCARD.
 	statsList, err := admin.Inspect(ctx, c.String("queue"), c.String("partition"))
 	if err != nil {
 		return err
@@ -99,8 +105,10 @@ func runInfo(ctx context.Context, c *cli.Command) error {
 
 	for _, stats := range statsList {
 		fmt.Printf("\n📦 Queue: %s\n", stats.QueueName)
-		fmt.Printf("   Pending: %d  |  In-progress: %d  |  Consumers: %d\n",
+		fmt.Printf("   Pending (shown): %d  |  In-progress: %d  |  Consumers: %d\n",
 			stats.TotalPending, stats.TotalInProgress, len(stats.Consumers))
+		fmt.Printf("   Partitions: showing %d / total %d (max %d)\n",
+			len(stats.Partitions), stats.PartitionTotal, redisqueue.MaxListPartitions)
 		if len(stats.Consumers) > 0 {
 			fmt.Printf("   Consumer IDs: %s\n", strings.Join(stats.Consumers, ", "))
 		}

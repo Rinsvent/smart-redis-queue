@@ -986,3 +986,39 @@ func getRemoveScript() *redis.Script {
 func getRemoveByTagScript() *redis.Script {
 	return removeByTagScript
 }
+
+// sampleTagsStatsScript: раз в секунду один воркер пишет SCARD выбранных тегов в stats:{sec}.
+// ARGV: queueName, retentionSec, tag1, tag2, ...
+var sampleTagsStatsScript = redis.NewScript(`
+local queueName = ARGV[1]
+local retention = tonumber(ARGV[2]) or 3600
+if retention < 1 then
+	retention = 3600
+end
+local t = redis.call('TIME')
+local sec = tonumber(t[1])
+local key = "queue:" .. queueName .. ":stats:" .. sec
+local indexKey = "queue:" .. queueName .. ":stats:index"
+local wrote = 0
+for i = 3, #ARGV do
+	local tag = ARGV[i]
+	if tag ~= nil and tag ~= "" then
+		local field = "t:" .. tag
+		if redis.call('HEXISTS', key, field) == 0 then
+			local n = redis.call('SCARD', "queue:" .. queueName .. ":tag:" .. tag)
+			redis.call('HSET', key, field, n)
+			wrote = wrote + 1
+		end
+	end
+end
+if wrote > 0 or redis.call('EXISTS', key) == 1 then
+	redis.call('EXPIRE', key, retention)
+	redis.call('ZADD', indexKey, sec, tostring(sec))
+	redis.call('ZREMRANGEBYSCORE', indexKey, '-inf', tostring(sec - retention))
+end
+return wrote
+`)
+
+func getSampleTagsStatsScript() *redis.Script {
+	return sampleTagsStatsScript
+}

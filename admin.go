@@ -3,6 +3,7 @@ package redisqueue
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,57 +21,93 @@ func NewAdmin(redisClient *redis.Client) *Admin {
 	return &Admin{redis: redisClient}
 }
 
+// MaxListPartitions — лимит выдачи ListPartitions / ListGroups / ListTags.
+const MaxListPartitions = 100
+
+// MaxListFilterLen — макс. длина подстроки/glob-фильтра (защита от гигантского MATCH).
+const MaxListFilterLen = 256
+
+// scanMatchCount — COUNT hint для SSCAN/ZSCAN/SCAN (батч, не лимит выборки).
+const scanMatchCount = 200
+
 // PartitionStats статистика по партиции
 type PartitionStats struct {
 	Partition  string
 	Pending    int64
 	InProgress int64
 	Priorities []string
+	Groups     []string
 	Locked     bool
 	Blocked    bool
+}
+
+// GroupStats — группа очереди (ZSET groups + ready).
+type GroupStats struct {
+	Name    string
+	Ready   int64   // ZCARD group:g:ready
+	Score   float64 // unlockAt ms; ≤ now → свободна
+	Blocked bool
 }
 
 // QueueStats статистика по очереди
 type QueueStats struct {
 	QueueName       string
 	Partitions      []PartitionStats
+	Groups          []GroupStats
 	TotalPending    int64
 	TotalInProgress int64
 	Consumers       []string
+	PartitionTotal  int // сколько партиций найдено до limit (для ListPartitions)
 }
 
-// ListQueues возвращает имена всех очередей (обнаруживает по ключам queue:*:partitions)
+// ListQueues возвращает имена очередей (union SCAN queue:*:partitions и queue:*:consumers).
+// Так видны и «осиротевшие» очереди, у которых остались только consumers.
 func (a *Admin) ListQueues(ctx context.Context) ([]string, error) {
-	var queues []string
-	iter := a.redis.Scan(ctx, 0, "queue:*:partitions", 0).Iterator()
-	for iter.Next(ctx) {
-		key := iter.Val()
-		// queue:NAME:partitions -> NAME
-		if strings.HasPrefix(key, "queue:") && strings.HasSuffix(key, ":partitions") {
-			name := strings.TrimPrefix(strings.TrimSuffix(key, ":partitions"), "queue:")
+	seen := make(map[string]struct{})
+	for _, pattern := range []string{"queue:*:partitions", "queue:*:consumers"} {
+		suffix := ":partitions"
+		if strings.HasSuffix(pattern, ":consumers") {
+			suffix = ":consumers"
+		}
+		iter := a.redis.Scan(ctx, 0, pattern, 200).Iterator()
+		for iter.Next(ctx) {
+			key := iter.Val()
+			if !strings.HasPrefix(key, "queue:") || !strings.HasSuffix(key, suffix) {
+				continue
+			}
+			name := strings.TrimPrefix(strings.TrimSuffix(key, suffix), "queue:")
 			if name != "" {
-				queues = append(queues, name)
+				seen[name] = struct{}{}
 			}
 		}
+		if err := iter.Err(); err != nil {
+			return nil, err
+		}
 	}
-	if err := iter.Err(); err != nil {
-		return nil, err
+	queues := make([]string, 0, len(seen))
+	for name := range seen {
+		queues = append(queues, name)
 	}
+	sort.Strings(queues)
 	return queues, nil
 }
 
-// Inspect возвращает статистику по очередям с фильтрами
+// Inspect возвращает статистику по очередям с фильтрами.
+// Если задан queueFilter — ListQueues не вызывается (без лишнего SCAN).
 func (a *Admin) Inspect(ctx context.Context, queueFilter, partitionFilter string) ([]*QueueStats, error) {
-	queues, err := a.ListQueues(ctx)
-	if err != nil {
-		return nil, err
+	var queues []string
+	if queueFilter != "" {
+		queues = []string{queueFilter}
+	} else {
+		var err error
+		queues, err = a.ListQueues(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var result []*QueueStats
 	for _, q := range queues {
-		if queueFilter != "" && q != queueFilter {
-			continue
-		}
 		stats, err := a.queueStats(ctx, q, partitionFilter)
 		if err != nil {
 			return nil, fmt.Errorf("queue %s: %w", q, err)
@@ -83,70 +120,175 @@ func (a *Admin) Inspect(ctx context.Context, queueFilter, partitionFilter string
 }
 
 func (a *Admin) queueStats(ctx context.Context, queueName, partitionFilter string) (*QueueStats, error) {
-	partitionsKey := "queue:" + queueName + ":partitions"
-	partitions, err := a.redis.SMembers(ctx, partitionsKey).Result()
+	parts, total, err := a.ListPartitions(ctx, queueName, partitionFilter, MaxListPartitions)
 	if err != nil {
-		if err == redis.Nil {
-			return nil, nil
-		}
+		return nil, err
+	}
+	groups, _, err := a.ListGroups(ctx, queueName, "", MaxListPartitions)
+	if err != nil {
 		return nil, err
 	}
 
-	stats := &QueueStats{QueueName: queueName}
-
+	stats := &QueueStats{
+		QueueName:      queueName,
+		PartitionTotal: total,
+		Partitions:     parts,
+		Groups:         groups,
+	}
 	consumersKey := "queue:" + queueName + ":consumers"
 	consumers, _ := a.redis.SMembers(ctx, consumersKey).Result()
 	stats.Consumers = consumers
 
-	consumerInProgress := make(map[string]int64)
 	for _, cid := range consumers {
 		tasksKey := "queue:" + queueName + ":consumer:" + cid + ":tasks"
 		n, _ := a.redis.HLen(ctx, tasksKey).Result()
-		consumerInProgress[cid] = n
 		stats.TotalInProgress += n
 	}
-
-	for _, part := range partitions {
-		if partitionFilter != "" && part != partitionFilter {
-			continue
-		}
-		ps := PartitionStats{Partition: part}
-
-		prioritiesKey := "queue:" + queueName + ":partition:" + part + ":priorities"
-		priorities, err := a.redis.ZRevRange(ctx, prioritiesKey, 0, -1).Result()
-		if err != nil && err != redis.Nil {
-			continue
-		}
-		ps.Priorities = priorities
-
-		for _, prio := range priorities {
-			queueKey := "queue:" + queueName + ":partition:" + part + ":" + prio
-			n, _ := a.redis.ZCard(ctx, queueKey).Result()
-			ps.Pending += n
-		}
+	for _, ps := range parts {
 		stats.TotalPending += ps.Pending
+	}
+	return stats, nil
+}
 
-		lockKey := "queue:" + queueName + ":partition:" + part + ":lock"
-		ps.Locked = a.redis.Exists(ctx, lockKey).Val() > 0
+// QueueOverview — сводка без полного обхода партиций: SCARD + consumers + до 100 групп.
+// TotalPending не суммируется по всем партициям (дорого на больших очередях) — смотрите ListPartitions.
+func (a *Admin) QueueOverview(ctx context.Context, queueName string) (*QueueStats, error) {
+	total, err := a.redis.SCard(ctx, "queue:"+queueName+":partitions").Result()
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	groups, _, err := a.ListGroups(ctx, queueName, "", MaxListPartitions)
+	if err != nil {
+		return nil, err
+	}
+	stats := &QueueStats{
+		QueueName:      queueName,
+		PartitionTotal: int(total),
+		Groups:         groups,
+	}
+	consumers, _ := a.redis.SMembers(ctx, "queue:"+queueName+":consumers").Result()
+	stats.Consumers = consumers
+	for _, cid := range consumers {
+		n, _ := a.redis.HLen(ctx, "queue:"+queueName+":consumer:"+cid+":tasks").Result()
+		stats.TotalInProgress += n
+	}
+	return stats, nil
+}
 
-		ps.Blocked = a.isPartitionBlocked(ctx, queueName, part)
+// ListPartitions — SET partitions: total=SCARD, выборка ≤limit через SSCAN MATCH *substr*.
+func (a *Admin) ListPartitions(ctx context.Context, queueName, substr string, limit int) (parts []PartitionStats, total int, err error) {
+	if limit <= 0 || limit > MaxListPartitions {
+		limit = MaxListPartitions
+	}
+	key := "queue:" + queueName + ":partitions"
+	n, err := a.redis.SCard(ctx, key).Result()
+	if err != nil && err != redis.Nil {
+		return nil, 0, err
+	}
+	total = int(n)
 
-		for _, cid := range consumers {
-			tasksKey := "queue:" + queueName + ":consumer:" + cid + ":tasks"
-			taskIds, _ := a.redis.HKeys(ctx, tasksKey).Result()
-			for _, tid := range taskIds {
-				partKey := "queue:" + queueName + ":partition:" + tid
-				taskPart, _ := a.redis.Get(ctx, partKey).Result()
-				if taskPart == part {
-					ps.InProgress++
-				}
+	ids, err := a.sscanMembers(ctx, key, substr, limit)
+	if err != nil {
+		return nil, 0, err
+	}
+	sort.Strings(ids)
+
+	consumers, _ := a.redis.SMembers(ctx, "queue:"+queueName+":consumers").Result()
+	parts = make([]PartitionStats, 0, len(ids))
+	for _, part := range ids {
+		parts = append(parts, a.partitionStats(ctx, queueName, part, consumers))
+	}
+	return parts, total, nil
+}
+
+// sscanMembers собирает до limit members SET через SSCAN MATCH.
+// substr — фрагмент Redis glob (можно * ? [abc]); итоговый паттерн *{substr}*.
+// Останавливается как только набрано limit — весь SET не читает.
+func (a *Admin) sscanMembers(ctx context.Context, key, substr string, limit int) ([]string, error) {
+	match := listMatchGlob(substr)
+	seen := make(map[string]struct{}, limit)
+	out := make([]string, 0, limit)
+	var cursor uint64
+	for {
+		keys, next, err := a.redis.SScan(ctx, key, cursor, match, scanMatchCount).Result()
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range keys {
+			if m == "" {
+				continue
+			}
+			if _, ok := seen[m]; ok {
+				continue
+			}
+			seen[m] = struct{}{}
+			out = append(out, m)
+			if len(out) >= limit {
+				return out, nil
 			}
 		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return out, nil
+}
 
-		stats.Partitions = append(stats.Partitions, ps)
+func (a *Admin) partitionStats(ctx context.Context, queueName, part string, consumers []string) PartitionStats {
+	ps := PartitionStats{Partition: part}
+
+	prioritiesKey := "queue:" + queueName + ":partition:" + part + ":priorities"
+	priorities, err := a.redis.ZRevRange(ctx, prioritiesKey, 0, -1).Result()
+	if err == nil || err == redis.Nil {
+		ps.Priorities = priorities
+	}
+	for _, prio := range ps.Priorities {
+		queueKey := "queue:" + queueName + ":partition:" + part + ":" + prio
+		n, _ := a.redis.ZCard(ctx, queueKey).Result()
+		ps.Pending += n
 	}
 
-	return stats, nil
+	ps.Locked = a.redis.Exists(ctx, "queue:"+queueName+":partition:"+part+":lock").Val() > 0
+	ps.Blocked = a.isPartitionBlocked(ctx, queueName, part)
+
+	pgroups, _ := a.redis.SMembers(ctx, "queue:"+queueName+":partition:"+part+":groups").Result()
+	if len(pgroups) == 0 {
+		pgroups = []string{DefaultGroup}
+	}
+	sort.Strings(pgroups)
+	ps.Groups = pgroups
+
+	for _, cid := range consumers {
+		tasksKey := "queue:" + queueName + ":consumer:" + cid + ":tasks"
+		taskIds, _ := a.redis.HKeys(ctx, tasksKey).Result()
+		for _, tid := range taskIds {
+			taskPart, _ := a.redis.Get(ctx, "queue:"+queueName+":partition:"+tid).Result()
+			if taskPart == part {
+				ps.InProgress++
+			}
+		}
+	}
+	return ps
+}
+
+func (a *Admin) nowMs(ctx context.Context) float64 {
+	nowMs := float64(time.Now().UnixMilli())
+	if t, err := a.redis.Time(ctx).Result(); err == nil {
+		nowMs = float64(t.UnixMilli())
+	}
+	return nowMs
+}
+
+func (a *Admin) groupStatsFromZ(ctx context.Context, queueName string, z redis.Z, nowMs float64) GroupStats {
+	name, _ := z.Member.(string)
+	ready, _ := a.redis.ZCard(ctx, "queue:"+queueName+":group:"+name+":ready").Result()
+	return GroupStats{
+		Name:    name,
+		Ready:   ready,
+		Score:   z.Score,
+		Blocked: z.Score > nowMs,
+	}
 }
 
 // isPartitionBlocked: blocked (partition) или groups score > now.
@@ -175,6 +317,195 @@ func (a *Admin) isPartitionBlocked(ctx context.Context, queueName, partition str
 // BlockGroups паркует группы на waitTime секунд (см. Consumer.BlockGroups).
 func (a *Admin) BlockGroups(ctx context.Context, queueName string, waitTime float64, groups ...string) error {
 	return blockGroups(ctx, a.redis, queueName, waitTime, groups...)
+}
+
+// TagStats — индекс тега (SCARD queue:…:tag:…).
+type TagStats struct {
+	Tag   string
+	Count int64
+}
+
+// BlockPartition паркует партицию в ZSET blocked на waitTime секунд (как Reject rate-limit).
+// Get не берёт задачи из этой партиции, пока now < unlockAt. Consumer :lock не трогаем.
+func (a *Admin) BlockPartition(ctx context.Context, queueName, partition string, waitTime float64) error {
+	if partition == "" {
+		return fmt.Errorf("partition is required")
+	}
+	if waitTime <= 0 {
+		return fmt.Errorf("waitTime must be > 0")
+	}
+	nowMs := float64(time.Now().UnixMilli())
+	if t, err := a.redis.Time(ctx).Result(); err == nil {
+		nowMs = float64(t.UnixMilli())
+	}
+	unlockAt := nowMs + waitTime*1000
+	return a.redis.ZAdd(ctx, "queue:"+queueName+":blocked", redis.Z{
+		Score:  unlockAt,
+		Member: partition,
+	}).Err()
+}
+
+// UnblockPartition снимает партицию из blocked — воркеры снова могут брать задачи.
+func (a *Admin) UnblockPartition(ctx context.Context, queueName, partition string) error {
+	if partition == "" {
+		return fmt.Errorf("partition is required")
+	}
+	return a.redis.ZRem(ctx, "queue:"+queueName+":blocked", partition).Err()
+}
+
+// ListGroups — ZSET groups: total=ZCARD; без фильтра ZRANGE 0..limit-1, с фильтром ZSCAN MATCH до limit.
+func (a *Admin) ListGroups(ctx context.Context, queueName, substr string, limit int) ([]GroupStats, int, error) {
+	if limit <= 0 || limit > MaxListPartitions {
+		limit = MaxListPartitions
+	}
+	groupsKey := "queue:" + queueName + ":groups"
+	n, err := a.redis.ZCard(ctx, groupsKey).Result()
+	if err != nil && err != redis.Nil {
+		return nil, 0, err
+	}
+	total := int(n)
+	nowMs := a.nowMs(ctx)
+
+	var out []GroupStats
+	if substr == "" {
+		if total == 0 {
+			ready, _ := a.redis.ZCard(ctx, "queue:"+queueName+":group:"+DefaultGroup+":ready").Result()
+			if ready > 0 {
+				return []GroupStats{{Name: DefaultGroup, Ready: ready}}, 1, nil
+			}
+			return nil, 0, nil
+		}
+		zs, err := a.redis.ZRangeWithScores(ctx, groupsKey, 0, int64(limit-1)).Result()
+		if err != nil && err != redis.Nil {
+			return nil, 0, err
+		}
+		out = make([]GroupStats, 0, len(zs))
+		for _, z := range zs {
+			name, _ := z.Member.(string)
+			if name == "" {
+				continue
+			}
+			out = append(out, a.groupStatsFromZ(ctx, queueName, z, nowMs))
+		}
+	} else {
+		match := listMatchGlob(substr)
+		seen := make(map[string]struct{}, limit)
+		out = make([]GroupStats, 0, limit)
+		var cursor uint64
+		for len(out) < limit {
+			keys, next, err := a.redis.ZScan(ctx, groupsKey, cursor, match, scanMatchCount).Result()
+			if err != nil {
+				return nil, 0, err
+			}
+			// ZScan returns [member, score, member, score, ...]
+			for i := 0; i+1 < len(keys) && len(out) < limit; i += 2 {
+				name := keys[i]
+				if name == "" {
+					continue
+				}
+				if _, ok := seen[name]; ok {
+					continue
+				}
+				seen[name] = struct{}{}
+				score, _ := strconv.ParseFloat(keys[i+1], 64)
+				out = append(out, a.groupStatsFromZ(ctx, queueName, redis.Z{Member: name, Score: score}, nowMs))
+			}
+			cursor = next
+			if cursor == 0 {
+				break
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, total, nil
+}
+
+// ListTags — страница ≤limit через SCAN MATCH; total не считается (всегда 0). См. CountTags.
+func (a *Admin) ListTags(ctx context.Context, queueName, substr string, limit int) ([]TagStats, int, error) {
+	if limit <= 0 || limit > MaxListPartitions {
+		limit = MaxListPartitions
+	}
+	prefix := "queue:" + queueName + ":tag:"
+	// substr — glob-фрагмент; ключ = prefix + tag → MATCH prefix+*{substr}*
+	pattern := prefix + listMatchGlob(substr)
+	seen := make(map[string]struct{}, limit)
+	tags := make([]string, 0, limit)
+	var cursor uint64
+	for len(tags) < limit {
+		keys, next, err := a.redis.Scan(ctx, cursor, pattern, scanMatchCount).Result()
+		if err != nil {
+			return nil, 0, err
+		}
+		for _, key := range keys {
+			if !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			tag := strings.TrimPrefix(key, prefix)
+			if tag == "" {
+				continue
+			}
+			if _, ok := seen[tag]; ok {
+				continue
+			}
+			seen[tag] = struct{}{}
+			tags = append(tags, tag)
+			if len(tags) >= limit {
+				break
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	sort.Strings(tags)
+	out := make([]TagStats, 0, len(tags))
+	for _, tag := range tags {
+		n, _ := a.redis.SCard(ctx, prefix+tag).Result()
+		out = append(out, TagStats{Tag: tag, Count: n})
+	}
+	return out, 0, nil
+}
+
+// CountTags — полное число тегов (итеративный SCAN, маленький COUNT). Тяжёлый; только по запросу UI.
+func (a *Admin) CountTags(ctx context.Context, queueName string) (int, error) {
+	prefix := "queue:" + queueName + ":tag:"
+	seen := make(map[string]struct{})
+	var cursor uint64
+	for {
+		keys, next, err := a.redis.Scan(ctx, cursor, prefix+"*", scanMatchCount).Result()
+		if err != nil {
+			return 0, err
+		}
+		for _, key := range keys {
+			if !strings.HasPrefix(key, prefix) {
+				continue
+			}
+			tag := strings.TrimPrefix(key, prefix)
+			if tag == "" {
+				continue
+			}
+			seen[tag] = struct{}{}
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return len(seen), nil
+}
+
+// listMatchGlob строит паттерн Redis MATCH из пользовательского фильтра.
+// Пусто → "*"; иначе "*{filter}*" (filter — glob: * ? [abc] допустимы).
+// Это не инъекция команд: MATCH — аргумент SSCAN/ZSCAN/SCAN через go-redis.
+func listMatchGlob(filter string) string {
+	if filter == "" {
+		return "*"
+	}
+	if len(filter) > MaxListFilterLen {
+		filter = filter[:MaxListFilterLen]
+	}
+	return "*" + filter + "*"
 }
 
 // TaskRemoval — результат удаления одной задачи (Remove / RemoveByTag).
@@ -434,4 +765,56 @@ func (a *Admin) returnTaskToQueue(ctx context.Context, queueName, taskID, consum
 		a.redis.Del(ctx, lockKey)
 	}
 	return nil
+}
+
+// QueueStatPoint — секундный bucket метрик воркера (queue:{q}:stats:{sec}).
+type QueueStatPoint struct {
+	Sec    int64
+	Get    int64
+	Ack    int64
+	Reject int64
+	Tags   map[string]int64 // tag → SCARD snapshot (поля t:{tag})
+}
+
+// ListQueueStats читает точки за [fromSec, toSec] по stats:index.
+func (a *Admin) ListQueueStats(ctx context.Context, queueName string, fromSec, toSec int64) ([]QueueStatPoint, error) {
+	if toSec < fromSec {
+		fromSec, toSec = toSec, fromSec
+	}
+	indexKey := "queue:" + queueName + ":stats:index"
+	members, err := a.redis.ZRangeByScore(ctx, indexKey, &redis.ZRangeBy{
+		Min: strconv.FormatInt(fromSec, 10),
+		Max: strconv.FormatInt(toSec, 10),
+	}).Result()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]QueueStatPoint, 0, len(members))
+	for _, m := range members {
+		sec, err := strconv.ParseInt(m, 10, 64)
+		if err != nil {
+			continue
+		}
+		key := "queue:" + queueName + ":stats:" + m
+		fields, err := a.redis.HGetAll(ctx, key).Result()
+		if err != nil {
+			continue
+		}
+		pt := QueueStatPoint{Sec: sec, Tags: map[string]int64{}}
+		for k, v := range fields {
+			n, _ := strconv.ParseInt(v, 10, 64)
+			switch {
+			case k == "g":
+				pt.Get = n
+			case k == "a":
+				pt.Ack = n
+			case k == "r":
+				pt.Reject = n
+			case strings.HasPrefix(k, "t:"):
+				pt.Tags[strings.TrimPrefix(k, "t:")] = n
+			}
+		}
+		out = append(out, pt)
+	}
+	return out, nil
 }
