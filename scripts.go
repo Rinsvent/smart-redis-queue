@@ -150,14 +150,13 @@ return notAddedItems
 // ARGV[1] = queue name
 // ARGV[2] = consumer ID
 // ARGV[3] = prefetch count
-// Возвращает: {taskId1, partition1, payload1, taskId2, ...} или {}
-// ARGV[5] = legacyPartitionsFallback ("1" = если нет groups, обход partitions; для миграции)
+// ARGV[4] = checkDeadConsumerLocksOnGet ("1" / "0")
+// Возвращает: {taskId1, partition1, payload1, rejectCount1, ...} или {}
 var getScript = redis.NewScript(`
 local queueName = ARGV[1]
 local consumerId = ARGV[2]
 local prefetchCount = tonumber(ARGV[3]) or 1
 local checkDeadConsumerLocks = ARGV[4] == "1"
-local legacyPartitionsFallback = ARGV[5] == "1"
 if prefetchCount < 1 then
     prefetchCount = 1
 end
@@ -351,31 +350,11 @@ local function tryReadyGroup(g)
 	return nil
 end
 
--- Legacy-миграция: SSCAN partitions (не SMEMBERS).
-local function collectFromPartitionsSet()
-	local cursor = "0"
-	repeat
-		local res = redis.call('SSCAN', partitionsKey, cursor, 'COUNT', 32)
-		cursor = res[1]
-		local parts = res[2]
-		for pi = 1, #parts do
-			local taskData = tryCollectFromPartition(parts[pi])
-			if taskData then
-				return taskData
-			end
-		end
-	until cursor == "0"
-	return nil
-end
-
 -- Обход: свободные группы (score <= now) с random index → ready с random index.
--- legacyPartitionsFallback: только миграция.
+-- Нет свободных групп → нет работы (legacy обход partitions убран).
 local function collectOne()
 	local n = redis.call('ZCOUNT', groupsKey, '-inf', now)
 	if n == 0 then
-		if legacyPartitionsFallback then
-			return collectFromPartitionsSet()
-		end
 		return nil
 	end
 

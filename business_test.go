@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -52,8 +51,6 @@ func TestSetters_ClampAndFlags(t *testing.T) {
 	assert.Equal(t, 2*time.Second, consumer.idempotencyTtl)
 	consumer.SetCheckDeadConsumerLocksOnGet(true)
 	assert.True(t, consumer.checkDeadConsumerLocksOnGet)
-	consumer.SetLegacyPartitionsFallback(true)
-	assert.True(t, consumer.legacyPartitionsFallback)
 
 	pool := NewConsumerPool(consumer.redis, "test-queue")
 	pool.SetCount(0)
@@ -275,38 +272,6 @@ func TestBusiness_CheckDeadConsumerLocksOnGet(t *testing.T) {
 	require.Len(t, got2, 1)
 	assert.Equal(t, "after", got2[0].ID)
 	require.NoError(t, cOn.Ack(ctx, got2[0].ID, 0))
-}
-
-// --- Legacy partitions fallback ---
-
-func TestBusiness_LegacyPartitionsFallback(t *testing.T) {
-	_, consumer, rdb := setupTestQueue(t)
-	consumer.SetPrefetchCount(1)
-	ctx := context.Background()
-	q := "test-queue"
-	part := "!legacy-only"
-	taskID := "legacy-task"
-	now := float64(time.Now().Add(-time.Second).UnixMilli())
-
-	// Имитация старого продюсера: partitions + queue, без groups/ready
-	require.NoError(t, rdb.Set(ctx, payloadKey(q, taskID), "payload", 0).Err())
-	require.NoError(t, rdb.Set(ctx, "queue:"+q+":partition:"+taskID, part, 0).Err())
-	require.NoError(t, rdb.Set(ctx, "queue:"+q+":priority:"+taskID, "0", 0).Err())
-	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":partition:"+part+":0", redis.Z{Score: now, Member: taskID}).Err())
-	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":partition:"+part+":priorities", redis.Z{Score: 0, Member: "0"}).Err())
-	require.NoError(t, rdb.SAdd(ctx, "queue:"+q+":partitions", part).Err())
-
-	consumer.SetLegacyPartitionsFallback(false)
-	empty, err := consumer.Get(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, empty, "без fallback задача только в partitions не видна")
-
-	consumer.SetLegacyPartitionsFallback(true)
-	got, err := consumer.Get(ctx)
-	require.NoError(t, err)
-	require.Len(t, got, 1)
-	assert.Equal(t, taskID, got[0].ID)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
 }
 
 // --- Idempotency via SetIdempotencyTtl on Consume ---

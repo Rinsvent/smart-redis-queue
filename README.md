@@ -151,7 +151,7 @@ admin.BlockGroups(ctx, "my-queue", 0.3, "conn:163865653")
 Группы: `queue:{name}:groups` (ZSET) — score `≤ now` = свободна, `> now` = блок; свободные = `ZRANGEBYSCORE -inf now`.  
 Партиции (ordered Reject): `queue:{name}:blocked` — member=partition → unlockAt.  
 Ready группы обходится через `ZRANGE` с random index (не грузит миллионы партиций в Lua разом).  
-На миграции: `consumer.SetLegacyPartitionsFallback(true)`, пока старые продюсеры без Groups.
+Нет свободных групп → Get пуст (обход `partitions` без groups не делается).
 
 ### Пул консьюмеров
 
@@ -460,15 +460,13 @@ Lua-скрипты в Redis регистрируются по SHA содержи
 2. Обновить продюсеры / сервисы, которые вызывают `Admin`.
 3. Включать публикацию с `Tags`.
 
-**Группы / `blocked`** — без downtime:
+**Группы / `blocked`:**
 
-1. Выкатить consumer’ов с новым Get; на время миграции: `SetLegacyPartitionsFallback(true)` (обход `partitions`, если `groups` ещё пуст).
-2. Выкатить продюсеры с `Task.Groups` (без Groups → `_default`).
-3. Когда все задачи идут через Groups: `SetLegacyPartitionsFallback(false)` (дефолт) — только `ZRANGEBYSCORE` свободных групп.
-4. Включать `BlockGroups` / `RejectWithDelay(..., groups)`.
-5. Флаг fallback удалим в следующем major.
+1. Выкатить consumer’ов с Get по `groups`/`ready` (без свободных групп Get пуст).
+2. Продюсеры с `Task.Groups` (без Groups → `_default`).
+3. Включать `BlockGroups` / `RejectWithDelay(..., groups)`.
 
-С нуля: fallback не включать. Не смешивать «новый Reject + старый Get» — старый Get не видит блоки групп/партиций.
+Не смешивать «новый Reject + старый Get» — старый Get не видит блоки групп/партиций.
 
 ## Contributing
 

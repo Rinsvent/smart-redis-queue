@@ -271,14 +271,11 @@ type Consumer struct {
 	pollInterval                time.Duration
 	prefetchCount               int
 	checkDeadConsumerLocksOnGet bool
-	// legacyPartitionsFallback — миграция: если groups ZSET пуст, обходить partitions.
-	// На новых инсталляциях false (дефолт). Удалим в следующем major.
-	legacyPartitionsFallback bool
-	idempotencyTtl           time.Duration
-	middlewares              []HandlerMiddleware
-	stopPing                 chan struct{}
-	stats                    *StatsSink
-	statsOwn                 bool // true — Close останавливает stats loop
+	idempotencyTtl              time.Duration
+	middlewares                 []HandlerMiddleware
+	stopPing                    chan struct{}
+	stats                       *StatsSink
+	statsOwn                    bool // true — Close останавливает stats loop
 }
 
 // NewConsumer создает нового консьюмера и запускает ping горутину.
@@ -299,7 +296,6 @@ func newConsumer(redisClient *redis.Client, queueName string, consumerID string,
 		pollInterval:                1 * time.Second,
 		prefetchCount:               5,
 		checkDeadConsumerLocksOnGet: false,
-		legacyPartitionsFallback:    false,
 		idempotencyTtl:              0,
 		stopPing:                    make(chan struct{}),
 	}
@@ -370,12 +366,6 @@ func (c *Consumer) SetPrefetchCount(n int) {
 // SetCheckDeadConsumerLocksOnGet флаг проверки блокировок при get
 func (c *Consumer) SetCheckDeadConsumerLocksOnGet(cd bool) {
 	c.checkDeadConsumerLocksOnGet = cd
-}
-
-// SetLegacyPartitionsFallback включает обход queue:partitions, если groups ещё пуст
-// (миграция со старых продюсеров). После выката продюсеров с Groups — выключить.
-func (c *Consumer) SetLegacyPartitionsFallback(enabled bool) {
-	c.legacyPartitionsFallback = enabled
 }
 
 // SetIdempotencyTtl задает количество секунд до удаления ключа задачи после ack. Пока жив ключ задачи с таким же requestId будут пропущены (по умолчанию 0 - сразу удаляем после ack)
@@ -551,16 +541,11 @@ func (c *Consumer) ping(ctx context.Context) error {
 func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 	script := getGetScript()
 
-	legacy := "0"
-	if c.legacyPartitionsFallback {
-		legacy = "1"
-	}
 	result, err := script.Run(ctx, c.redis, []string{},
 		c.queueName,
 		c.consumerID,
 		c.prefetchCount,
 		c.checkDeadConsumerLocksOnGet,
-		legacy,
 	).Result()
 
 	if err != nil {
