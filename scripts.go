@@ -167,6 +167,7 @@ return notAddedItems
 // ARGV[2] = consumer ID
 // ARGV[3] = prefetch count
 // ARGV[4] = checkDeadConsumerLocksOnGet ("1" / "0")
+// ARGV[5] = gRateN; затем gRateN пар (durMs, value); затем pRateN и пары (F4; 0,0 = выкл)
 // Возвращает: {taskId1, partition1, payload1, rejectCount1, ...} или {}
 var getScript = redis.NewScript(`
 local queueName = ARGV[1]
@@ -177,10 +178,34 @@ if prefetchCount < 1 then
     prefetchCount = 1
 end
 
+-- F4: парсинг rate-limit слоёв (token-bucket). gRateN=0 и pRateN=0 → без доп. call.
+local argIdx = 5
+local function parseRates()
+	local n = tonumber(ARGV[argIdx]) or 0
+	argIdx = argIdx + 1
+	local rates = {}
+	for i = 1, n do
+		local durMs = tonumber(ARGV[argIdx]) or 0
+		local value = tonumber(ARGV[argIdx + 1]) or 0
+		argIdx = argIdx + 2
+		if durMs > 0 and value > 0 then
+			rates[#rates + 1] = {
+				durMs = durMs,
+				value = value,
+				refill = value / (durMs / 1000.0)
+			}
+		end
+	end
+	return rates
+end
+local gRates = parseRates()
+local pRates = parseRates()
+
 -- Вычисляем текущее время
 local currentTime = redis.call('TIME')
 local currentUnix = currentTime[1]
 local now = currentUnix * 1000 + math.floor(currentTime[2] / 1000)
+local nowSec = now / 1000.0
 
 -- Формируем ключи
 local partitionsKey = "queue:" .. queueName .. ":partitions"
@@ -218,6 +243,48 @@ for gi = 1, #blockedGroupsList do
 end
 
 math.randomseed((currentUnix % 100000) * 1000000 + tonumber(currentTime[2]))
+
+-- F4 token-bucket (из rate-limiter): {allowed 0|1, waitMs, remaining}
+local function rlTBAllow(bucketKey, limit, refillRate, nowS, expireSec)
+	local data = redis.call('HMGET', bucketKey, 'tokens', 'lastRefill')
+	local tokens = limit
+	local lastRefill = nowS
+	if data[1] ~= false then
+		tokens = tonumber(data[1])
+	end
+	if data[2] ~= false then
+		lastRefill = tonumber(data[2])
+	end
+	local elapsed = nowS - lastRefill
+	if elapsed < 0 then
+		elapsed = 0
+	end
+	tokens = math.min(limit, tokens + refillRate * elapsed)
+	if tokens < 1 then
+		local waitMs = math.ceil((1 - tokens) / refillRate * 1000)
+		if waitMs < 1 then
+			waitMs = 1
+		end
+		return 0, waitMs, 0
+	end
+	tokens = tokens - 1
+	redis.call('HSET', bucketKey, 'tokens', tostring(tokens), 'lastRefill', tostring(nowS))
+	redis.call('EXPIRE', bucketKey, expireSec)
+	return 1, 0, math.floor(tokens)
+end
+
+local function rlCheckRates(keyPrefix, rates)
+	for i = 1, #rates do
+		local r = rates[i]
+		local bkey = keyPrefix .. ":" .. tostring(r.value) .. ":" .. tostring(r.durMs)
+		local expireSec = math.max(1, math.ceil(r.durMs / 1000) * 2)
+		local allowed, waitMs = rlTBAllow(bkey, r.value, r.refill, nowSec, expireSec)
+		if allowed == 0 then
+			return false, waitMs
+		end
+	end
+	return true, 0
+end
 
 -- Admission: partition в blockedParts, или любая группа в blockedGroups
 local function isAdmissionBlocked(partition)
@@ -330,13 +397,35 @@ local function getFromPartition(partition)
     return nil
 end
 
-local function tryCollectFromPartition(partition)
+-- group — текущая группа обхода (из tryReadyGroup); RL group-слой считает/блокирует именно её
+local function tryCollectFromPartition(partition, group)
 	if deferredPartitions[partition] then
 		return nil
 	end
 	if isAdmissionBlocked(partition) then
 		return nil
 	end
+
+	-- F4: group затем partition; deny → block соответствующий scope, задачу не берём
+	if #gRates > 0 then
+		local ok, waitMs = rlCheckRates("queue:" .. queueName .. ":rl:g:" .. group, gRates)
+		if not ok then
+			local unlockAt = now + waitMs
+			redis.call('ZADD', groupsKey, unlockAt, group)
+			blockedGroups[group] = true
+			return nil
+		end
+	end
+	if #pRates > 0 then
+		local ok, waitMs = rlCheckRates("queue:" .. queueName .. ":rl:p:" .. partition, pRates)
+		if not ok then
+			local unlockAt = now + waitMs
+			redis.call('ZADD', blockedKey, unlockAt, partition)
+			blockedParts[partition] = true
+			return nil
+		end
+	end
+
 	return getFromPartition(partition)
 end
 
@@ -364,7 +453,7 @@ local function tryReadyGroup(g)
 			end
 		end
 		for pi = 1, #parts do
-			local taskData = tryCollectFromPartition(parts[pi])
+			local taskData = tryCollectFromPartition(parts[pi], g)
 			if taskData then
 				return taskData
 			end

@@ -299,6 +299,7 @@ type Consumer struct {
 	prefetchCount               int
 	checkDeadConsumerLocksOnGet bool
 	idempotencyTtl              time.Duration
+	rateLimit                   *RateLimitConfig
 	middlewares                 []HandlerMiddleware
 	stopPing                    chan struct{}
 	stats                       *StatsSink
@@ -569,12 +570,15 @@ func (c *Consumer) ping(ctx context.Context) error {
 func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 	script := getGetScript()
 
-	result, err := script.Run(ctx, c.redis, []string{},
+	args := []interface{}{
 		c.queueName,
 		c.consumerID,
 		c.prefetchCount,
-		c.checkDeadConsumerLocksOnGet,
-	).Result()
+		bool01(c.checkDeadConsumerLocksOnGet),
+	}
+	args = appendGetRateLimitArgs(args, c.rateLimit)
+
+	result, err := script.Run(ctx, c.redis, []string{}, args...).Result()
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to get task: %w", err)
@@ -708,6 +712,7 @@ type ConsumerPool struct {
 	prefetchCount               int
 	checkDeadConsumerLocksOnGet bool
 	idempotencyTtl              time.Duration
+	rateLimit                   *RateLimitConfig
 	middlewares                 []HandlerMiddleware
 	stats                       *StatsSink
 }
@@ -818,6 +823,7 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c.prefetchCount = p.prefetchCount
 		c.checkDeadConsumerLocksOnGet = p.checkDeadConsumerLocksOnGet
 		c.idempotencyTtl = p.idempotencyTtl
+		c.rateLimit = p.rateLimit
 		c.middlewares = p.middlewares
 		c.stats = p.stats
 		c.statsOwn = false

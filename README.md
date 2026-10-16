@@ -18,6 +18,7 @@
 - **Идемпотентность** — Publish по `ID` (`SET NX`); опционально после Ack окно dedupe: тот же ID снова не примется, пока жив TTL на `payload`
 - **Теги** — индексация задач для подсчёта и массового удаления (`Admin.CountByTag` / `RemoveByTag`)
 - **Backpressure на Publish** — opt-in лимит глубины по тегу (`WithTagBackpressure` / `WithTagLimits`); при превышении весь батч не пишется
+- **Rate limit на Get** — opt-in слои group (токен/коннектор) + partition (чат); deny → block соответствующего scope без выдачи задачи
 - **Удаление без consumer** — `Admin.Remove` снимает ожидающую задачу по ID
 
 ## Требования
@@ -175,6 +176,27 @@ consumer.Consume(ctx, func(task *redisqueue.Task) error {
 consumer.BlockGroups(ctx, 0.3, "conn:163865653")
 admin.BlockGroups(ctx, "my-queue", 0.3, "conn:163865653")
 ```
+
+#### Транспортный rate limit на Get (opt-in)
+
+Чтобы не делать Get → внешний Allow → Reject, лимиты вшиваются в Get (token-bucket, окна как в [rate-limiter](https://github.com/Rinsvent/rate-limiter)). Два слоя AND:
+
+- **Group** — квота коннектора/токена по **текущей** группе обхода Get (`ready` этой группы); deny → блок этой группы на `RetryAfter`
+- **Partition** — квота чата/юзера; deny → `blocked` только этой партиции
+
+```go
+_ = consumer.SetRateLimit(&redisqueue.RateLimitConfig{
+    Group: &redisqueue.RateLimitLayer{
+        Rates: []redisqueue.Rate{{Duration: time.Second, Value: 30}},
+    },
+    Partition: &redisqueue.RateLimitLayer{
+        Rates: []redisqueue.Rate{{Duration: time.Second, Value: 1}, {Duration: time.Minute, Value: 20}},
+    },
+})
+```
+
+Любой слой можно опустить (`nil`). Без `SetRateLimit` — прежний Get без ключей `queue:{q}:rl:*`.  
+Адаптеры tg/vk — обычно разные очереди/consumer с разными Rates. Не путать с backpressure по тегу (F3) и с ручным `RejectWithDelay` в handler.
 
 Группы: `queue:{name}:groups` (ZSET) — score `≤ now` = свободна, `> now` = блок; свободные = `ZRANGEBYSCORE -inf now`.  
 Партиции (ordered Reject): `queue:{name}:blocked` — member=partition → unlockAt.  
