@@ -27,21 +27,37 @@ const (
 // getAddScript возвращает Lua скрипт для добавления задач (батч)
 // ARGV[1] = queue name
 // ARGV[2] = количество задач
-// Далее группы по 7 аргументов на задачу:
+// ARGV[3] = bpCount (число лимитов backpressure; 0 = выкл)
+// ARGV[4 .. 3+2*bpCount] = пары tag, limit
+// Далее группы по 7 аргументов на задачу (сдвиг taskBase = 4 + 2*bpCount):
 //
-//	ARGV[3 + i*7] = task ID
-//	ARGV[4 + i*7] = partition code (пустая строка = без партиции)
-//	ARGV[5 + i*7] = priority
-//	ARGV[6 + i*7] = scheduled timestamp (ms)
-//	ARGV[7 + i*7] = payload
-//	ARGV[8 + i*7] = tags (tag1#tag2#..., пустая = без тегов)
-//	ARGV[9 + i*7] = groups (g1#g2#..., пустая = DefaultGroup)
+//	ARGV[taskBase + i*7] = task ID
+//	… partition, priority, scheduled, payload, tags, groups
 //
-// Возвращает список не добавленных задач - их порядковый номер
+// Возвращает:
+//
+//	— список индексов не добавленных (дубликаты NX);
+//	— {'!', 'backpressure', tag, count, limit} если SCARD+taskCount > limit (ничего не добавлено).
 var addScript = redis.NewScript(`
 local queueName = ARGV[1]
 local taskCount = tonumber(ARGV[2])
+local bpCount = tonumber(ARGV[3]) or 0
 
+-- F3: backpressure по тегам — до любых SET; fail → весь батч не пишется
+if bpCount > 0 then
+	for bi = 0, bpCount - 1 do
+		local tag = ARGV[4 + bi * 2]
+		local limit = tonumber(ARGV[5 + bi * 2]) or 0
+		if tag ~= "" and limit > 0 then
+			local n = redis.call('SCARD', "queue:" .. queueName .. ":tag:" .. tag)
+			if n + taskCount > limit then
+				return {'!', 'backpressure', tag, tostring(n), tostring(limit)}
+			end
+		end
+	end
+end
+
+local taskBase = 4 + bpCount * 2
 local partitionsKey = "queue:" .. queueName .. ":partitions"
 -- groups: ZSET score=0|past (свободна) | unlockAt>now (блок). Единственный источник правды для групп.
 local groupsKey = "queue:" .. queueName .. ":groups"
@@ -55,7 +71,7 @@ end
 local notAddedItems = {}
 
 for i = 0, taskCount - 1 do
-    local base = 3 + i * 7
+    local base = taskBase + i * 7
     local taskId = ARGV[base]
     local partitionCode = ARGV[base + 1]
 	if partitionCode == "" then

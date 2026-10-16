@@ -17,6 +17,7 @@
 - **Группы** — `Task.Groups` для rate-limit scope (напр. коннектор); без групп → `_default`
 - **Идемпотентность** — Publish по `ID` (`SET NX`); опционально после Ack окно dedupe: тот же ID снова не примется, пока жив TTL на `payload`
 - **Теги** — индексация задач для подсчёта и массового удаления (`Admin.CountByTag` / `RemoveByTag`)
+- **Backpressure на Publish** — opt-in лимит глубины по тегу (`WithTagBackpressure` / `WithTagLimits`); при превышении весь батч не пишется
 - **Удаление без consumer** — `Admin.Remove` снимает ожидающую задачу по ID
 
 ## Требования
@@ -120,6 +121,33 @@ for i := range tasks {
 err := producer.Publish(ctx, tasks...)
 // Атомарно: либо все добавлены, либо ошибка (в т.ч. при дубликатах)
 ```
+
+### Backpressure по тегу (глубина очереди)
+
+Продюсер не заливает задачи, пока по тегу уже «полный» буфер (`SCARD tag` + размер батча > limit). Проверка в начале add-Lua: при отказе **ни одна** задача из вызова не добавляется → `ErrBackpressure`.
+
+Рекомендация: один стабильный тег потока на задачу (например `tg` или `stats:day`) — так проще квотировать. Несколько лимитов — AND (срабатывает первый превышенный).
+
+```go
+// один тег
+err := producer.PublishWith(ctx, []redisqueue.PublishOption{
+    redisqueue.WithTagBackpressure("tg", 100),
+}, &redisqueue.Task{
+    ID: "m1", Tags: []string{"tg"}, Payload: []byte(`{}`), Scheduled: time.Now(),
+})
+
+// несколько
+err = producer.PublishWith(ctx, []redisqueue.PublishOption{
+    redisqueue.WithTagLimits(map[string]int64{"tg": 100, "vk:123": 200}),
+}, tasks...)
+
+var bp *redisqueue.ErrBackpressure
+if errors.As(err, &bp) {
+    // подождать / уменьшить батч; bp.Tag, bp.Count, bp.Limit
+}
+```
+
+Без опций `Publish` — прежний путь (без `SCARD`). Не путать с rate limit по времени и с idempotency TTL по ID.
 
 ### Группы и rate limit
 

@@ -160,14 +160,28 @@ func NewProducer(redisClient *redis.Client, queueName string) *Producer {
 	}
 }
 
-// Publish добавляет одну или несколько задач в очередь атомарно, сохраняя порядок
+// Publish добавляет одну или несколько задач в очередь атомарно, сохраняя порядок.
+// Без backpressure — см. PublishWith + WithTagBackpressure / WithTagLimits.
 func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
+	return p.PublishWith(ctx, nil, tasks...)
+}
+
+// PublishWith — как Publish, плюс opt-in опции (backpressure по тегам).
+func (p *Producer) PublishWith(ctx context.Context, opts []PublishOption, tasks ...*Task) error {
 	if len(tasks) == 0 {
 		return nil
 	}
 
-	args := make([]interface{}, 0, 2+len(tasks)*7)
+	cfg := &publishConfig{}
+	cfg.apply(opts)
+	if err := cfg.validate(); err != nil {
+		return err
+	}
+
+	bp := cfg.bpArgs()
+	args := make([]interface{}, 0, 2+len(bp)+len(tasks)*7)
 	args = append(args, p.queueName, len(tasks))
+	args = append(args, bp...)
 
 	for _, task := range tasks {
 		if task.ID == "" {
@@ -195,7 +209,6 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 		return fmt.Errorf("failed to publish tasks: %w", err)
 	}
 
-	// Скрипт возвращает массив индексов задач, которые не были добавлены
 	notAddedIndices, ok := result.([]interface{})
 	if !ok {
 		return fmt.Errorf("failed to get response: %w", err)
@@ -205,10 +218,14 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 		return nil
 	}
 
-	// Собираем ID задач по возвращённым индексам
+	// Sentinel backpressure: {'!', 'backpressure', tag, count, limit}
+	if s, _ := notAddedIndices[0].(string); s == "!" {
+		return parseBackpressureResult(notAddedIndices)
+	}
+
 	notAddedIDs := make([]string, 0, len(notAddedIndices))
 	for _, idxInterface := range notAddedIndices {
-		idx, ok := idxInterface.(int64) // Lua number -> int64
+		idx, ok := idxInterface.(int64)
 		if !ok {
 			continue
 		}
@@ -218,6 +235,16 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 	}
 
 	return &ErrTasksAlreadyExist{TaskIDs: notAddedIDs}
+}
+
+func parseBackpressureResult(res []interface{}) error {
+	if len(res) < 5 {
+		return fmt.Errorf("backpressure: malformed script result")
+	}
+	tag, _ := res[2].(string)
+	count, _ := strconv.ParseInt(fmt.Sprint(res[3]), 10, 64)
+	limit, _ := strconv.ParseInt(fmt.Sprint(res[4]), 10, 64)
+	return &ErrBackpressure{Tag: tag, Count: count, Limit: limit}
 }
 
 // Lock добавляет одну или несколько блокировок
