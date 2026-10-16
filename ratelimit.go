@@ -12,6 +12,15 @@ func bool01(v bool) string {
 	return "0"
 }
 
+// Поддерживаемые Algorithm (как в github.com/Rinsvent/rate-limiter).
+const (
+	RateLimitTokenBucket          = "token-bucket"
+	RateLimitLeakyBucket          = "leaky-bucket"
+	RateLimitFixedWindowCounter   = "fixed-window-counter"
+	RateLimitSlidingWindowLog     = "sliding-window-log"
+	RateLimitSlidingWindowCounter = "sliding-window-counter"
+)
+
 // Rate — окно лимита: не более Value событий за Duration (AND по списку окон).
 type Rate struct {
 	Duration time.Duration
@@ -23,10 +32,10 @@ type RateLimitLayer struct {
 	Rates []Rate
 }
 
-// RateLimitConfig — opt-in лимит на Consumer Get (вариант A: два слоя AND).
-// Algorithm v1: только "token-bucket" (пусто = token-bucket).
+// RateLimitConfig — opt-in лимит на Consumer Get (два слоя AND).
+// Algorithm: см. константы RateLimit*; пусто = token-bucket.
 type RateLimitConfig struct {
-	Algorithm string // "token-bucket"
+	Algorithm string
 	Group     *RateLimitLayer
 	Partition *RateLimitLayer
 }
@@ -39,16 +48,22 @@ func layerEnabled(l *RateLimitLayer) bool {
 	return l != nil && len(l.Rates) > 0
 }
 
+func normalizeAlgorithm(algo string) string {
+	if algo == "" {
+		return RateLimitTokenBucket
+	}
+	return algo
+}
+
 func (c *RateLimitConfig) validate() error {
 	if c == nil || !c.enabled() {
 		return nil
 	}
-	algo := c.Algorithm
-	if algo == "" {
-		algo = "token-bucket"
-	}
-	if algo != "token-bucket" {
-		return fmt.Errorf("rate limit: unsupported algorithm %q (v1: token-bucket)", algo)
+	switch normalizeAlgorithm(c.Algorithm) {
+	case RateLimitTokenBucket, RateLimitLeakyBucket, RateLimitFixedWindowCounter,
+		RateLimitSlidingWindowLog, RateLimitSlidingWindowCounter:
+	default:
+		return fmt.Errorf("rate limit: unsupported algorithm %q", c.Algorithm)
 	}
 	for _, l := range []*RateLimitLayer{c.Group, c.Partition} {
 		if !layerEnabled(l) {
@@ -63,13 +78,13 @@ func (c *RateLimitConfig) validate() error {
 	return nil
 }
 
-// appendGetRateLimitArgs дописывает ARGV для Get Lua:
-// gRateN, (durMs, value)*, pRateN, (durMs, value)*
-// Без конфига — 0, 0 (без SCARD/INCR лимитера).
+// appendGetRateLimitArgs: algorithm, gRateN, (durMs, value)*, pRateN, (durMs, value)*
+// Выкл: "", 0, 0 — без RL call в Lua.
 func appendGetRateLimitArgs(args []interface{}, cfg *RateLimitConfig) []interface{} {
 	if cfg == nil || !cfg.enabled() {
-		return append(args, 0, 0)
+		return append(args, "", 0, 0)
 	}
+	args = append(args, normalizeAlgorithm(cfg.Algorithm))
 	args = appendLayerRates(args, cfg.Group)
 	args = appendLayerRates(args, cfg.Partition)
 	return args
@@ -96,16 +111,12 @@ func (c *Consumer) SetRateLimit(cfg *RateLimitConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
 	}
-	cp := cloneRateLimitConfig(cfg)
-	c.rateLimit = cp
+	c.rateLimit = cloneRateLimitConfig(cfg)
 	return nil
 }
 
 func cloneRateLimitConfig(cfg *RateLimitConfig) *RateLimitConfig {
-	out := &RateLimitConfig{Algorithm: cfg.Algorithm}
-	if out.Algorithm == "" {
-		out.Algorithm = "token-bucket"
-	}
+	out := &RateLimitConfig{Algorithm: normalizeAlgorithm(cfg.Algorithm)}
 	if layerEnabled(cfg.Group) {
 		out.Group = &RateLimitLayer{Rates: append([]Rate(nil), cfg.Group.Rates...)}
 	}

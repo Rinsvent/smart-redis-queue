@@ -12,13 +12,53 @@ import (
 func TestRateLimit_SetRateLimit_Validate(t *testing.T) {
 	_, consumer, _ := setupTestQueue(t)
 	require.Error(t, consumer.SetRateLimit(&RateLimitConfig{
-		Algorithm: "leaky-bucket",
+		Algorithm: "nope",
 		Group:     &RateLimitLayer{Rates: []Rate{{time.Second, 1}}},
 	}))
-	require.NoError(t, consumer.SetRateLimit(&RateLimitConfig{
-		Group: &RateLimitLayer{Rates: []Rate{{time.Second, 10}}},
-	}))
+	for _, algo := range []string{
+		"", RateLimitTokenBucket, RateLimitLeakyBucket, RateLimitFixedWindowCounter,
+		RateLimitSlidingWindowLog, RateLimitSlidingWindowCounter,
+	} {
+		require.NoError(t, consumer.SetRateLimit(&RateLimitConfig{
+			Algorithm: algo,
+			Group:     &RateLimitLayer{Rates: []Rate{{time.Second, 10}}},
+		}), algo)
+	}
 	require.NoError(t, consumer.SetRateLimit(nil))
+}
+
+func TestRateLimit_AllAlgorithms_GroupLimit(t *testing.T) {
+	algos := []string{
+		RateLimitTokenBucket, RateLimitLeakyBucket, RateLimitFixedWindowCounter,
+		RateLimitSlidingWindowLog, RateLimitSlidingWindowCounter,
+	}
+	for _, algo := range algos {
+		t.Run(algo, func(t *testing.T) {
+			producer, consumer, rdb := setupTestQueue(t)
+			consumer.SetPrefetchCount(1)
+			require.NoError(t, consumer.SetRateLimit(&RateLimitConfig{
+				Algorithm: algo,
+				Group:     &RateLimitLayer{Rates: []Rate{{time.Hour, 1}}},
+			}))
+			ctx := context.Background()
+			require.NoError(t, producer.Publish(ctx,
+				&Task{ID: "a1-" + algo, Partition: "!t:c1", Groups: []string{"tok"},
+					Payload: []byte("a"), Scheduled: time.Now().Add(-time.Second)},
+				&Task{ID: "a2-" + algo, Partition: "!t:c2", Groups: []string{"tok"},
+					Payload: []byte("b"), Scheduled: time.Now().Add(-time.Second)},
+			))
+			got, err := consumer.Get(ctx)
+			require.NoError(t, err)
+			require.Len(t, got, 1)
+			got2, err := consumer.Get(ctx)
+			require.NoError(t, err)
+			assert.Empty(t, got2, algo)
+			score, err := rdb.ZScore(ctx, "queue:test-queue:groups", "tok").Result()
+			require.NoError(t, err)
+			assert.Greater(t, score, float64(time.Now().UnixMilli()), algo)
+			require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+		})
+	}
 }
 
 func TestRateLimit_GroupLayer_BlocksGroup(t *testing.T) {

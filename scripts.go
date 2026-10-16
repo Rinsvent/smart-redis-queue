@@ -167,7 +167,7 @@ return notAddedItems
 // ARGV[2] = consumer ID
 // ARGV[3] = prefetch count
 // ARGV[4] = checkDeadConsumerLocksOnGet ("1" / "0")
-// ARGV[5] = gRateN; затем gRateN пар (durMs, value); затем pRateN и пары (F4; 0,0 = выкл)
+// ARGV[5] = algorithm ("" = RL выкл); ARGV[6]=gRateN + пары; затем pRateN + пары
 // Возвращает: {taskId1, partition1, payload1, rejectCount1, ...} или {}
 var getScript = redis.NewScript(`
 local queueName = ARGV[1]
@@ -178,8 +178,9 @@ if prefetchCount < 1 then
     prefetchCount = 1
 end
 
--- F4: парсинг rate-limit слоёв (token-bucket). gRateN=0 и pRateN=0 → без доп. call.
-local argIdx = 5
+-- F4: algorithm + слои. Пустой algorithm / нулевые rates → без RL call.
+local rlAlgo = ARGV[5] or ""
+local argIdx = 6
 local function parseRates()
 	local n = tonumber(ARGV[argIdx]) or 0
 	argIdx = argIdx + 1
@@ -192,7 +193,8 @@ local function parseRates()
 			rates[#rates + 1] = {
 				durMs = durMs,
 				value = value,
-				refill = value / (durMs / 1000.0)
+				refill = value / (durMs / 1000.0),
+				durSec = durMs / 1000.0
 			}
 		end
 	end
@@ -200,6 +202,10 @@ local function parseRates()
 end
 local gRates = parseRates()
 local pRates = parseRates()
+if rlAlgo == "" then
+	gRates = {}
+	pRates = {}
+end
 
 -- Вычисляем текущее время
 local currentTime = redis.call('TIME')
@@ -244,41 +250,146 @@ end
 
 math.randomseed((currentUnix % 100000) * 1000000 + tonumber(currentTime[2]))
 
--- F4 token-bucket (из rate-limiter): {allowed 0|1, waitMs, remaining}
-local function rlTBAllow(bucketKey, limit, refillRate, nowS, expireSec)
+-- F4 algorithms (из github.com/Rinsvent/rate-limiter). Все возвращают waitMs.
+local function rlTokenBucket(bucketKey, r, expireSec)
 	local data = redis.call('HMGET', bucketKey, 'tokens', 'lastRefill')
-	local tokens = limit
-	local lastRefill = nowS
-	if data[1] ~= false then
-		tokens = tonumber(data[1])
-	end
-	if data[2] ~= false then
-		lastRefill = tonumber(data[2])
-	end
-	local elapsed = nowS - lastRefill
-	if elapsed < 0 then
-		elapsed = 0
-	end
-	tokens = math.min(limit, tokens + refillRate * elapsed)
+	local tokens = r.value
+	local lastRefill = nowSec
+	if data[1] ~= false then tokens = tonumber(data[1]) end
+	if data[2] ~= false then lastRefill = tonumber(data[2]) end
+	local elapsed = nowSec - lastRefill
+	if elapsed < 0 then elapsed = 0 end
+	tokens = math.min(r.value, tokens + r.refill * elapsed)
 	if tokens < 1 then
-		local waitMs = math.ceil((1 - tokens) / refillRate * 1000)
-		if waitMs < 1 then
-			waitMs = 1
-		end
-		return 0, waitMs, 0
+		local waitMs = math.ceil((1 - tokens) / r.refill * 1000)
+		if waitMs < 1 then waitMs = 1 end
+		return 0, waitMs
 	end
 	tokens = tokens - 1
-	redis.call('HSET', bucketKey, 'tokens', tostring(tokens), 'lastRefill', tostring(nowS))
+	redis.call('HSET', bucketKey, 'tokens', tostring(tokens), 'lastRefill', tostring(nowSec))
 	redis.call('EXPIRE', bucketKey, expireSec)
-	return 1, 0, math.floor(tokens)
+	return 1, 0
 end
 
+local function rlLeakyBucket(bucketKey, r, expireSec)
+	local data = redis.call('HMGET', bucketKey, 'level', 'lastLeak')
+	local level = 0
+	local lastLeak = nowSec
+	if data[1] ~= false then level = tonumber(data[1]) end
+	if data[2] ~= false then lastLeak = tonumber(data[2]) end
+	local elapsed = nowSec - lastLeak
+	if elapsed < 0 then elapsed = 0 end
+	level = math.max(0, level - math.floor(r.refill * elapsed))
+	if level >= r.value then
+		local waitMs = math.ceil((level - r.value + 1) / r.refill * 1000)
+		if waitMs < 1 then waitMs = 1 end
+		return 0, waitMs
+	end
+	level = level + 1
+	redis.call('HSET', bucketKey, 'level', tostring(level), 'lastLeak', tostring(nowSec))
+	redis.call('EXPIRE', bucketKey, expireSec)
+	return 1, 0
+end
+
+local function rlFixedWindow(bucketKey, r, expireSec)
+	local windowNum = math.floor(nowSec / r.durSec)
+	local bkey = bucketKey .. ":" .. tostring(windowNum)
+	local count = redis.call('GET', bkey)
+	count = count and tonumber(count) or 0
+	if count >= r.value then
+		local nextWindow = (windowNum + 1) * r.durSec
+		local waitMs = math.ceil((nextWindow - nowSec) * 1000)
+		if waitMs < 1 then waitMs = 1 end
+		return 0, waitMs
+	end
+	redis.call('INCR', bkey)
+	redis.call('EXPIRE', bkey, expireSec)
+	return 1, 0
+end
+
+local function rlSlidingWindowLog(bucketKey, r, expireSec)
+	local cutoff = now - r.durMs
+	redis.call('ZREMRANGEBYSCORE', bucketKey, '0', tostring(cutoff))
+	local count = redis.call('ZCARD', bucketKey)
+	if count >= r.value then
+		local oldest = redis.call('ZRANGE', bucketKey, 0, 0, 'WITHSCORES')
+		local waitMs = r.durMs
+		if #oldest >= 2 then
+			local w = r.durMs - (now - tonumber(oldest[2]))
+			if w > 0 then waitMs = math.ceil(w) end
+		end
+		if waitMs < 1 then waitMs = 1 end
+		return 0, waitMs
+	end
+	local member = tostring(now) .. "-" .. tostring(math.random(1, 1000000000))
+	redis.call('ZADD', bucketKey, now, member)
+	redis.call('EXPIRE', bucketKey, expireSec)
+	return 1, 0
+end
+
+local function rlSlidingWindowCounter(bucketKey, r, expireSec)
+	local window_duration = r.durSec
+	local current_window = math.floor(nowSec / window_duration)
+	local window_start = current_window * window_duration
+	local elapsed = nowSec - window_start
+	local prev_window_num = current_window - 1
+	local curr = redis.call('HGET', bucketKey, 'curr')
+	local count = redis.call('HGET', bucketKey, 'count')
+	local prev = redis.call('HGET', bucketKey, 'prev')
+	local prev_count = redis.call('HGET', bucketKey, 'prev_count')
+	curr = curr and tonumber(curr) or current_window
+	count = count and tonumber(count) or 0
+	prev = prev and tonumber(prev) or prev_window_num
+	prev_count = prev_count and tonumber(prev_count) or 0
+	if curr < current_window then
+		if current_window - curr == 1 then
+			prev = curr
+			prev_count = count
+		else
+			prev = current_window - 1
+			prev_count = 0
+		end
+		curr = current_window
+		count = 0
+	end
+	local weighted = prev_count * (1 - elapsed / window_duration) + count
+	if weighted >= r.value then
+		local waitSec = window_duration - elapsed
+		if waitSec < 0 then waitSec = window_duration end
+		local waitMs = math.ceil(waitSec * 1000)
+		if waitMs < 1 then waitMs = 1 end
+		return 0, waitMs
+	end
+	count = count + 1
+	redis.call('HSET', bucketKey, 'curr', curr, 'count', count, 'prev', prev, 'prev_count', prev_count)
+	redis.call('EXPIRE', bucketKey, math.max(expireSec, math.ceil(window_duration * 3)))
+	return 1, 0
+end
+
+-- keyPrefix уже включает scope (g:name / p:name); в ключ добавляем algo + окно
 local function rlCheckRates(keyPrefix, rates)
+	local algo = rlAlgo
+	if algo == "" then
+		algo = "token-bucket"
+	end
 	for i = 1, #rates do
 		local r = rates[i]
-		local bkey = keyPrefix .. ":" .. tostring(r.value) .. ":" .. tostring(r.durMs)
-		local expireSec = math.max(1, math.ceil(r.durMs / 1000) * 2)
-		local allowed, waitMs = rlTBAllow(bkey, r.value, r.refill, nowSec, expireSec)
+		local expireSec = math.max(1, math.ceil(r.durSec) * 2)
+		local base = keyPrefix .. ":" .. algo .. ":" .. tostring(r.value) .. ":" .. tostring(r.durMs)
+		local allowed, waitMs = 1, 0
+		if algo == "token-bucket" then
+			allowed, waitMs = rlTokenBucket(base, r, expireSec)
+		elseif algo == "leaky-bucket" then
+			allowed, waitMs = rlLeakyBucket(base, r, expireSec)
+		elseif algo == "fixed-window-counter" then
+			allowed, waitMs = rlFixedWindow(base, r, expireSec)
+		elseif algo == "sliding-window-log" then
+			allowed, waitMs = rlSlidingWindowLog(base, r, expireSec)
+		elseif algo == "sliding-window-counter" then
+			allowed, waitMs = rlSlidingWindowCounter(base, r, expireSec)
+		else
+			allowed, waitMs = rlTokenBucket(base, r, expireSec)
+		end
 		if allowed == 0 then
 			return false, waitMs
 		end

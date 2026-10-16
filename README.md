@@ -179,13 +179,16 @@ admin.BlockGroups(ctx, "my-queue", 0.3, "conn:163865653")
 
 #### Транспортный rate limit на Get (opt-in)
 
-Чтобы не делать Get → внешний Allow → Reject, лимиты вшиваются в Get (token-bucket, окна как в [rate-limiter](https://github.com/Rinsvent/rate-limiter)). Два слоя AND:
+Чтобы не делать Get → внешний Allow → Reject, лимиты вшиваются в Get (алгоритмы как в [rate-limiter](https://github.com/Rinsvent/rate-limiter)). Два слоя AND:
 
-- **Group** — квота коннектора/токена по **текущей** группе обхода Get (`ready` этой группы); deny → блок этой группы на `RetryAfter`
+- **Group** — квота коннектора/токена по **текущей** группе обхода Get; deny → блок этой группы на `RetryAfter`
 - **Partition** — квота чата/юзера; deny → `blocked` только этой партиции
+
+`Algorithm` (пусто = `token-bucket`): `token-bucket`, `leaky-bucket`, `fixed-window-counter`, `sliding-window-log`, `sliding-window-counter`.
 
 ```go
 _ = consumer.SetRateLimit(&redisqueue.RateLimitConfig{
+    Algorithm: redisqueue.RateLimitTokenBucket,
     Group: &redisqueue.RateLimitLayer{
         Rates: []redisqueue.Rate{{Duration: time.Second, Value: 30}},
     },
