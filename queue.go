@@ -368,7 +368,8 @@ func (c *Consumer) SetCheckDeadConsumerLocksOnGet(cd bool) {
 	c.checkDeadConsumerLocksOnGet = cd
 }
 
-// SetIdempotencyTtl задает количество секунд до удаления ключа задачи после ack. Пока жив ключ задачи с таким же requestId будут пропущены (по умолчанию 0 - сразу удаляем после ack)
+// SetIdempotencyTtl — окно dedupe после успешного Ack: payload:{id} живёт TTL, повторный Publish с тем же ID отклоняется (NX).
+// Это не rate limit: ограничивает только повтор того же ID. 0 (дефолт) — сразу удалять ключ после Ack.
 func (c *Consumer) SetIdempotencyTtl(n time.Duration) {
 	if n < 0 {
 		n = 0

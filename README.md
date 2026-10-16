@@ -15,7 +15,7 @@
 - **Prefetch с сохранением порядка** — для ordered-партиций при reject первой задачи в батче остальные тоже reject'ятся и возвращаются в правильном порядке
 - **Rate limiting** — `RejectWithDelay` / `BlockGroups`: группы через score в `groups`, партиции через `blocked` (`p:`); Get обходит только свободные группы
 - **Группы** — `Task.Groups` для rate-limit scope (напр. коннектор); без групп → `_default`
-- **Идемпотентность** — добавление по `ID` (NX), дубликаты отклоняются
+- **Идемпотентность** — Publish по `ID` (`SET NX`); опционально после Ack окно dedupe: тот же ID снова не примется, пока жив TTL на `payload`
 - **Теги** — индексация задач для подсчёта и массового удаления (`Admin.CountByTag` / `RemoveByTag`)
 - **Удаление без consumer** — `Admin.Remove` снимает ожидающую задачу по ID
 
@@ -200,10 +200,34 @@ for task := range ch {
     if err := handle(task); err != nil {
         consumer.Reject(ctx, task.ID, 0) // вернуть в очередь
     } else {
-        consumer.Ack(ctx, task.ID, 2*time.Second) // 2 секунды после ack не будем принимать задачи с таким же taskID
+        // idempotencyTtl>0: после успеха payload:{id} остаётся на TTL — повторный Publish с тем же ID отклоняется (NX)
+        consumer.Ack(ctx, task.ID, 2*time.Second)
     }
 }
 ```
+
+То же для `Consume` / пула: `consumer.SetIdempotencyTtl(2 * time.Second)`.
+
+### Idempotency TTL после Ack (не rate limit)
+
+После успешного Ack при `idempotencyTtl > 0` ключ `payload:{id}` не удаляется, а ставится маркер + `EXPIRE`. Пока TTL жив, `Publish` с тем же `ID` не проходит (`SET NX`).
+
+Это **не throttling и не rate limit** в обычном смысле:
+
+| | Idempotency TTL | Rate limit / throttle |
+|--|-----------------|------------------------|
+| Что ограничивает | Повтор **того же** `ID` | N разных событий за окно |
+| Когда стартует окно | После **успешного** Ack | Обычно на каждый attempt / по времени |
+| Новый payload с тем же ID в окне | Молча не принимается | Зависит от политики |
+| Разные ID | Все проходят | Считаются в лимит |
+
+Ближе к названиям: *dedupe window* / *cooldown по task ID после успеха*.
+
+**Когда хватает:** стабильный бизнес-ключ в `ID` (например `stats:2026-10-15`) + при необходимости ordered-партиция — «успешный прогон этого ключа не чаще чем раз в TTL». Повторные Publish с тем же ID в окне просто no-op.
+
+**Когда не хватает:** нужны обновления payload, пока задача ещё «защищена» окном, или лимит «не чаще раза в T, но всегда **последний** payload» → debounce на Publish (см. roadmap F2). Лимит скорости потока / глубины очереди → rate limit в Get (F4) и backpressure по тегу (F3), не idempotency TTL.
+
+Не путать с `RejectWithDelay` / `BlockGroups`: это парковка group/partition после обработки, а не запрет Publish по ID.
 
 ### Метрики очереди (opt-in)
 
