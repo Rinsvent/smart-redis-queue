@@ -437,7 +437,8 @@ end
 -- Функция для получения одной задачи из партиции
 -- Партиции с префиксом "!" — эксклюзивный lock на консьюмера.
 -- Rate-limit блоки (blocked / groups) проверяются в isAdmissionBlocked до вызова.
-local function getFromPartition(partition)
+-- F4 RL списывается только перед ZREM готовой задачи (не на locked/пустой партиции).
+local function getFromPartition(partition, group)
     local needsLock = partition:sub(1, 1) == "!"
     
     if needsLock then
@@ -479,6 +480,25 @@ local function getFromPartition(partition)
 			local taskId = tasks[1]
 			local taskScore = tonumber(tasks[2])
 			if taskScore <= now then
+				-- F4: group затем partition; deny → block scope, задачу не берём
+				if #gRates > 0 then
+					local ok, waitMs = rlCheckRates("queue:" .. queueName .. ":rl:g:" .. group, gRates)
+					if not ok then
+						local unlockAt = now + waitMs
+						redis.call('ZADD', groupsKey, unlockAt, group)
+						blockedGroups[group] = true
+						return nil
+					end
+				end
+				if #pRates > 0 then
+					local ok, waitMs = rlCheckRates("queue:" .. queueName .. ":rl:p:" .. partition, pRates)
+					if not ok then
+						local unlockAt = now + waitMs
+						redis.call('ZADD', blockedKey, unlockAt, partition)
+						blockedParts[partition] = true
+						return nil
+					end
+				end
 				redis.call('ZREM', partitionQueueKey, taskId)
 				-- value = original ZSET score (Reject/ping reclaim без priority+1)
 				redis.call('HSET', consumerTasksKey, taskId, tostring(taskScore))
@@ -516,28 +536,7 @@ local function tryCollectFromPartition(partition, group)
 	if isAdmissionBlocked(partition) then
 		return nil
 	end
-
-	-- F4: group затем partition; deny → block соответствующий scope, задачу не берём
-	if #gRates > 0 then
-		local ok, waitMs = rlCheckRates("queue:" .. queueName .. ":rl:g:" .. group, gRates)
-		if not ok then
-			local unlockAt = now + waitMs
-			redis.call('ZADD', groupsKey, unlockAt, group)
-			blockedGroups[group] = true
-			return nil
-		end
-	end
-	if #pRates > 0 then
-		local ok, waitMs = rlCheckRates("queue:" .. queueName .. ":rl:p:" .. partition, pRates)
-		if not ok then
-			local unlockAt = now + waitMs
-			redis.call('ZADD', blockedKey, unlockAt, partition)
-			blockedParts[partition] = true
-			return nil
-		end
-	end
-
-	return getFromPartition(partition)
+	return getFromPartition(partition, group)
 end
 
 -- ready = ZSET (score=0). Random start index → ZRANGE батчами по кругу. Память O(batch).
@@ -574,22 +573,53 @@ local function tryReadyGroup(g)
 	return nil
 end
 
--- Обход: свободные группы (score <= now) с random index → ready с random index.
--- Нет свободных групп → нет работы (legacy обход partitions убран).
+-- Обход свободных групп: ZCOUNT + ZRANGEBYSCORE LIMIT батчами (память O(batch)),
+-- random start по кругу — как tryReadyGroup. Если mid-walk F4 сделал ZADD
+-- future score, free-set сжался и offset-walk ломается → refresh ZCOUNT и заново.
 local function collectOne()
-	local n = redis.call('ZCOUNT', groupsKey, '-inf', now)
-	if n == 0 then
-		return nil
-	end
-
-	local start = math.random(0, n - 1)
-	for i = 0, n - 1 do
-		local arr = redis.call('ZRANGEBYSCORE', groupsKey, '-inf', now, 'LIMIT', (start + i) % n, 1)
-		if #arr > 0 then
-			local taskData = tryReadyGroup(arr[1])
-			if taskData then
-				return taskData
+	for _ = 1, 64 do
+		local n = redis.call('ZCOUNT', groupsKey, '-inf', now)
+		if n == 0 then
+			return nil
+		end
+		local start = math.random(0, n - 1)
+		local seen = 0
+		local refresh = false
+		while seen < n do
+			local from = (start + seen) % n
+			local take = math.min(32, n - seen)
+			local batch
+			if from + take <= n then
+				batch = redis.call('ZRANGEBYSCORE', groupsKey, '-inf', now, 'LIMIT', from, take)
+			else
+				local left = n - from
+				batch = redis.call('ZRANGEBYSCORE', groupsKey, '-inf', now, 'LIMIT', from, left)
+				local rest = redis.call('ZRANGEBYSCORE', groupsKey, '-inf', now, 'LIMIT', 0, take - left)
+				for ri = 1, #rest do
+					batch[#batch + 1] = rest[ri]
+				end
 			end
+			for bi = 1, #batch do
+				local g = batch[bi]
+				if not blockedGroups[g] then
+					local taskData = tryReadyGroup(g)
+					if taskData then
+						return taskData
+					end
+					-- F4 заблокировал эту группу → n/offset устарели
+					if blockedGroups[g] then
+						refresh = true
+						break
+					end
+				end
+			end
+			if refresh then
+				break
+			end
+			seen = seen + take
+		end
+		if not refresh then
+			return nil
 		end
 	end
 	return nil
