@@ -644,10 +644,12 @@ for i = 1, #consumers do
 	local lastPing = redis.call('GET', lockOwnerKey)
 
 	if lastPing == false then
-		-- Консьюмер мёртв — возвращаем ВСЕ in-flight задачи с originalScore (без priority+1)
+		-- Консьюмер мёртв — ZADD задач per-task; индексы partitions/priorities/ready/count — 1× на partition (R5)
 		local lockOwnerTasksKey = "queue:" .. queueName .. ":consumer:" .. lockOwner .. ":tasks"
 		local tasksData = redis.call('HGETALL', lockOwnerTasksKey)
-		local unlockedParts = {}
+		local partitionsKey = "queue:" .. queueName .. ":partitions"
+		local restoredParts = {}
+		local partPriorities = {}
 
 		for j = 1, #tasksData, 2 do
 			local taskToReturn = tasksData[j]
@@ -667,37 +669,43 @@ for i = 1, #consumers do
 				end
 
 				local score = tonumber(meta) or now
-
 				local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. taskPartition .. ":" .. taskPriority
 				redis.call('ZADD', partitionQueueKey, score, taskToReturn)
-				local partitionsKey = "queue:" .. queueName .. ":partitions"
-				redis.call('SADD', partitionsKey, taskPartition)
-				local prioritiesKey = "queue:" .. queueName .. ":partition:" .. taskPartition .. ":priorities"
-				redis.call('ZADD', prioritiesKey, taskPriority, tostring(taskPriority))
 
-				local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. taskPartition .. ":groups")
-				if #pgroups == 0 then
-					pgroups = {"_default"}
-					redis.call('SADD', "queue:" .. queueName .. ":partition:" .. taskPartition .. ":groups", "_default")
+				restoredParts[taskPartition] = true
+				if not partPriorities[taskPartition] then
+					partPriorities[taskPartition] = {}
 				end
-				for gi = 1, #pgroups do
-					local g = pgroups[gi]
-					if not redis.call('ZSCORE', groupsKey, g) then
-						redis.call('ZADD', groupsKey, 0, g)
-					end
-					redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, taskPartition)
-				end
-
-				if taskPartition:sub(1, 1) == "!" then
-					redis.call('DEL', "queue:" .. queueName .. ":consumer:" .. lockOwner .. ":partition:" .. taskPartition .. ":count")
-					unlockedParts[taskPartition] = true
-				end
+				partPriorities[taskPartition][tostring(taskPriority)] = taskPriority
 			end
 		end
 
-		for part, _ in pairs(unlockedParts) do
-			redis.call('DEL', "queue:" .. queueName .. ":partition:" .. part .. ":lock")
+		for part, _ in pairs(restoredParts) do
+			redis.call('SADD', partitionsKey, part)
+			local prioritiesKey = "queue:" .. queueName .. ":partition:" .. part .. ":priorities"
+			for prioStr, prioNum in pairs(partPriorities[part]) do
+				redis.call('ZADD', prioritiesKey, prioNum, prioStr)
+			end
+
+			local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. part .. ":groups")
+			if #pgroups == 0 then
+				pgroups = {"_default"}
+				redis.call('SADD', "queue:" .. queueName .. ":partition:" .. part .. ":groups", "_default")
+			end
+			for gi = 1, #pgroups do
+				local g = pgroups[gi]
+				if not redis.call('ZSCORE', groupsKey, g) then
+					redis.call('ZADD', groupsKey, 0, g)
+				end
+				redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, part)
+			end
+
+			if part:sub(1, 1) == "!" then
+				redis.call('DEL', "queue:" .. queueName .. ":consumer:" .. lockOwner .. ":partition:" .. part .. ":count")
+				redis.call('DEL', "queue:" .. queueName .. ":partition:" .. part .. ":lock")
+			end
 		end
+
 		redis.call('DEL', lockOwnerTasksKey)
 		redis.call('SREM', consumersKey, lockOwner)
 	end
