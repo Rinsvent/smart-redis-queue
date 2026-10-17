@@ -39,6 +39,8 @@ func defaultStorePath() (string, error) {
 }
 
 // NewStore загружает (или создаёт) store по пути. Пустой path → default.
+// При первом/каждом открытии гарантирует профиль Local Redis (localhost:6379),
+// не переключая activeId, если пользователь уже выбрал другой хост.
 func NewStore(path string) (*Store, error) {
 	if path == "" {
 		var err error
@@ -51,7 +53,57 @@ func NewStore(path string) (*Store, error) {
 	if err := s.load(); err != nil && !os.IsNotExist(err) {
 		return nil, err
 	}
+	if _, err := s.EnsureLocalRedis(); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+const (
+	localRedisName = "Local Redis"
+	localRedisAddr = "localhost:6379"
+)
+
+func isLocalRedisAddr(addr string) bool {
+	switch addr {
+	case "localhost:6379", "127.0.0.1:6379":
+		return true
+	default:
+		return false
+	}
+}
+
+// EnsureLocalRedis добавляет localhost:6379, если такого профиля ещё нет.
+// Если activeId пуст — делает Local активным. Иначе не трогает выбор пользователя.
+// Возвращает профиль Local (существующий или новый).
+func (s *Store) EnsureLocalRedis() (Connection, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.data.Connections {
+		if isLocalRedisAddr(s.data.Connections[i].Addr) {
+			c := s.data.Connections[i]
+			if s.data.ActiveID == "" {
+				s.data.ActiveID = c.ID
+				if err := s.save(); err != nil {
+					return Connection{}, err
+				}
+			}
+			return c, nil
+		}
+	}
+	c := Connection{
+		ID:   newID(),
+		Name: localRedisName,
+		Addr: localRedisAddr,
+	}
+	s.data.Connections = append(s.data.Connections, c)
+	if s.data.ActiveID == "" {
+		s.data.ActiveID = c.ID
+	}
+	if err := s.save(); err != nil {
+		return Connection{}, err
+	}
+	return c, nil
 }
 
 func (s *Store) load() error {

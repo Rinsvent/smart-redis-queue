@@ -52,7 +52,7 @@ import RefreshIcon from '@mui/icons-material/Refresh'
 import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined'
 import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined'
 import { api } from './api'
-import RatesChart, { buildChartSeries } from './RatesChart'
+import RatesChart, { buildChartSeries, resolveChartWindow } from './RatesChart'
 
 const WATCH_KEY = 'srq-watch-tags'
 const CHART_OPEN_KEY = 'srq-chart-open'
@@ -444,12 +444,13 @@ export default function App() {
   }, [watchMap, activeId, selectedQueue, activeDb])
 
   const chartSeries = useMemo(() => {
-    const to = Math.floor(Date.now() / 1000)
-    const from = to - Math.min(STATS_WINDOW_SEC, 600) // show last 10m for readability
+    const now = Math.floor(Date.now() / 1000)
     const watches = watchedTags.map((tag) => ({
       tag,
       points: watchSeries[tag] || [],
     }))
+    // Не растягиваем короткие данные на пустые 10 минут — иначе линии «живут» только у края.
+    const { from, to } = resolveChartWindow(redisStats, watches, now, Math.min(STATS_WINDOW_SEC, 600))
     return buildChartSeries(redisStats, from, to, watches)
   }, [redisStats, watchSeries, watchedTags])
 
@@ -1004,6 +1005,8 @@ export default function App() {
                       <Box
                         sx={{
                           width: '100%',
+                          minWidth: 0,
+                          alignSelf: 'stretch',
                           border: 1,
                           borderColor: 'divider',
                           borderRadius: 2,
@@ -1012,7 +1015,7 @@ export default function App() {
                           py: 1,
                         }}
                       >
-                        <RatesChart series={chartSeries} height={140} />
+                        <RatesChart series={chartSeries} height={160} />
                       </Box>
                     )}
 

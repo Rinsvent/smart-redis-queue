@@ -430,6 +430,9 @@ make manager
 | `info` (alias: list, ls) | Информация об очередях: партиции, pending, in-progress, консьюмеры |
 | `purge` | Очистить очередь (или только указанную партицию) |
 | `retry` | Вернуть in-progress задачи в очередь (для зависших после падения консьюмера) |
+| `seed` | Демо-данные на нескольких DB (`demo-mail` / `demo-tg` / `demo-mixed`) |
+| `publish` | Публиковать заглушечные задачи (поток для живого UI) |
+| `consume` | Consume с заглушкой + stats (график g/a/r в UI) |
 | `desktop` | GUI manager (Wails); `-tags wails,production,webkit2_41` (Ubuntu 24.04+) |
 
 ### Примеры
@@ -452,6 +455,13 @@ make manager
 
 # Вернуть зависшие задачи
 ./bin/manager retry -q my-queue
+
+# Демо для Desktop UI (DB 0,1,2)
+./bin/manager seed --dbs 0,1,2
+
+# Живой publish / consume (разные терминалы → UI + график stats)
+./bin/manager --db 0 publish -q demo-mail -n 0 --interval 200ms
+./bin/manager --db 0 consume -q demo-mail --stats 5m --stats-tags campaign:live,batch:demo
 ```
 
 Глобальные флаги: `-a` (addr), `-P` (password), `--db`. Переменные: `REDIS_ADDR`, `REDIS_PASSWORD`.
@@ -473,7 +483,7 @@ GUI для Redis-хостов (без выбора DB в профиле): обз
 | `smart-redis-queue-desktop-linux-amd64` | Linux (Ubuntu 24.04+, webkit2gtk-4.1) |
 | `smart-redis-queue-desktop-windows-amd64.exe` | Windows 10 / 11 (WebView2) |
 
-Linux: при GBM/EGL abort на NVIDIA/Wayland запускайте с `WEBKIT_DISABLE_DMABUF_RENDERER=1` (при необходимости ещё `GDK_BACKEND=x11`).
+Linux / NVIDIA: `WEBKIT_DISABLE_DMABUF_RENDERER=1` выставляется самим приложением при старте `desktop` (и `WebviewGpuPolicy=Never`). Вручную переменная больше не обязательна; при упрямстве Wayland добавьте `GDK_BACKEND=x11`.
 
 Windows: нужен [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (обычно уже есть на Win10/11). Windows 8 не поддерживается.
 
@@ -492,13 +502,14 @@ go install github.com/wailsapp/wails/v2/cmd/wails@latest
 # Frontend
 cd internal/desktopui/frontend && npm install && npm run build && cd -
 
-# Запуск GUI
-# wails — наш тег; production — тег Wails; webkit2_41 — Ubuntu 24.04+ (webkit2gtk-4.1)
-# WEBKIT_DISABLE_DMABUF_RENDERER — обход GBM EGL abort на NVIDIA/Wayland
-WEBKIT_DISABLE_DMABUF_RENDERER=1 go run -tags wails,production,webkit2_41 ./cmd/manager desktop
+# Запуск GUI (предпочтительно — собранный бинарь, иконка в доке стабильнее)
+make desktop && ./bin/smart-redis-queue desktop
+
+# или go run (WM_CLASS=manager; иконка подхватится через runtime .desktop)
+go run -tags wails,production,webkit2_41 ./cmd/manager desktop
 ```
 
-Если всё ещё падает на Wayland: `GDK_BACKEND=x11 WEBKIT_DISABLE_DMABUF_RENDERER=1 go run ...`
+Если всё ещё падает на Wayland: `GDK_BACKEND=x11 go run -tags wails,production,webkit2_41 ./cmd/manager desktop`
 
 На Ubuntu 22.04 / системах с `libwebkit2gtk-4.0-dev` тег `webkit2_41` не нужен.
 
@@ -508,7 +519,9 @@ WEBKIT_DISABLE_DMABUF_RENDERER=1 go run -tags wails,production,webkit2_41 ./cmd/
 sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev
 ```
 
-Профили сохраняются в `~/.config/smart-redis-queue/connections.json` (или `os.UserConfigDir()`). Поле `db` в старых профилях игнорируется.
+Профили сохраняются в `~/.config/smart-redis-queue/connections.json` (или `os.UserConfigDir()`). Поле `db` в старых профилях игнорируется. При старте GUI всегда доступен профиль **Local Redis** (`localhost:6379`) — добавляется автоматически, без смены уже выбранного active-хоста.
+
+Иконка: `internal/desktopui/appicon.png`. При старте пишутся PNG + `.desktop` с `StartupWMClass` = **basename текущего бинаря** (`smart-redis-queue` / `manager-desktop` / при `go run` обычно `manager`). Без совпадения с `WM_CLASS` Ubuntu показывает шестерёнку. Для стабильной иконки лучше `make desktop && ./bin/smart-redis-queue desktop`, не `go run`.
 
 Без `-tags wails` команда `desktop` возвращает понятную ошибку — это ожидаемо.
 

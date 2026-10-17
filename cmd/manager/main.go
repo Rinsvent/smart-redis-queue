@@ -37,7 +37,7 @@ func main() {
 				Usage: "Redis DB",
 			},
 		},
-		Commands: []*cli.Command{
+		Commands: append([]*cli.Command{
 			{
 				Name:    "info",
 				Aliases: []string{"i", "list", "ls"},
@@ -59,7 +59,7 @@ func main() {
 			},
 			{
 				Name:  "retry",
-				Usage: "Вернуть in-progress задачи обратно в очередь (для зависших после падения консьюмера)",
+				Usage: "Вернуть in-progress tasks обратно в очередь (для зависших после падения консьюмера)",
 				Flags: []cli.Flag{
 					&cli.StringFlag{Name: "queue", Aliases: []string{"q"}, Required: true, Usage: "имя очереди"},
 				},
@@ -70,7 +70,7 @@ func main() {
 				Usage:  "GUI manager (Wails). Требует сборку с -tags wails",
 				Action: runDesktop,
 			},
-		},
+		}, demoCommands()...),
 	}
 
 	if err := cmd.Run(context.Background(), os.Args); err != nil {

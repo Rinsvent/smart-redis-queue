@@ -13,8 +13,19 @@ frontend:
 	cd internal/desktopui/frontend && npm install && npm run build
 
 # GUI manager (CGO + Wails; webkit2_41 для Ubuntu 24.04+)
+# Бинарь smart-redis-queue — WM_CLASS совпадает с .desktop / иконкой в доке.
+# WEBKIT_DISABLE_DMABUF_RENDERER выставляется в коде (NVIDIA GBM).
 desktop: frontend
-	go build -tags wails,production,webkit2_41 -o bin/manager-desktop ./cmd/manager
+	go build -tags wails,production,webkit2_41 -o bin/smart-redis-queue ./cmd/manager
+	cp -f bin/smart-redis-queue bin/manager-desktop
+
+# Быстрый запуск без ручного env (frontend должен быть собран: make frontend)
+desktop-run: desktop
+	./bin/smart-redis-queue desktop
+
+# go run (иконка: WM_CLASS=manager → пишется runtime .desktop)
+desktop-gorun: frontend
+	go run -tags wails,production,webkit2_41 ./cmd/manager desktop
 
 clean:
 	rm -rf bin/ coverage.out coverage.html
