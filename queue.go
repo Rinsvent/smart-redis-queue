@@ -300,6 +300,7 @@ type Consumer struct {
 	checkDeadConsumerLocksOnGet bool
 	idempotencyTtl              time.Duration
 	rateLimit                   *RateLimitConfig
+	concurrencyTags             bool // F5: проверка race! в Get / release в Ack·Reject
 	middlewares                 []HandlerMiddleware
 	stopPing                    chan struct{}
 	stats                       *StatsSink
@@ -577,6 +578,7 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 		bool01(c.checkDeadConsumerLocksOnGet),
 	}
 	args = appendGetRateLimitArgs(args, c.rateLimit)
+	args = append(args, bool01(c.concurrencyTags))
 
 	result, err := script.Run(ctx, c.redis, []string{}, args...).Result()
 
@@ -635,6 +637,7 @@ func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl time.D
 		taskID,
 		c.consumerID,
 		idempotencyTtl.Seconds(),
+		bool01(c.concurrencyTags),
 	).Result()
 
 	if err != nil {
@@ -666,6 +669,7 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, 
 		c.consumerID,
 		waitTime,
 		groupsStr,
+		bool01(c.concurrencyTags),
 	).Result()
 
 	if err != nil {
@@ -713,6 +717,7 @@ type ConsumerPool struct {
 	checkDeadConsumerLocksOnGet bool
 	idempotencyTtl              time.Duration
 	rateLimit                   *RateLimitConfig
+	concurrencyTags             bool
 	middlewares                 []HandlerMiddleware
 	stats                       *StatsSink
 }
@@ -824,6 +829,7 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c.checkDeadConsumerLocksOnGet = p.checkDeadConsumerLocksOnGet
 		c.idempotencyTtl = p.idempotencyTtl
 		c.rateLimit = p.rateLimit
+		c.concurrencyTags = p.concurrencyTags
 		c.middlewares = p.middlewares
 		c.stats = p.stats
 		c.statsOwn = false

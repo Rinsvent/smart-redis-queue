@@ -118,10 +118,16 @@ for i = 0, taskCount - 1 do
 
 		if tagsStr ~= "" then
 			local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
+			local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
+			local racePrefix = "race!"
 			for tag in string.gmatch(tagsStr, "[^#]+") do
 				if tag ~= "" then
 					redis.call('SADD', "queue:" .. queueName .. ":tag:" .. tag, taskId)
 					redis.call('SADD', tagsKey, tag)
+					-- F5: race! → отдельный SET для Get (без опций на Publish)
+					if tag:sub(1, #racePrefix) == racePrefix then
+						redis.call('SADD', raceTagsKey, tag)
+					end
 				end
 			end
 		end
@@ -219,6 +225,7 @@ return notAddedItems
 // ARGV[3] = prefetch count
 // ARGV[4] = checkDeadConsumerLocksOnGet ("1" / "0")
 // ARGV[5] = algorithm ("" = RL выкл); ARGV[6]=gRateN + пары; затем pRateN + пары
+// После rates: ARGV[argIdx] = concurrencyTags ("1" / "0")
 // Возвращает: {taskId1, partition1, payload1, rejectCount1, ...} или {}
 var getScript = redis.NewScript(`
 local queueName = ARGV[1]
@@ -258,6 +265,14 @@ if rlAlgo == "" then
 	pRates = {}
 end
 
+-- F5: concurrency tags (race!) — только при opt-in (хелперы после deferredPartitions)
+local concurrencyTags = (ARGV[argIdx] or "") == "1"
+local raceLocksKey = "queue:" .. queueName .. ":race:locks"
+local raceLocks = nil
+local raceSkips = 0
+local maxRaceSkips = 64
+local raceBudgetExhausted = false
+
 -- Вычисляем текущее время
 local currentTime = redis.call('TIME')
 local currentUnix = currentTime[1]
@@ -274,6 +289,51 @@ local acquiredPartitionLocks = {}
 local partitionHadTask = {}
 -- R4/D4: партиции с головой score>now — не заходим снова до конца этого Get
 local deferredPartitions = {}
+
+local function ensureRaceLocks()
+	if raceLocks ~= nil then
+		return
+	end
+	raceLocks = {}
+	local flat = redis.call('HGETALL', raceLocksKey)
+	for i = 1, #flat, 2 do
+		raceLocks[flat[i]] = flat[i + 1]
+	end
+end
+
+-- true = можно брать; false = race busy (partition deferred).
+-- EVAL атомарный: между проверкой map и HSET другой клиент не вклинится.
+-- HSET (не HSETNX): снимок raceLocks уже полный для этого скрипта.
+local function tryAcquireRace(taskId, partition)
+	if not concurrencyTags then
+		return true
+	end
+	local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
+	if redis.call('EXISTS', raceTagsKey) == 0 then
+		return true
+	end
+	local tags = redis.call('SMEMBERS', raceTagsKey)
+	if #tags == 0 then
+		return true
+	end
+	ensureRaceLocks()
+	for i = 1, #tags do
+		if raceLocks[tags[i]] then
+			deferredPartitions[partition] = true
+			raceSkips = raceSkips + 1
+			if raceSkips >= maxRaceSkips then
+				raceBudgetExhausted = true
+			end
+			return false
+		end
+	end
+	for i = 1, #tags do
+		local t = tags[i]
+		redis.call('HSET', raceLocksKey, t, taskId)
+		raceLocks[t] = taskId
+	end
+	return true
+end
 
 -- Регистрируем/обновляем консьюмера
 redis.call('SADD', consumersKey, consumerId)
@@ -550,6 +610,10 @@ local function getFromPartition(partition, group)
 						return nil
 					end
 				end
+				-- F5: race! locks (opt-in) до ZREM
+				if not tryAcquireRace(taskId, partition) then
+					return nil
+				end
 				redis.call('ZREM', partitionQueueKey, taskId)
 				-- value = original ZSET score (Reject/ping reclaim без priority+1)
 				redis.call('HSET', consumerTasksKey, taskId, tostring(taskScore))
@@ -678,6 +742,9 @@ end
 
 -- Основной цикл: набираем до prefetchCount задач (4 элемента на задачу: id, partition, payload, rejectCount)
 while #results / 4 < prefetchCount do
+	if raceBudgetExhausted then
+		break
+	end
 	local taskData = collectOne()
 	if not taskData then
 		break
@@ -704,11 +771,14 @@ return results
 // ARGV[1] = queue name
 // ARGV[2] = task ID
 // ARGV[3] = consumer ID
+// ARGV[4] = idempotencyTtl seconds
+// ARGV[5] = concurrencyTags ("1" / "0") — F5 release race locks
 var ackScript = redis.NewScript(`
 local queueName = ARGV[1]
 local taskId = ARGV[2]
 local consumerId = ARGV[3]
 local idempotencyTtl = tonumber(ARGV[4])
+local concurrencyTags = (ARGV[5] or "") == "1"
 
 -- Формируем ключи
 local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
@@ -716,6 +786,24 @@ local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
 local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
 local debPrefix = "deb!"
 local isDebounce = taskId:sub(1, #debPrefix) == debPrefix
+local raceLocksKey = "queue:" .. queueName .. ":race:locks"
+local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
+
+-- F5: снять локи только если consumer включил concurrency (acquire был только тогда)
+local function releaseRaceLocks()
+	if not concurrencyTags then
+		return
+	end
+	if redis.call('EXISTS', raceTagsKey) == 0 then
+		return
+	end
+	local tags = redis.call('SMEMBERS', raceTagsKey)
+	for i = 1, #tags do
+		if redis.call('HGET', raceLocksKey, tags[i]) == taskId then
+			redis.call('HDEL', raceLocksKey, tags[i])
+		end
+	end
+end
 
 -- Проверяем что задача в processing и принадлежит этому консьюмеру
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
@@ -743,6 +831,7 @@ if partitionCode:sub(1, 1) == "!" then
 end
 
 redis.call('HDEL', consumerTasksKey, taskId)
+releaseRaceLocks()
 
 -- F2: только deb! id — GET флага/priority и reactivate; иначе нулевой оверхед
 if isDebounce then
@@ -773,6 +862,7 @@ if isDebounce then
 			redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, partitionCode)
 		end
 		redis.call('DEL', debounceKey)
+		-- race:tags оставляем — задача снова в очереди
 		return 1
 	end
 end
@@ -787,6 +877,7 @@ end
 redis.call('DEL', partitionKey)
 redis.call('DEL', priorityKey)
 redis.call('DEL', "queue:" .. queueName .. ":reject_count:" .. taskId)
+redis.call('DEL', raceTagsKey)
 
 -- Чистим индексы тегов (если были); пустой SET тега удаляем явно
 local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
@@ -812,12 +903,14 @@ return 1
 // ARGV[3] = consumer ID
 // ARGV[4] = waitTime в секундах (дробное OK; 0 = без блокировки)
 // ARGV[5] = blockGroups (g1#g2#..., опционально)
+// ARGV[6] = concurrencyTags ("1" / "0") — F5 release race locks
 var rejectScript = redis.NewScript(`
 local queueName = ARGV[1]
 local taskId = ARGV[2]
 local consumerId = ARGV[3]
 local waitTime = tonumber(ARGV[4]) or 0
 local blockGroupsStr = ARGV[5] or ""
+local concurrencyTags = (ARGV[6] or "") == "1"
 
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
 
@@ -908,6 +1001,17 @@ redis.call('HDEL', consumerTasksKey, taskId)
 local debPrefix = "deb!"
 if taskId:sub(1, #debPrefix) == debPrefix then
 	redis.call('DEL', "queue:" .. queueName .. ":debounce:" .. taskId)
+end
+-- F5: снять race locks (задача снова waiting; race:tags оставляем)
+if concurrencyTags then
+	local raceLocksKey = "queue:" .. queueName .. ":race:locks"
+	local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
+	local rtags = redis.call('SMEMBERS', raceTagsKey)
+	for i = 1, #rtags do
+		if redis.call('HGET', raceLocksKey, rtags[i]) == taskId then
+			redis.call('HDEL', raceLocksKey, rtags[i])
+		end
+	end
 end
 
 return 1
@@ -1012,6 +1116,17 @@ for i = 1, #consumers do
 				if taskToReturn:sub(1, #debPrefix) == debPrefix then
 					redis.call('DEL', "queue:" .. queueName .. ":debounce:" .. taskToReturn)
 				end
+				-- F5: reclaim всегда снимает race locks этого taskId (иначе утечка)
+				local raceLocksKey = "queue:" .. queueName .. ":race:locks"
+				local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskToReturn
+				if redis.call('EXISTS', raceTagsKey) == 1 then
+					local rtags = redis.call('SMEMBERS', raceTagsKey)
+					for ri = 1, #rtags do
+						if redis.call('HGET', raceLocksKey, rtags[ri]) == taskToReturn then
+							redis.call('HDEL', raceLocksKey, rtags[ri])
+						end
+					end
+				end
 
 				restoredParts[taskPartition] = true
 				if not partPriorities[taskPartition] then
@@ -1099,6 +1214,16 @@ end
 local payload = redis.call('GET', payloadKey) or ''
 redis.call('DEL', payloadKey, partitionKey, priorityKey, "queue:" .. queueName .. ":reject_count:" .. taskId)
 cleanupTags()
+-- F5: waiting remove — race:tags + возможные locks (value=taskId)
+local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
+local raceLocksKey = "queue:" .. queueName .. ":race:locks"
+local rtags = redis.call('SMEMBERS', raceTagsKey)
+for i = 1, #rtags do
+	if redis.call('HGET', raceLocksKey, rtags[i]) == taskId then
+		redis.call('HDEL', raceLocksKey, rtags[i])
+	end
+end
+redis.call('DEL', raceTagsKey)
 
 local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partition .. ":priorities"
 if redis.call('ZCARD', queueKey) == 0 then

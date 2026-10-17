@@ -17,6 +17,7 @@
 - **Группы** — `Task.Groups` для rate-limit scope (напр. коннектор); без групп → `_default`
 - **Идемпотентность** — Publish по `ID` (`SET NX`); опционально после Ack окно dedupe: тот же ID снова не примется, пока жив TTL на `payload`
 - **Debounce на Publish** — id с префиксом `deb!` (`DebounceID`): всегда последний payload; in-flight → флаг и reactivate на Ack
+- **Concurrency tags** — теги `race!…`: взаимное исключение ресурса между партициями (opt-in `SetConcurrencyTags`)
 - **Теги** — индексация задач для подсчёта и массового удаления (`Admin.CountByTag` / `RemoveByTag`)
 - **Backpressure на Publish** — opt-in лимит глубины по тегу (`WithTagBackpressure` / `WithTagLimits`); при превышении весь батч не пишется
 - **Rate limit на Get** — opt-in слои group (токен/коннектор) + partition (чат); deny → block соответствующего scope без выдачи задачи
@@ -299,6 +300,21 @@ _ = producer.Publish(ctx, &redisqueue.Task{
 ```
 
 Без префикса — прежний `SET NX` / `ErrTasksAlreadyExist`. Не путать с idempotency TTL (окно после успеха) и с rate limit.
+
+### Concurrency tags (`race!`)
+
+Если в `Task.Tags` есть теги с префиксом `race!` (`RaceTagPrefix`), Publish кладёт их в `race:tags:{id}`. Проверка и HASH-локи `race:locks` — только при `consumer.SetConcurrencyTags(true)`:
+
+```go
+consumer.SetConcurrencyTags(true)
+_ = producer.Publish(ctx, &redisqueue.Task{
+    ID: "msg-1", Partition: "!chat:1",
+    Tags: []string{redisqueue.RaceTagPrefix + "file:" + fileHash},
+    Payload: payload,
+})
+```
+
+Пока задача in-flight держит лок, другая партиция с тем же `race!` тегом не выдаётся. Ack/Reject снимают лок (при включённой опции). Без `SetConcurrencyTags` — нулевой оверхед Get (индекс на Publish всё равно пишется).
 
 Не путать с `RejectWithDelay` / `BlockGroups`: это парковка group/partition после обработки, а не запрет Publish по ID.
 
