@@ -1,0 +1,23 @@
+# commit 0959fb375a2871bc50a7eac7af832e1df6f2ffe8
+# feat: fix random iteration fix extra iteration add group block
+# date 2026-10-05 21:05:03 +0700
+# host rinsvent-MS-7D54 go go1.26.2
+
+goos: linux
+goarch: amd64
+pkg: github.com/Rinsvent/smart-redis-queue
+cpu: AMD Ryzen 7 2700 Eight-Core Processor          
+BenchmarkPublish-16            	    6355	    171408 ns/op
+BenchmarkPublish-16            	    7587	    170921 ns/op
+BenchmarkPublish-16            	    6142	    177237 ns/op
+BenchmarkPublishBatch100-16    	     513	   2929655 ns/op
+BenchmarkPublishBatch100-16    	     477	   2403403 ns/op
+BenchmarkPublishBatch100-16    	     462	   2810298 ns/op
+BenchmarkConsume-16            	    5394	    217581 ns/op
+BenchmarkConsume-16            	    5209	    209496 ns/op
+BenchmarkConsume-16            	    5695	    229141 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    6274	    211549 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    6075	    202620 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    6885	    209301 ns/op
+PASS
+ok  	github.com/Rinsvent/smart-redis-queue	22.085s

@@ -1,0 +1,95 @@
+# commit ed29547596ef103e976d537a760539413e54338f
+# feat: add compress
+# date 2026-10-17 18:52:27 +0700
+# host rinsvent-MS-7D54 go go1.26.2
+
+goos: linux
+goarch: amd64
+pkg: github.com/Rinsvent/smart-redis-queue
+cpu: AMD Ryzen 7 2700 Eight-Core Processor          
+BenchmarkPublish-16              	    5824	    197712 ns/op
+BenchmarkPublish-16              	    7374	    170390 ns/op
+BenchmarkPublish-16              	    7292	    161652 ns/op
+BenchmarkPublishBatch100-16      	     524	   2873298 ns/op
+BenchmarkPublishBatch100-16      	     375	   3336503 ns/op
+BenchmarkPublishBatch100-16      	     430	   2452188 ns/op
+BenchmarkConsume-16              	    5264	    235987 ns/op
+BenchmarkConsume-16              	    6255	    233567 ns/op
+BenchmarkConsume-16              	    4892	    247615 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    5294	    204041 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    5803	    212148 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    5377	    198924 ns/op
+BenchmarkPayloadPublish/raw_128B-16             	    6811	    190768 ns/op	   0.67 MB/s	     696 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_128B-16             	    6656	    185192 ns/op	   0.69 MB/s	     696 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_128B-16             	    5320	    227044 ns/op	   0.56 MB/s	     696 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_1024B-16            	    5356	    222191 ns/op	   4.61 MB/s	     696 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_1024B-16            	    4996	    241685 ns/op	   4.24 MB/s	     696 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_1024B-16            	    5623	    190989 ns/op	   5.36 MB/s	     696 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_16384B-16           	    5970	    236778 ns/op	  69.20 MB/s	     696 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_16384B-16           	    5131	    220685 ns/op	  74.24 MB/s	     696 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_16384B-16           	    5372	    237138 ns/op	  69.09 MB/s	     696 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_65536B-16           	    2637	    383140 ns/op	 171.05 MB/s	     695 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_65536B-16           	    3781	    304301 ns/op	 215.37 MB/s	     695 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_65536B-16           	    3771	    308396 ns/op	 212.51 MB/s	     695 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_262144B-16          	    1972	    653563 ns/op	 401.10 MB/s	     694 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_262144B-16          	    2080	    589281 ns/op	 444.85 MB/s	     695 B/op	      16 allocs/op
+BenchmarkPayloadPublish/raw_262144B-16          	    1983	    673277 ns/op	 389.36 MB/s	     694 B/op	      16 allocs/op
+BenchmarkPayloadFullCycle/raw_128B-16           	    1846	    865939 ns/op	   0.15 MB/s	    2399 B/op	      56 allocs/op
+BenchmarkPayloadFullCycle/raw_128B-16           	    1791	    879712 ns/op	   0.15 MB/s	    2399 B/op	      56 allocs/op
+BenchmarkPayloadFullCycle/raw_128B-16           	    1716	    583297 ns/op	   0.22 MB/s	    2399 B/op	      56 allocs/op
+BenchmarkPayloadFullCycle/raw_1024B-16          	    2108	    591482 ns/op	   1.73 MB/s	    4304 B/op	      56 allocs/op
+BenchmarkPayloadFullCycle/raw_1024B-16          	    1989	    545422 ns/op	   1.88 MB/s	    4304 B/op	      56 allocs/op
+BenchmarkPayloadFullCycle/raw_1024B-16          	    2156	    598943 ns/op	   1.71 MB/s	    4306 B/op	      56 allocs/op
+BenchmarkPayloadFullCycle/raw_16384B-16         	    1999	    632328 ns/op	  25.91 MB/s	   36972 B/op	      56 allocs/op
+BenchmarkPayloadFullCycle/raw_16384B-16         	    1729	    725586 ns/op	  22.58 MB/s	   36974 B/op	      56 allocs/op
+BenchmarkPayloadFullCycle/raw_16384B-16         	    1951	    776129 ns/op	  21.11 MB/s	   36972 B/op	      56 allocs/op
+BenchmarkPayloadFullCycle/raw_65536B-16         	    1111	   1137115 ns/op	  57.63 MB/s	  141508 B/op	      57 allocs/op
+BenchmarkPayloadFullCycle/raw_65536B-16         	    1473	   1102645 ns/op	  59.44 MB/s	  141511 B/op	      57 allocs/op
+BenchmarkPayloadFullCycle/raw_65536B-16         	    1387	   1026854 ns/op	  63.82 MB/s	  141517 B/op	      57 allocs/op
+BenchmarkCompressPublish/raw_1024B-16           	    6600	    174377 ns/op	   5.87 MB/s	      1360 redis_B/op	     696 B/op	      16 allocs/op
+BenchmarkCompressPublish/raw_1024B-16           	    8092	    170246 ns/op	   6.01 MB/s	      1360 redis_B/op	     696 B/op	      16 allocs/op
+BenchmarkCompressPublish/raw_1024B-16           	    6448	    189222 ns/op	   5.41 MB/s	      1360 redis_B/op	     696 B/op	      16 allocs/op
+BenchmarkCompressPublish/zstd_1024B-16          	    6957	    197729 ns/op	   5.18 MB/s	       160.0 redis_B/op	    1287 B/op	      18 allocs/op
+BenchmarkCompressPublish/zstd_1024B-16          	    5877	    201034 ns/op	   5.09 MB/s	       160.0 redis_B/op	    1287 B/op	      18 allocs/op
+BenchmarkCompressPublish/zstd_1024B-16          	    6090	    195971 ns/op	   5.23 MB/s	       160.0 redis_B/op	    1287 B/op	      18 allocs/op
+BenchmarkCompressPublish/raw_16384B-16          	    5601	    195062 ns/op	  83.99 MB/s	     20560 redis_B/op	     695 B/op	      16 allocs/op
+BenchmarkCompressPublish/raw_16384B-16          	    5613	    207113 ns/op	  79.11 MB/s	     20560 redis_B/op	     695 B/op	      16 allocs/op
+BenchmarkCompressPublish/raw_16384B-16          	    5343	    197074 ns/op	  83.14 MB/s	     20560 redis_B/op	     695 B/op	      16 allocs/op
+BenchmarkCompressPublish/zstd_16384B-16         	    6224	    197032 ns/op	  83.15 MB/s	       160.0 redis_B/op	    8968 B/op	      18 allocs/op
+BenchmarkCompressPublish/zstd_16384B-16         	    6393	    216568 ns/op	  75.65 MB/s	       160.0 redis_B/op	    8968 B/op	      18 allocs/op
+BenchmarkCompressPublish/zstd_16384B-16         	    4500	    229636 ns/op	  71.35 MB/s	       160.0 redis_B/op	    8968 B/op	      18 allocs/op
+BenchmarkCompressPublish/raw_65536B-16          	    3630	    319564 ns/op	 205.08 MB/s	     82000 redis_B/op	     695 B/op	      16 allocs/op
+BenchmarkCompressPublish/raw_65536B-16          	    3978	    284270 ns/op	 230.54 MB/s	     82000 redis_B/op	     695 B/op	      16 allocs/op
+BenchmarkCompressPublish/raw_65536B-16          	    3922	    413329 ns/op	 158.56 MB/s	     82000 redis_B/op	     695 B/op	      16 allocs/op
+BenchmarkCompressPublish/zstd_65536B-16         	    4909	    213871 ns/op	 306.43 MB/s	       160.0 redis_B/op	   33546 B/op	      18 allocs/op
+BenchmarkCompressPublish/zstd_65536B-16         	    4972	    296959 ns/op	 220.69 MB/s	       160.0 redis_B/op	   33546 B/op	      18 allocs/op
+BenchmarkCompressPublish/zstd_65536B-16         	    5284	    210665 ns/op	 311.09 MB/s	       160.0 redis_B/op	   33546 B/op	      18 allocs/op
+BenchmarkCompressPublish/raw_262144B-16         	    1867	    683953 ns/op	 383.28 MB/s	    327760 redis_B/op	     694 B/op	      16 allocs/op
+BenchmarkCompressPublish/raw_262144B-16         	    1759	    627697 ns/op	 417.63 MB/s	    327760 redis_B/op	     694 B/op	      16 allocs/op
+BenchmarkCompressPublish/raw_262144B-16         	    1952	    679340 ns/op	 385.88 MB/s	    327760 redis_B/op	     695 B/op	      16 allocs/op
+BenchmarkCompressPublish/zstd_262144B-16        	    3642	    334176 ns/op	 784.45 MB/s	       176.0 redis_B/op	  131864 B/op	      18 allocs/op
+BenchmarkCompressPublish/zstd_262144B-16        	    2319	    510329 ns/op	 513.68 MB/s	       176.0 redis_B/op	  131864 B/op	      18 allocs/op
+BenchmarkCompressPublish/zstd_262144B-16        	    3634	    352462 ns/op	 743.75 MB/s	       176.0 redis_B/op	  131864 B/op	      18 allocs/op
+BenchmarkCompressFullCycle/raw_16384B-16        	    1758	    638369 ns/op	  25.67 MB/s	   36941 B/op	      56 allocs/op
+BenchmarkCompressFullCycle/raw_16384B-16        	    1754	    731277 ns/op	  22.40 MB/s	   36941 B/op	      56 allocs/op
+BenchmarkCompressFullCycle/raw_16384B-16        	    1846	    700799 ns/op	  23.38 MB/s	   36941 B/op	      56 allocs/op
+BenchmarkCompressFullCycle/zstd_16384B-16       	    1762	    732756 ns/op	  22.36 MB/s	   28991 B/op	      59 allocs/op
+BenchmarkCompressFullCycle/zstd_16384B-16       	    1914	    614266 ns/op	  26.67 MB/s	   28991 B/op	      59 allocs/op
+BenchmarkCompressFullCycle/zstd_16384B-16       	    1959	    701596 ns/op	  23.35 MB/s	   28991 B/op	      59 allocs/op
+BenchmarkCompressFullCycle/raw_65536B-16        	    1432	    865991 ns/op	  75.68 MB/s	  141389 B/op	      56 allocs/op
+BenchmarkCompressFullCycle/raw_65536B-16        	    1507	    893762 ns/op	  73.33 MB/s	  141389 B/op	      56 allocs/op
+BenchmarkCompressFullCycle/raw_65536B-16        	    1521	    853512 ns/op	  76.78 MB/s	  141389 B/op	      56 allocs/op
+BenchmarkCompressFullCycle/zstd_65536B-16       	    1532	    987526 ns/op	  66.36 MB/s	  108863 B/op	      59 allocs/op
+BenchmarkCompressFullCycle/zstd_65536B-16       	    1076	    944794 ns/op	  69.37 MB/s	  108862 B/op	      59 allocs/op
+BenchmarkCompressFullCycle/zstd_65536B-16       	    1556	    994081 ns/op	  65.93 MB/s	  108862 B/op	      59 allocs/op
+BenchmarkOrderedPartitions/parts-10-16          	     458	   2633920 ns/op	    9258 B/op	     264 allocs/op
+BenchmarkOrderedPartitions/parts-10-16          	     404	   3003249 ns/op	    9258 B/op	     264 allocs/op
+BenchmarkOrderedPartitions/parts-10-16          	     426	   2714378 ns/op	    9258 B/op	     264 allocs/op
+BenchmarkOrderedPartitions/parts-100-16         	      36	  31277583 ns/op	   92511 B/op	    2640 allocs/op
+BenchmarkOrderedPartitions/parts-100-16         	      49	  30343359 ns/op	   92536 B/op	    2640 allocs/op
+BenchmarkOrderedPartitions/parts-100-16         	      39	  28041375 ns/op	   92518 B/op	    2640 allocs/op
+BenchmarkOrderedPartitions/parts-500-16         	       7	 148517987 ns/op	  462761 B/op	   13200 allocs/op
+BenchmarkOrderedPartitions/parts-500-16         	       8	 201178232 ns/op	  462772 B/op	   13200 allocs/op
+BenchmarkOrderedPartitions/parts-500-16         	       7	 143566845 ns/op	  462788 B/op	   13200 allocs/op
+PASS
+ok  	github.com/Rinsvent/smart-redis-queue	126.416s

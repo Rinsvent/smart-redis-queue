@@ -1,0 +1,23 @@
+# commit a96f70e7823454763a31d00c76fb842a7325d963
+# feat: fix locks and add check option
+# date 2026-07-04 15:21:07 +0700
+# host rinsvent-MS-7D54 go go1.26.2
+
+goos: linux
+goarch: amd64
+pkg: github.com/Rinsvent/smart-redis-queue
+cpu: AMD Ryzen 7 2700 Eight-Core Processor          
+BenchmarkPublish-16            	    8379	    164961 ns/op
+BenchmarkPublish-16            	    7034	    178221 ns/op
+BenchmarkPublish-16            	    7227	    178137 ns/op
+BenchmarkPublishBatch100-16    	     637	   2001606 ns/op
+BenchmarkPublishBatch100-16    	     591	   2521056 ns/op
+BenchmarkPublishBatch100-16    	     506	   2090966 ns/op
+BenchmarkConsume-16            	    5156	    217121 ns/op
+BenchmarkConsume-16            	    6819	    305528 ns/op
+BenchmarkConsume-16            	    5224	    220072 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    6759	    187514 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    6022	    195556 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    6730	    204730 ns/op
+PASS
+ok  	github.com/Rinsvent/smart-redis-queue	20.421s

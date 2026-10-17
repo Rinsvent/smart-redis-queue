@@ -1,0 +1,23 @@
+# commit 83fd11351d74f5fa7e2116ad08284f770de809f5
+# feat: optomization :count query for not ordered partitions
+# date 2026-10-15 17:08:17 +0700
+# host rinsvent-MS-7D54 go go1.26.2
+
+goos: linux
+goarch: amd64
+pkg: github.com/Rinsvent/smart-redis-queue
+cpu: AMD Ryzen 7 2700 Eight-Core Processor          
+BenchmarkPublish-16            	    6519	    173775 ns/op
+BenchmarkPublish-16            	    6991	    168151 ns/op
+BenchmarkPublish-16            	    7161	    210835 ns/op
+BenchmarkPublishBatch100-16    	     477	   2260562 ns/op
+BenchmarkPublishBatch100-16    	     531	   2558545 ns/op
+BenchmarkPublishBatch100-16    	     553	   2469390 ns/op
+BenchmarkConsume-16            	    5192	    217512 ns/op
+BenchmarkConsume-16            	    5305	    210334 ns/op
+BenchmarkConsume-16            	    4789	    221698 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    6656	    303398 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    4849	    227345 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    6379	    258521 ns/op
+PASS
+ok  	github.com/Rinsvent/smart-redis-queue	19.790s

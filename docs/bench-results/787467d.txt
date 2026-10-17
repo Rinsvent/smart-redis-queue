@@ -1,0 +1,23 @@
+# commit 787467dcceea8114752abe341dcdee558c72e6d8
+# feat: script optimization
+# date 2026-10-05 23:09:43 +0700
+# host rinsvent-MS-7D54 go go1.26.2
+
+goos: linux
+goarch: amd64
+pkg: github.com/Rinsvent/smart-redis-queue
+cpu: AMD Ryzen 7 2700 Eight-Core Processor          
+BenchmarkPublish-16            	    6471	    166542 ns/op
+BenchmarkPublish-16            	    5210	    236484 ns/op
+BenchmarkPublish-16            	    6834	    167280 ns/op
+BenchmarkPublishBatch100-16    	     476	   2473292 ns/op
+BenchmarkPublishBatch100-16    	     550	   2619682 ns/op
+BenchmarkPublishBatch100-16    	     542	   2508386 ns/op
+BenchmarkConsume-16            	    5046	    236852 ns/op
+BenchmarkConsume-16            	    5145	    222248 ns/op
+BenchmarkConsume-16            	    5691	    232845 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    5127	    205072 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    6381	    212740 ns/op
+BenchmarkConsumePrefetch/prefetch-10-16         	    5396	    238175 ns/op
+PASS
+ok  	github.com/Rinsvent/smart-redis-queue	18.494s
