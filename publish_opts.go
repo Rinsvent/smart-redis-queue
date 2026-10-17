@@ -17,11 +17,27 @@ func (e *ErrBackpressure) Error() string {
 	return fmt.Sprintf("backpressure: tag %q count=%d limit=%d", e.Tag, e.Count, e.Limit)
 }
 
-// PublishOption — opt-in опции PublishWith (backpressure и т.п.).
+// PublishOption — opt-in опции PublishWith (backpressure, compression и т.п.).
 type PublishOption func(*publishConfig)
 
 type publishConfig struct {
-	tagLimits map[string]int64 // tag → max pending (SCARD+batch ≤ max)
+	tagLimits        map[string]int64 // tag → max pending (SCARD+batch ≤ max)
+	compression      Compression
+	compressMinBytes int
+}
+
+// WithCompression — сжатие payload для этого PublishWith (перекрывает Producer.SetCompression).
+func WithCompression(c Compression) PublishOption {
+	return func(cfg *publishConfig) {
+		cfg.compression = c
+	}
+}
+
+// WithCompressMinBytes — порог длины для WithCompression / SetCompression на этом вызове.
+func WithCompressMinBytes(n int) PublishOption {
+	return func(cfg *publishConfig) {
+		cfg.compressMinBytes = n
+	}
 }
 
 // WithTagBackpressure ограничивает Publish: если SCARD(tag)+len(batch) > max, весь батч отклоняется.

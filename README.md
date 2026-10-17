@@ -18,6 +18,7 @@
 - **Идемпотентность** — Publish по `ID` (`SET NX`); опционально после Ack окно dedupe: тот же ID снова не примется, пока жив TTL на `payload`
 - **Debounce на Publish** — id с префиксом `deb!` (`DebounceID`): всегда последний payload; in-flight → флаг и reactivate на Ack
 - **Concurrency tags** — теги `race!…`: взаимное исключение ресурса между партициями (opt-in `SetConcurrencyTags`)
+- **Сжатие payload** — opt-in zstd на Producer (`SetCompression`); Get/Admin декодируют по маркеру
 - **Теги** — индексация задач для подсчёта и массового удаления (`Admin.CountByTag` / `RemoveByTag`)
 - **Backpressure на Publish** — opt-in лимит глубины по тегу (`WithTagBackpressure` / `WithTagLimits`); при превышении весь батч не пишется
 - **Rate limit на Get** — opt-in слои group (токен/коннектор) + partition (чат); deny → block соответствующего scope без выдачи задачи
@@ -315,6 +316,17 @@ _ = producer.Publish(ctx, &redisqueue.Task{
 ```
 
 Пока задача in-flight держит лок, другая партиция с тем же `race!` тегом не выдаётся. Ack/Reject снимают лок (при включённой опции). Без `SetConcurrencyTags` — нулевой оверхед Get (индекс на Publish всё равно пишется).
+
+### Сжатие payload (Producer)
+
+Большие JSON/текст в Redis жрут память и раздувают EVAL ARGV. Opt-in на продюсере (порог по умолчанию 1KiB):
+
+```go
+producer.SetCompression(redisqueue.CompressionZstd)
+// или на вызов: PublishWith(ctx, []PublishOption{WithCompression(CompressionZstd)}, tasks...)
+```
+
+В Redis значение с маркером `RQC` + zstd; Get отдаёт уже разжатый `Task.Payload`. Старые raw-payload без маркера работают как раньше. Без `SetCompression` — ноль CPU на сжатие.
 
 Не путать с `RejectWithDelay` / `BlockGroups`: это парковка group/partition после обработки, а не запрет Publish по ID.
 

@@ -148,8 +148,10 @@ func encodeSeparated(items []string, kind string) (string, error) {
 
 // Producer отправляет задачи в очередь
 type Producer struct {
-	redis     *redis.Client
-	queueName string
+	redis            *redis.Client
+	queueName        string
+	compression      Compression
+	compressMinBytes int // 0 → defaultCompressMinBytes при Compression != None
 }
 
 // NewProducer создает нового продюсера
@@ -158,6 +160,17 @@ func NewProducer(redisClient *redis.Client, queueName string) *Producer {
 		redis:     redisClient,
 		queueName: queueName,
 	}
+}
+
+// SetCompression — сжатие payload на всех Publish (F6). CompressionNone (дефолт) — без оверхеда.
+// Consumer/Admin декодируют по маркеру автоматически.
+func (p *Producer) SetCompression(c Compression) {
+	p.compression = c
+}
+
+// SetCompressMinBytes — сжимать только payload ≥ n байт (дефолт 1024). 0 = сбросить на дефолт.
+func (p *Producer) SetCompressMinBytes(n int) {
+	p.compressMinBytes = n
 }
 
 // Publish добавляет одну или несколько задач в очередь атомарно, сохраняя порядок.
@@ -172,7 +185,7 @@ func (p *Producer) PublishWith(ctx context.Context, opts []PublishOption, tasks 
 		return nil
 	}
 
-	cfg := &publishConfig{}
+	cfg := &publishConfig{compression: p.compression, compressMinBytes: p.compressMinBytes}
 	cfg.apply(opts)
 	if err := cfg.validate(); err != nil {
 		return err
@@ -200,7 +213,12 @@ func (p *Producer) PublishWith(ctx context.Context, opts []PublishOption, tasks 
 		if err != nil {
 			return err
 		}
-		args = append(args, task.ID, task.Partition, task.Priority, scheduled, string(task.Payload), tags, groups)
+		payload, err := encodePayloadForRedis(task.Payload, cfg.compression, cfg.compressMinBytes)
+		if err != nil {
+			return err
+		}
+		// []byte в ARGV — binary-safe RESP bulk string (без string() копирования смысла)
+		args = append(args, task.ID, task.Partition, task.Priority, scheduled, payload, tags, groups)
 	}
 
 	script := getAddScript()
@@ -613,10 +631,15 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 			}
 		}
 
+		raw := []byte(payload)
+		decoded, err := decodePayloadFromRedis(raw)
+		if err != nil {
+			return nil, fmt.Errorf("decode payload %s: %w", taskID, err)
+		}
 		tasks = append(tasks, &Task{
 			ID:          taskID,
 			Partition:   partition,
-			Payload:     []byte(payload),
+			Payload:     decoded,
 			Scheduled:   time.Now(),
 			RejectCount: rejectCount,
 		})

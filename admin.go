@@ -546,9 +546,14 @@ func (a *Admin) Remove(ctx context.Context, queueName, taskID string) (*TaskRemo
 		payload, _ = arr[1].(string)
 	}
 
+	raw := []byte(payload)
+	decoded, err := decodePayloadFromRedis(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode payload: %w", err)
+	}
 	return &TaskRemoval{
 		TaskID:  taskID,
-		Payload: []byte(payload),
+		Payload: decoded,
 		Status:  status,
 	}, nil
 }
@@ -598,9 +603,14 @@ func (a *Admin) RemoveByTag(ctx context.Context, queueName, tag string, opts Rem
 		if arr[i+2] != nil {
 			payload, _ = arr[i+2].(string)
 		}
+		raw := []byte(payload)
+		decoded, err := decodePayloadFromRedis(raw)
+		if err != nil {
+			return nil, fmt.Errorf("decode payload %s: %w", taskID, err)
+		}
 		out = append(out, TaskRemoval{
 			TaskID:  taskID,
-			Payload: []byte(payload),
+			Payload: decoded,
 			Status:  status,
 		})
 	}
