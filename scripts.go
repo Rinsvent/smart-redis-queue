@@ -68,6 +68,22 @@ local function ensureGroup(group)
 	end
 end
 
+-- Поднять partition в ready всех её групп (после ZADD задачи).
+local function ensurePartitionReady(partitionCode)
+	local partGroupsKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups"
+	local pgroups = redis.call('SMEMBERS', partGroupsKey)
+	if #pgroups == 0 then
+		pgroups = {"_default"}
+		redis.call('SADD', partGroupsKey, "_default")
+	end
+	for gi = 1, #pgroups do
+		local g = pgroups[gi]
+		ensureGroup(g)
+		redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, partitionCode)
+	end
+end
+
+local debPrefix = "deb!"
 local notAddedItems = {}
 
 for i = 0, taskCount - 1 do
@@ -86,6 +102,7 @@ for i = 0, taskCount - 1 do
     local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
     local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
     local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
+	local isDebounce = taskId:sub(1, #debPrefix) == debPrefix
 
     local ok = redis.call('SET', payloadKey, payload, 'NX')
     if ok then
@@ -126,7 +143,41 @@ for i = 0, taskCount - 1 do
 			redis.call('ZADD', "queue:" .. queueName .. ":group:_default:ready", 0, partitionCode)
 			redis.call('SADD', partGroupsKey, "_default")
 		end
-    else 
+    elseif isDebounce then
+		-- F2: payload уже есть — waiting (в ZSET) или in-flight (нет в ZSET)
+		local debounceKey = "queue:" .. queueName .. ":debounce:" .. taskId
+		local existingPart = redis.call('GET', partitionKey)
+		if existingPart == false then
+			existingPart = "base"
+		end
+		local existingPrio = redis.call('GET', priorityKey)
+		if existingPrio == false then
+			existingPrio = "0"
+		end
+		local oldQueueKey = "queue:" .. queueName .. ":partition:" .. existingPart .. ":" .. existingPrio
+		local inQueue = redis.call('ZSCORE', oldQueueKey, taskId)
+
+		redis.call('SET', payloadKey, payload)
+
+		if inQueue ~= false then
+			-- waiting: сдвинуть score; при смене part/prio — перенести member
+			if existingPart ~= partitionCode or tostring(existingPrio) ~= tostring(priority) then
+				redis.call('ZREM', oldQueueKey, taskId)
+				redis.call('SET', partitionKey, partitionCode)
+				redis.call('SET', priorityKey, priority)
+			end
+			local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. priority
+			redis.call('ZADD', partitionQueueKey, scheduled, taskId)
+			redis.call('SADD', partitionsKey, partitionCode)
+			local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
+			redis.call('ZADD', prioritiesKey, priority, priority)
+			ensurePartitionReady(partitionCode)
+			redis.call('DEL', debounceKey)
+		else
+			-- in-flight: только payload + флаг until (без ZADD)
+			redis.call('SET', debounceKey, tostring(scheduled))
+		end
+    else
 		notAddedItems[#notAddedItems + 1] = i
     end
 end
@@ -663,6 +714,8 @@ local idempotencyTtl = tonumber(ARGV[4])
 local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
 local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
 local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
+local debPrefix = "deb!"
+local isDebounce = taskId:sub(1, #debPrefix) == debPrefix
 
 -- Проверяем что задача в processing и принадлежит этому консьюмеру
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
@@ -672,7 +725,7 @@ if processingAt == false then
     return 0
 end
 
--- Получаем партицию
+-- Партиция нужна для :count/:lock (как раньше); priority — только на F2-reactivate
 local partitionCode = redis.call('GET', partitionKey) or "base"
 
 -- :count / :lock только для ordered (!)
@@ -686,6 +739,41 @@ if partitionCode:sub(1, 1) == "!" then
 		if lockOwner == consumerId then
 			redis.call('DEL', partitionLockKey)
 		end
+	end
+end
+
+redis.call('HDEL', consumerTasksKey, taskId)
+
+-- F2: только deb! id — GET флага/priority и reactivate; иначе нулевой оверхед
+if isDebounce then
+	local debounceKey = "queue:" .. queueName .. ":debounce:" .. taskId
+	local debounceUntil = redis.call('GET', debounceKey)
+	if debounceUntil ~= false then
+		local priorityVal = redis.call('GET', priorityKey)
+		local priority = 0
+		if priorityVal then
+			priority = tonumber(priorityVal) or 0
+		end
+		local score = tonumber(debounceUntil) or 0
+		local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. tostring(priority)
+		redis.call('ZADD', partitionQueueKey, score, taskId)
+		redis.call('SADD', "queue:" .. queueName .. ":partitions", partitionCode)
+		redis.call('ZADD', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities", priority, tostring(priority))
+		local groupsKey = "queue:" .. queueName .. ":groups"
+		local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups")
+		if #pgroups == 0 then
+			pgroups = {"_default"}
+			redis.call('SADD', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups", "_default")
+		end
+		for gi = 1, #pgroups do
+			local g = pgroups[gi]
+			if not redis.call('ZSCORE', groupsKey, g) then
+				redis.call('ZADD', groupsKey, 0, g)
+			end
+			redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, partitionCode)
+		end
+		redis.call('DEL', debounceKey)
+		return 1
 	end
 end
 
@@ -711,9 +799,6 @@ for t = 1, #tags do
 	end
 end
 redis.call('DEL', tagsKey)
-
--- Удаляем задачу из hash консьюмера
-redis.call('HDEL', consumerTasksKey, taskId)
 
 return 1
 `)
@@ -819,6 +904,11 @@ end
 
 -- Удаляем задачу из hash консьюмера (prefetch)
 redis.call('HDEL', consumerTasksKey, taskId)
+-- F2: снова в ZSET → снять флаг только для deb! id
+local debPrefix = "deb!"
+if taskId:sub(1, #debPrefix) == debPrefix then
+	redis.call('DEL', "queue:" .. queueName .. ":debounce:" .. taskId)
+end
 
 return 1
 `)
@@ -917,6 +1007,11 @@ for i = 1, #consumers do
 				local score = tonumber(meta) or now
 				local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. taskPartition .. ":" .. taskPriority
 				redis.call('ZADD', partitionQueueKey, score, taskToReturn)
+				-- F2: reclaim → DEL debounce только для deb! id
+				local debPrefix = "deb!"
+				if taskToReturn:sub(1, #debPrefix) == debPrefix then
+					redis.call('DEL', "queue:" .. queueName .. ":debounce:" .. taskToReturn)
+				end
 
 				restoredParts[taskPartition] = true
 				if not partPriorities[taskPartition] then

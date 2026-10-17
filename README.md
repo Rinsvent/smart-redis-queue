@@ -16,6 +16,7 @@
 - **Rate limiting** — `RejectWithDelay` / `BlockGroups`: группы через score в `groups`, партиции через `blocked` (`p:`); Get обходит только свободные группы
 - **Группы** — `Task.Groups` для rate-limit scope (напр. коннектор); без групп → `_default`
 - **Идемпотентность** — Publish по `ID` (`SET NX`); опционально после Ack окно dedupe: тот же ID снова не примется, пока жив TTL на `payload`
+- **Debounce на Publish** — id с префиксом `deb!` (`DebounceID`): всегда последний payload; in-flight → флаг и reactivate на Ack
 - **Теги** — индексация задач для подсчёта и массового удаления (`Admin.CountByTag` / `RemoveByTag`)
 - **Backpressure на Publish** — opt-in лимит глубины по тегу (`WithTagBackpressure` / `WithTagLimits`); при превышении весь батч не пишется
 - **Rate limit на Get** — opt-in слои group (токен/коннектор) + partition (чат); deny → block соответствующего scope без выдачи задачи
@@ -278,7 +279,26 @@ for task := range ch {
 
 **Когда хватает:** стабильный бизнес-ключ в `ID` (например `stats:2026-10-15`) + при необходимости ordered-партиция — «успешный прогон этого ключа не чаще чем раз в TTL». Повторные Publish с тем же ID в окне просто no-op.
 
-**Когда не хватает:** нужны обновления payload, пока задача ещё «защищена» окном, или лимит «не чаще раза в T, но всегда **последний** payload» → debounce на Publish (см. roadmap F2). Лимит скорости потока / глубины очереди → rate limit в Get (F4) и backpressure по тегу (F3), не idempotency TTL.
+**Когда не хватает:** нужны обновления payload в полёте / всегда **последний** снимок → [Debounce](#debounce-publish-префикс-deb). Лимит скорости / глубины → rate limit в Get и backpressure по тегу, не idempotency TTL.
+
+### Debounce Publish (префикс `deb!`)
+
+Если `Task.ID` начинается с `redisqueue.DebouncePrefix` (`deb!`, хелпер `DebounceID`), Publish **не** отклоняется при занятом id:
+
+| Состояние | Поведение |
+|-----------|-----------|
+| Нет задачи | Обычный enqueue |
+| В очереди (waiting) | Перезапись payload + сдвиг `Scheduled` |
+| In-flight | Перезапись payload + флаг `queue:{q}:debounce:{id}` (until); после **Ack** задача снова в ZSET с этим score и актуальным payload (без F1-маркера на этом Ack) |
+
+```go
+id := redisqueue.DebounceID("stats:2026-10-15")
+_ = producer.Publish(ctx, &redisqueue.Task{
+    ID: id, Payload: payload, Scheduled: time.Now().Add(time.Second),
+})
+```
+
+Без префикса — прежний `SET NX` / `ErrTasksAlreadyExist`. Не путать с idempotency TTL (окно после успеха) и с rate limit.
 
 Не путать с `RejectWithDelay` / `BlockGroups`: это парковка group/partition после обработки, а не запрет Publish по ID.
 
