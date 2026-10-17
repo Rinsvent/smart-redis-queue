@@ -150,8 +150,7 @@ func (a *Admin) queueStats(ctx context.Context, queueName, partitionFilter strin
 	return stats, nil
 }
 
-// QueueOverview — сводка без полного обхода партиций: SCARD + consumers + до 100 групп.
-// TotalPending не суммируется по всем партициям (дорого на больших очередях) — смотрите ListPartitions.
+// QueueOverview — сводка: SCARD partitions, pending (SCAN ZCARD), in-progress (consumer HLEN), группы.
 func (a *Admin) QueueOverview(ctx context.Context, queueName string) (*QueueStats, error) {
 	total, err := a.redis.SCard(ctx, "queue:"+queueName+":partitions").Result()
 	if err != nil && err != redis.Nil {
@@ -172,7 +171,100 @@ func (a *Admin) QueueOverview(ctx context.Context, queueName string) (*QueueStat
 		n, _ := a.redis.HLen(ctx, "queue:"+queueName+":consumer:"+cid+":tasks").Result()
 		stats.TotalInProgress += n
 	}
+	pending, err := a.queuePendingTotal(ctx, queueName)
+	if err != nil {
+		return nil, err
+	}
+	stats.TotalPending = pending
 	return stats, nil
+}
+
+// queuePendingTotal — сумма ZCARD по ключам queue:{q}:partition:{part}:{prio}
+// (SCAN; без обхода SET partitions и без чтения meta :priorities/:groups/:lock/:count).
+func (a *Admin) queuePendingTotal(ctx context.Context, queueName string) (int64, error) {
+	prefix := "queue:" + queueName + ":partition:"
+	var total int64
+	var batch []string
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		pipe := a.redis.Pipeline()
+		cmds := make([]*redis.IntCmd, len(batch))
+		for i, k := range batch {
+			cmds[i] = pipe.ZCard(ctx, k)
+		}
+		if _, err := pipe.Exec(ctx); err != nil && err != redis.Nil {
+			return err
+		}
+		for _, c := range cmds {
+			n, _ := c.Result()
+			total += n
+		}
+		batch = batch[:0]
+		return nil
+	}
+	iter := a.redis.Scan(ctx, 0, prefix+"*", scanMatchCount).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		if !strings.HasPrefix(key, prefix) {
+			continue
+		}
+		switch {
+		case strings.HasSuffix(key, ":priorities"),
+			strings.HasSuffix(key, ":groups"),
+			strings.HasSuffix(key, ":lock"),
+			strings.HasSuffix(key, ":count"):
+			continue
+		}
+		rest := strings.TrimPrefix(key, prefix)
+		// mapping taskID→partition — без ':'; ZSET part:prio — есть
+		if !strings.Contains(rest, ":") {
+			continue
+		}
+		batch = append(batch, key)
+		if len(batch) >= 64 {
+			if err := flush(); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if err := iter.Err(); err != nil {
+		return 0, err
+	}
+	if err := flush(); err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+// QueueStatsBounds — min/max unix-sec в stats:index (0,0 если пусто).
+func (a *Admin) QueueStatsBounds(ctx context.Context, queueName string) (fromSec, toSec int64, err error) {
+	indexKey := "queue:" + queueName + ":stats:index"
+	n, err := a.redis.ZCard(ctx, indexKey).Result()
+	if err != nil && err != redis.Nil {
+		return 0, 0, err
+	}
+	if n == 0 {
+		return 0, 0, nil
+	}
+	first, err := a.redis.ZRange(ctx, indexKey, 0, 0).Result()
+	if err != nil || len(first) == 0 {
+		return 0, 0, err
+	}
+	last, err := a.redis.ZRange(ctx, indexKey, -1, -1).Result()
+	if err != nil || len(last) == 0 {
+		return 0, 0, err
+	}
+	fromSec, err = strconv.ParseInt(first[0], 10, 64)
+	if err != nil {
+		return 0, 0, err
+	}
+	toSec, err = strconv.ParseInt(last[0], 10, 64)
+	if err != nil {
+		return 0, 0, err
+	}
+	return fromSec, toSec, nil
 }
 
 // ListPartitions — SET partitions: total=SCARD, выборка ≤limit через SSCAN MATCH *substr*.

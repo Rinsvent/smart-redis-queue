@@ -26,7 +26,8 @@ export const api = {
   listGroups: (name, db, filter) => call('ListGroups', name, db, filter || ''),
   listTags: (name, db, filter) => call('ListTags', name, db, filter || ''),
   countTags: (name, db) => call('CountTags', name, db),
-  listQueueStats: (name, db, lastSec) => call('ListQueueStats', name, db, lastSec || 3600),
+  listQueueStats: (name, db, lastSec) => call('ListQueueStats', name, db, lastSec ?? 3600),
+  queueStatsBounds: (name, db) => call('QueueStatsBounds', name, db),
   blockPartition: (queue, partition, waitTimeSec, db) =>
     call('BlockPartition', queue, partition, waitTimeSec, db),
   unblockPartition: (queue, partition, db) => call('UnblockPartition', queue, partition, db),

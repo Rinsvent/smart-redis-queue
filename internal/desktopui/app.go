@@ -667,19 +667,40 @@ func (a *App) CountTags(name string, db int) (int, error) {
 	return admin.CountTags(ctx, name)
 }
 
-// ListQueueStats — секундные bucket'ы воркерных метрик за lastSec (default/max 3600).
+// StatsBoundsView — диапазон доступных stats в Redis.
+type StatsBoundsView struct {
+	From int64 `json:"from"` // 0 если пусто
+	To   int64 `json:"to"`
+}
+
+// ListQueueStats — секундные bucket'ы за lastSec (0 = весь stats:index; max 24h).
 func (a *App) ListQueueStats(name string, db int, lastSec int) ([]StatPointView, error) {
 	admin, err := a.adminForDB(db)
 	if err != nil {
 		return nil, err
 	}
-	if lastSec <= 0 || lastSec > 3600 {
-		lastSec = 3600
-	}
-	to := time.Now().Unix()
-	from := to - int64(lastSec)
 	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 15*time.Second)
 	defer cancel()
+	to := time.Now().Unix()
+	var from int64
+	if lastSec <= 0 {
+		bFrom, bTo, err := admin.QueueStatsBounds(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if bFrom == 0 && bTo == 0 {
+			return nil, nil
+		}
+		from, to = bFrom, bTo
+		if to < time.Now().Unix() {
+			to = time.Now().Unix()
+		}
+	} else {
+		if lastSec > 86400 {
+			lastSec = 86400
+		}
+		from = to - int64(lastSec)
+	}
 	pts, err := admin.ListQueueStats(ctx, name, from, to)
 	if err != nil {
 		return nil, err
@@ -699,6 +720,21 @@ func (a *App) ListQueueStats(name string, db int, lastSec int) ([]StatPointView,
 		})
 	}
 	return out, nil
+}
+
+// QueueStatsBounds — min/max sec в stats:index.
+func (a *App) QueueStatsBounds(name string, db int) (StatsBoundsView, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return StatsBoundsView{}, err
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 5*time.Second)
+	defer cancel()
+	from, to, err := admin.QueueStatsBounds(ctx, name)
+	if err != nil {
+		return StatsBoundsView{}, err
+	}
+	return StatsBoundsView{From: from, To: to}, nil
 }
 
 // BlockPartition — rate-limit block на waitTimeSec секунд.
@@ -752,24 +788,31 @@ func (a *App) inspectOne(name string, db int) (QueueSnapshot, error) {
 	now := time.Now()
 	cur := sample{pending: snap.Pending, inProgress: snap.InProgress, at: now}
 	a.prevMu.Lock()
-	defer a.prevMu.Unlock()
-	if prev, ok := a.prev[key]; ok {
-		dt := now.Sub(prev.at).Seconds()
-		if dt > 0 {
-			prevBacklog := prev.pending + prev.inProgress
-			curBacklog := cur.pending + cur.inProgress
-			snap.Rate.BacklogDeltaPerSec = float64(curBacklog-prevBacklog) / dt
-			processed := float64(prev.pending-cur.pending) / dt
-			if processed < 0 {
-				processed = 0
-			}
-			snap.Rate.ProcessedPerSec = processed
-		}
-	}
+	prev, hasPrev := a.prev[key]
 	if a.prev == nil {
 		a.prev = map[string]sample{}
 	}
 	a.prev[key] = cur
+	a.prevMu.Unlock()
+
+	if hasPrev {
+		dt := now.Sub(prev.at).Seconds()
+		if dt > 0.2 {
+			prevBacklog := prev.pending + prev.inProgress
+			curBacklog := cur.pending + cur.inProgress
+			snap.Rate.BacklogDeltaPerSec = float64(curBacklog-prevBacklog) / dt
+			// processed: по ack из stats (pending-delta врал, пока overview не считал pending)
+			fromSec := now.Add(-time.Duration(dt*float64(time.Second)) - time.Second).Unix()
+			toSec := now.Unix()
+			if pts, err := admin.ListQueueStats(ctx, name, fromSec, toSec); err == nil {
+				var acks int64
+				for _, p := range pts {
+					acks += p.Ack
+				}
+				snap.Rate.ProcessedPerSec = float64(acks) / dt
+			}
+		}
+	}
 	return snap, nil
 }
 

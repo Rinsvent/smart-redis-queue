@@ -26,45 +26,6 @@ function normPoint(p) {
   }
 }
 
-function pointHasSignal(p) {
-  if (!p) return false
-  if (p.get || p.ack || p.reject) return true
-  return Object.values(p.tags || {}).some((v) => v > 0)
-}
-
-/** Окно X: по реальным точкам, чтобы линии тянулись от левого края на всю ширину. */
-export function resolveChartWindow(points, watchSeries, nowSec, maxWindowSec = 600) {
-  let minSec = Infinity
-  let maxSec = -Infinity
-  for (const raw of points || []) {
-    const p = normPoint(raw)
-    if (!p || !pointHasSignal(p)) continue
-    minSec = Math.min(minSec, p.sec)
-    maxSec = Math.max(maxSec, p.sec)
-  }
-  for (const w of watchSeries || []) {
-    for (const pt of w.points || []) {
-      const s = Number(pt.sec)
-      const n = Number(pt.n)
-      if (!Number.isFinite(s) || !Number.isFinite(n)) continue
-      minSec = Math.min(minSec, s)
-      maxSec = Math.max(maxSec, s)
-    }
-  }
-  if (!Number.isFinite(minSec)) {
-    const to = nowSec
-    return { from: to - Math.min(120, maxWindowSec), to }
-  }
-  const span = Math.max(1, maxSec - minSec)
-  const pad = Math.max(3, Math.floor(span * 0.08))
-  const live = nowSec - maxSec <= 45
-  let to = live ? nowSec : maxSec + pad
-  let from = minSec - pad
-  if (to - from < 30) from = to - 30
-  if (to - from > maxWindowSec) from = to - maxWindowSec
-  return { from, to }
-}
-
 /** Build continuous series with gap fill: rates→0, gauges→forward-fill. */
 export function buildChartSeries(points, fromSec, toSec, watchSeries) {
   const bySec = new Map()
@@ -85,7 +46,9 @@ export function buildChartSeries(points, fromSec, toSec, watchSeries) {
   }
 
   let ffTags = { ...lastTags }
-  for (let sec = fromSec; sec <= toSec; sec++) {
+  const from = Math.floor(fromSec)
+  const to = Math.floor(toSec)
+  for (let sec = from; sec <= to; sec++) {
     const p = bySec.get(sec)
     const row = {
       sec,
@@ -115,10 +78,9 @@ export function buildChartSeries(points, fromSec, toSec, watchSeries) {
   return out
 }
 
-export default function RatesChart({ series, height = 140 }) {
+export default function RatesChart({ series, height = 160 }) {
   const wrapRef = useRef(null)
   const [width, setWidth] = useState(0)
-  // empty → show all; non-empty → only selected keys
   const [selected, setSelected] = useState(() => new Set())
 
   useEffect(() => {
@@ -134,7 +96,8 @@ export default function RatesChart({ series, height = 140 }) {
   }, [])
 
   const h = height
-  const pad = { t: 8, r: 8, b: 18, l: 36 }
+  // l=28 — подписи оси; линия стартует ровно на оси (x=pad.l)
+  const pad = { t: 8, r: 4, b: 16, l: 28 }
   const n = series.length
 
   const tagKeys = useMemo(() => {
@@ -198,7 +161,7 @@ export default function RatesChart({ series, height = 140 }) {
 
   const line = (vals) =>
     vals
-      .map((v, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(1)},${yAt(v).toFixed(1)}`)
+      .map((v, i) => `${i === 0 ? 'M' : 'L'}${xAt(i).toFixed(2)},${yAt(v).toFixed(2)}`)
       .join(' ')
 
   return (
@@ -207,7 +170,7 @@ export default function RatesChart({ series, height = 140 }) {
         viewBox={`0 0 ${w} ${h}`}
         width="100%"
         height={height}
-        style={{ display: 'block', width: '100%', height }}
+        style={{ display: 'block', width: '100%', height, overflow: 'visible' }}
         preserveAspectRatio="none"
       >
         <line
@@ -226,14 +189,22 @@ export default function RatesChart({ series, height = 140 }) {
           stroke="currentColor"
           strokeOpacity="0.2"
         />
-        <text x={4} y={pad.t + 10} fontSize="10" fill="currentColor" opacity="0.55">
+        <text x={2} y={pad.t + 10} fontSize="10" fill="currentColor" opacity="0.55">
           {maxY}
         </text>
-        <text x={4} y={pad.t + innerH} fontSize="10" fill="currentColor" opacity="0.55">
+        <text x={2} y={pad.t + innerH} fontSize="10" fill="currentColor" opacity="0.55">
           0
         </text>
         {visible.map((s) => (
-          <path key={s.key} d={line(s.vals)} fill="none" stroke={s.color} strokeWidth="1.5" />
+          <path
+            key={s.key}
+            d={line(s.vals)}
+            fill="none"
+            stroke={s.color}
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         ))}
       </svg>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px 14px', fontSize: 12, marginTop: 4 }}>

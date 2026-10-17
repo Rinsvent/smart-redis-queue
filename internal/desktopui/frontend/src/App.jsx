@@ -52,12 +52,20 @@ import RefreshIcon from '@mui/icons-material/Refresh'
 import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined'
 import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined'
 import { api } from './api'
-import RatesChart, { buildChartSeries, resolveChartWindow } from './RatesChart'
+import RatesChart, { buildChartSeries } from './RatesChart'
 
 const WATCH_KEY = 'srq-watch-tags'
 const CHART_OPEN_KEY = 'srq-chart-open'
-const STATS_WINDOW_SEC = 3600
+const CHART_RANGE_KEY = 'srq-chart-range'
 const WATCH_POLL_MS = 5000
+
+const CHART_RANGES = [
+  { id: '1m', label: '1m', sec: 60 },
+  { id: '5m', label: '5m', sec: 300 },
+  { id: '15m', label: '15m', sec: 900 },
+  { id: '1h', label: '1h', sec: 3600 },
+  { id: 'all', label: 'all', sec: 0 }, // 0 → весь stats:index
+]
 
 function loadWatchMap() {
   try {
@@ -132,10 +140,16 @@ function buildTheme(mode) {
 
 function rateLabel(r) {
   if (!r) return '—'
-  const p = Number(r.processedPerSec || 0).toFixed(1)
-  const b = Number(r.backlogDeltaPerSec || 0)
+  const p = Number(r.processedPerSec ?? r.ProcessedPerSec ?? 0)
+  const b = Number(r.backlogDeltaPerSec ?? r.BacklogDeltaPerSec ?? 0)
   const sign = b > 0 ? '+' : ''
-  return `~${p} msg/s processed · backlog ${sign}${b.toFixed(1)}/s`
+  return `~${p.toFixed(1)} msg/s processed · backlog ${sign}${b.toFixed(1)}/s`
+}
+
+function snapField(snap, camel, pascal) {
+  if (!snap) return undefined
+  const v = snap[camel] ?? snap[pascal]
+  return v
 }
 
 function formatUnlockAt(score) {
@@ -175,7 +189,12 @@ export default function App() {
   const [tagsCount, setTagsCount] = useState(null)
   const [tagsCounting, setTagsCounting] = useState(false)
   const [chartOpen, setChartOpen] = useState(() => localStorage.getItem(CHART_OPEN_KEY) !== '0')
+  const [chartRange, setChartRange] = useState(() => {
+    const v = localStorage.getItem(CHART_RANGE_KEY)
+    return CHART_RANGES.some((r) => r.id === v) ? v : '5m'
+  })
   const [redisStats, setRedisStats] = useState([])
+  const [statsBounds, setStatsBounds] = useState({ from: 0, to: 0 })
   const [watchMap, setWatchMap] = useState(loadWatchMap)
   const [watchSeries, setWatchSeries] = useState({}) // tag → [{sec,n}]
   const [loading, setLoading] = useState(false)
@@ -435,6 +454,10 @@ export default function App() {
   }, [chartOpen])
 
   useEffect(() => {
+    localStorage.setItem(CHART_RANGE_KEY, chartRange)
+  }, [chartRange])
+
+  useEffect(() => {
     localStorage.setItem(WATCH_KEY, JSON.stringify(watchMap))
   }, [watchMap])
 
@@ -443,16 +466,34 @@ export default function App() {
     return watchMap[watchKey(activeId, selectedQueue, activeDb)] || []
   }, [watchMap, activeId, selectedQueue, activeDb])
 
+  const chartWindowSec = useMemo(() => {
+    const r = CHART_RANGES.find((x) => x.id === chartRange)
+    return r ? r.sec : 300
+  }, [chartRange])
+
   const chartSeries = useMemo(() => {
     const now = Math.floor(Date.now() / 1000)
     const watches = watchedTags.map((tag) => ({
       tag,
       points: watchSeries[tag] || [],
     }))
-    // Не растягиваем короткие данные на пустые 10 минут — иначе линии «живут» только у края.
-    const { from, to } = resolveChartWindow(redisStats, watches, now, Math.min(STATS_WINDOW_SEC, 600))
+    let from
+    let to = now
+    if (chartWindowSec <= 0) {
+      const bFrom = Number(statsBounds.from ?? statsBounds.From) || 0
+      const bTo = Number(statsBounds.to ?? statsBounds.To) || 0
+      if (bFrom > 0) {
+        from = bFrom
+        to = Math.max(bTo, now)
+      } else {
+        from = now - 300
+      }
+    } else {
+      from = now - chartWindowSec
+    }
+    if (to - from < 2) from = to - 2
     return buildChartSeries(redisStats, from, to, watches)
-  }, [redisStats, watchSeries, watchedTags])
+  }, [redisStats, watchSeries, watchedTags, chartWindowSec, statsBounds])
 
   const toggleWatchTag = (tag) => {
     const k = watchKey(activeId, selectedQueue, activeDb)
@@ -467,19 +508,28 @@ export default function App() {
   const loadRedisStats = useCallback(async () => {
     if (!selectedQueue) {
       setRedisStats([])
+      setStatsBounds({ from: 0, to: 0 })
       return
     }
     const gen = queryGen.current
     const q = selectedQueue
     const db = activeDb
+    const rangeSec = chartWindowSec
     try {
-      const pts = await api.listQueueStats(q, db, STATS_WINDOW_SEC)
+      const [pts, bounds] = await Promise.all([
+        api.listQueueStats(q, db, rangeSec),
+        api.queueStatsBounds(q, db),
+      ])
       if (isStale(gen, q, db)) return
       setRedisStats(pts || [])
+      setStatsBounds({
+        from: Number(bounds?.from ?? bounds?.From) || 0,
+        to: Number(bounds?.to ?? bounds?.To) || 0,
+      })
     } catch (e) {
       if (isStale(gen, q, db) || isCanceled(e)) return
     }
-  }, [selectedQueue, activeDb])
+  }, [selectedQueue, activeDb, chartWindowSec])
 
   const pollWatchedTags = useCallback(async () => {
     if (!selectedQueue || watchedTags.length === 0) return
@@ -499,16 +549,17 @@ export default function App() {
       }),
     )
     if (isStale(gen, q, db)) return
+    const keepSec = chartWindowSec > 0 ? chartWindowSec : 86400
     setWatchSeries((prev) => {
       const out = { ...prev }
       for (const [tag, n] of Object.entries(next)) {
         const arr = [...(out[tag] || []), { sec, n }]
-        const cutoff = sec - STATS_WINDOW_SEC
+        const cutoff = sec - keepSec
         out[tag] = arr.filter((p) => p.sec >= cutoff)
       }
       return out
     })
-  }, [selectedQueue, activeDb, watchedTags])
+  }, [selectedQueue, activeDb, watchedTags, chartWindowSec])
 
   useEffect(() => {
     if (!selectedQueue) return undefined
@@ -934,7 +985,9 @@ export default function App() {
                         </Typography>
                         <Stack direction="row" alignItems="center" spacing={0.25}>
                           <Typography color="text.secondary" variant="body2" noWrap>
-                            {detail ? rateLabel(detail.rate) : '—'}
+                            {detail
+                              ? rateLabel(snapField(detail, 'rate', 'Rate'))
+                              : '—'}
                           </Typography>
                           <IconButton
                             size="small"
@@ -952,9 +1005,15 @@ export default function App() {
                       </Box>
 
                       <Stack direction="row" spacing={2.5} alignItems="center" flexShrink={0}>
-                        <Stat label="Pending" value={detail?.pending} />
-                        <Stat label="In progress" value={detail?.inProgress} />
-                        <Stat label="Consumers" value={detail?.consumers} />
+                        <Stat label="Pending" value={snapField(detail, 'pending', 'Pending')} />
+                        <Stat
+                          label="In progress"
+                          value={snapField(detail, 'inProgress', 'InProgress')}
+                        />
+                        <Stat
+                          label="Consumers"
+                          value={snapField(detail, 'consumers', 'Consumers')}
+                        />
                       </Stack>
 
                       <Stack
@@ -1015,6 +1074,42 @@ export default function App() {
                           py: 1,
                         }}
                       >
+                        <Stack
+                          direction="row"
+                          alignItems="center"
+                          justifyContent="space-between"
+                          spacing={1}
+                          sx={{ mb: 0.75 }}
+                        >
+                          <Typography variant="caption" color="text.secondary">
+                            Stats window
+                          </Typography>
+                          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                            {CHART_RANGES.map((r) => {
+                              const active = chartRange === r.id
+                              return (
+                                <ButtonBase
+                                  key={r.id}
+                                  onClick={() => setChartRange(r.id)}
+                                  sx={{
+                                    px: 1,
+                                    py: 0.25,
+                                    borderRadius: 1,
+                                    border: 1,
+                                    borderColor: active ? 'primary.main' : 'divider',
+                                    bgcolor: active ? 'primary.main' : 'transparent',
+                                    color: active ? 'primary.contrastText' : 'text.secondary',
+                                    fontSize: 12,
+                                    fontWeight: 600,
+                                    minWidth: 36,
+                                  }}
+                                >
+                                  {r.label}
+                                </ButtonBase>
+                              )
+                            })}
+                          </Stack>
+                        </Stack>
                         <RatesChart series={chartSeries} height={160} />
                       </Box>
                     )}
