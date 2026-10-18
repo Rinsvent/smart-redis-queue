@@ -120,21 +120,32 @@ jobs:
         working-directory: internal/desktopui/frontend
         run: npm ci && npm run build
 
+      # Wails dialogs link UTType — без -framework UniformTypeIdentifiers линкер падает на darwin.
+      # https://wails.io/docs/guides/troubleshooting/#my-application-wont-compile-on-mac
       - name: Build desktop binary
         env:
           CGO_ENABLED: '1'
           MACOSX_DEPLOYMENT_TARGET: '12.0'
+          CGO_CFLAGS: '-mmacosx-version-min=12.0'
+          CGO_LDFLAGS: '-mmacosx-version-min=12.0 -framework UniformTypeIdentifiers'
         run: |
           set -euxo pipefail
           go version
-          go env CGO_ENABLED GOOS GOARCH CC
+          go env CGO_ENABLED GOOS GOARCH CC CGO_CFLAGS CGO_LDFLAGS
           xcodebuild -version
-          # не pipe в head: pipefail + SIGPIPE от clang → ложный exit 1
           clang --version
           go build -tags wails,production \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-darwin-arm64 \
-            ./cmd/manager
+            ./cmd/manager 2>&1 | tee build-macos.log
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: darwin-arm64-build-log
+          path: build-macos.log
+          if-no-files-found: ignore
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
@@ -170,16 +181,26 @@ jobs:
         env:
           CGO_ENABLED: '1'
           MACOSX_DEPLOYMENT_TARGET: '12.0'
+          CGO_CFLAGS: '-mmacosx-version-min=12.0'
+          CGO_LDFLAGS: '-mmacosx-version-min=12.0 -framework UniformTypeIdentifiers'
         run: |
           set -euxo pipefail
           go version
-          go env CGO_ENABLED GOOS GOARCH CC
+          go env CGO_ENABLED GOOS GOARCH CC CGO_CFLAGS CGO_LDFLAGS
           xcodebuild -version
           clang --version
           go build -tags wails,production \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-darwin-amd64 \
-            ./cmd/manager
+            ./cmd/manager 2>&1 | tee build-macos.log
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: darwin-amd64-build-log
+          path: build-macos.log
+          if-no-files-found: ignore
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
