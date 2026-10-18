@@ -24,9 +24,9 @@ jobs:
           cache: true
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: internal/desktopui/frontend/package-lock.json
 
@@ -68,9 +68,9 @@ jobs:
           cache: true
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: internal/desktopui/frontend/package-lock.json
 
@@ -83,6 +83,8 @@ jobs:
         env:
           CGO_ENABLED: '1'
         run: |
+          set -euxo pipefail
+          go list -m github.com/wailsapp/wails/v2 github.com/wailsapp/go-webview2
           go build -tags wails,production \
             -ldflags "-s -w -H windowsgui" \
             -o smart-redis-queue-desktop-windows-amd64.exe \
@@ -108,9 +110,9 @@ jobs:
           cache: true
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: internal/desktopui/frontend/package-lock.json
 
@@ -121,7 +123,13 @@ jobs:
       - name: Build desktop binary
         env:
           CGO_ENABLED: '1'
+          MACOSX_DEPLOYMENT_TARGET: '12.0'
         run: |
+          set -euxo pipefail
+          go version
+          go env CGO_ENABLED GOOS GOARCH CC
+          xcodebuild -version
+          clang --version | head -2
           go build -tags wails,production \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-darwin-arm64 \
@@ -147,9 +155,9 @@ jobs:
           cache: true
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: internal/desktopui/frontend/package-lock.json
 
@@ -160,7 +168,13 @@ jobs:
       - name: Build desktop binary
         env:
           CGO_ENABLED: '1'
+          MACOSX_DEPLOYMENT_TARGET: '12.0'
         run: |
+          set -euxo pipefail
+          go version
+          go env CGO_ENABLED GOOS GOARCH CC
+          xcodebuild -version
+          clang --version | head -2
           go build -tags wails,production \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-darwin-amd64 \

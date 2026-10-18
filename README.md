@@ -503,7 +503,7 @@ macOS: бинарники без notarization — при первом запус
 
 ```bash
 # CLI Wails (один раз)
-go install github.com/wailsapp/wails/v2/cmd/wails@latest
+go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.0
 
 # Frontend
 cd internal/desktopui/frontend && npm install && npm run build && cd -
