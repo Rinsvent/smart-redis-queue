@@ -96,8 +96,9 @@ jobs:
           name: windows-amd64
           path: smart-redis-queue-desktop-windows-amd64.exe
 
-  release-macos-arm64:
-    name: macOS arm64
+  # Один job на macos-14: arm64 native + amd64 cross (macos-13 в очереди почти не стартует).
+  release-macos:
+    name: macOS arm64 + amd64
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -120,9 +121,8 @@ jobs:
         working-directory: internal/desktopui/frontend
         run: npm ci && npm run build
 
-      # Wails dialogs link UTType — без -framework UniformTypeIdentifiers линкер падает на darwin.
-      # https://wails.io/docs/guides/troubleshooting/#my-application-wont-compile-on-mac
-      - name: Build desktop binary
+      # UTType: https://wails.io/docs/guides/troubleshooting/#my-application-wont-compile-on-mac
+      - name: Build darwin-arm64
         env:
           CGO_ENABLED: '1'
           MACOSX_DEPLOYMENT_TARGET: '12.0'
@@ -130,89 +130,46 @@ jobs:
           CGO_LDFLAGS: '-mmacosx-version-min=12.0 -framework UniformTypeIdentifiers'
         run: |
           set -euxo pipefail
-          go version
-          go env CGO_ENABLED GOOS GOARCH CC CGO_CFLAGS CGO_LDFLAGS
-          xcodebuild -version
-          clang --version
           go build -tags wails,production \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-darwin-arm64 \
-            ./cmd/manager 2>&1 | tee build-macos.log
+            ./cmd/manager
 
-      - name: Upload build log (on failure)
-        if: failure()
-        uses: actions/upload-artifact@v5
-        with:
-          name: darwin-arm64-build-log
-          path: build-macos.log
-          if-no-files-found: ignore
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v5
-        with:
-          name: darwin-arm64
-          path: smart-redis-queue-desktop-darwin-arm64
-
-  release-macos-amd64:
-    name: macOS amd64
-    runs-on: macos-13
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Set up Node
-        uses: actions/setup-node@v6
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: internal/desktopui/frontend/package-lock.json
-
-      - name: Build frontend
-        working-directory: internal/desktopui/frontend
-        run: npm ci && npm run build
-
-      - name: Build desktop binary
+      - name: Build darwin-amd64 (cross from arm64 host)
         env:
           CGO_ENABLED: '1'
+          GOARCH: amd64
           MACOSX_DEPLOYMENT_TARGET: '12.0'
-          CGO_CFLAGS: '-mmacosx-version-min=12.0'
-          CGO_LDFLAGS: '-mmacosx-version-min=12.0 -framework UniformTypeIdentifiers'
+          CGO_CFLAGS: '-mmacosx-version-min=12.0 -arch x86_64'
+          CGO_LDFLAGS: '-mmacosx-version-min=12.0 -arch x86_64 -framework UniformTypeIdentifiers'
         run: |
           set -euxo pipefail
-          go version
-          go env CGO_ENABLED GOOS GOARCH CC CGO_CFLAGS CGO_LDFLAGS
-          xcodebuild -version
-          clang --version
+          go env GOOS GOARCH CGO_ENABLED CC CGO_CFLAGS CGO_LDFLAGS
           go build -tags wails,production \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-darwin-amd64 \
-            ./cmd/manager 2>&1 | tee build-macos.log
+            ./cmd/manager 2>&1 | tee build-macos-amd64.log
 
       - name: Upload build log (on failure)
         if: failure()
         uses: actions/upload-artifact@v5
         with:
           name: darwin-amd64-build-log
-          path: build-macos.log
+          path: build-macos-amd64.log
           if-no-files-found: ignore
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: darwin-amd64
-          path: smart-redis-queue-desktop-darwin-amd64
+          name: darwin
+          path: |
+            smart-redis-queue-desktop-darwin-arm64
+            smart-redis-queue-desktop-darwin-amd64
 
   publish:
     name: GitHub Release
-    needs: [release-linux, release-windows, release-macos-arm64, release-macos-amd64]
+    needs: [release-linux, release-windows, release-macos]
     runs-on: ubuntu-latest
-    # На workflow_dispatch без тега — только артефакты jobs выше; Release создаём на tag push.
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Download artifacts
@@ -222,14 +179,16 @@ jobs:
 
       - name: Pack
         run: |
+          set -euxo pipefail
           mkdir -p release
           cp dist/linux-amd64/smart-redis-queue-desktop-linux-amd64 release/
           cp dist/windows-amd64/smart-redis-queue-desktop-windows-amd64.exe release/
-          cp dist/darwin-arm64/smart-redis-queue-desktop-darwin-arm64 release/
-          cp dist/darwin-amd64/smart-redis-queue-desktop-darwin-amd64 release/
+          cp dist/darwin/smart-redis-queue-desktop-darwin-arm64 release/
+          cp dist/darwin/smart-redis-queue-desktop-darwin-amd64 release/
           chmod +x release/smart-redis-queue-desktop-linux-amd64 \
                    release/smart-redis-queue-desktop-darwin-arm64 \
                    release/smart-redis-queue-desktop-darwin-amd64
+          ls -la release/
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -240,5 +199,6 @@ jobs:
             release/smart-redis-queue-desktop-darwin-arm64
             release/smart-redis-queue-desktop-darwin-amd64
           generate_release_notes: true
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -483,9 +483,10 @@ GUI для Redis-хостов (без выбора DB в профиле): обз
 | `smart-redis-queue-desktop-linux-amd64` | Linux (Ubuntu 24.04+, webkit2gtk-4.1) |
 | `smart-redis-queue-desktop-windows-amd64.exe` | Windows 10 / 11 (WebView2) |
 | `smart-redis-queue-desktop-darwin-arm64` | macOS Apple Silicon |
-| `smart-redis-queue-desktop-darwin-amd64` | macOS Intel |
+| `smart-redis-queue-desktop-darwin-amd64` | macOS Intel (cross-build на macos-14 arm64) |
 
-Android / iOS: Wails v2 — только desktop; мобильных сборок нет.
+Android / iOS: Wails v2 — только desktop; мобильных сборок нет.  
+CI: один macOS job (`macos-14`) собирает оба darwin-бинаря — отдельный `macos-13` часто зависает в очереди и блокировал GitHub Release.
 
 Linux / NVIDIA: `WEBKIT_DISABLE_DMABUF_RENDERER=1` выставляется самим приложением при старте `desktop` (и `WebviewGpuPolicy=Never`). Вручную переменная больше не обязательна; при упрямстве Wayland добавьте `GDK_BACKEND=x11`.
 
