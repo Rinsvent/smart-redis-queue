@@ -70,6 +70,31 @@ func main() {
 				Usage:  "GUI manager (Wails). Требует сборку с -tags wails",
 				Action: runDesktop,
 			},
+			{
+				Name:  "server",
+				Usage: "Web UI (тот же frontend). Требует сборку с -tags server",
+				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "host",
+						Aliases: []string{"H"},
+						Value:   "127.0.0.1",
+						Usage:   "bind address (0.0.0.0 — доступ в LAN)",
+						Sources: cli.EnvVars("SRQ_SERVER_HOST", "WAILS_SERVER_HOST"),
+					},
+					&cli.IntFlag{
+						Name:    "port",
+						Aliases: []string{"p"},
+						Value:   8080,
+						Usage:   "HTTP port",
+						Sources: cli.EnvVars("SRQ_SERVER_PORT", "WAILS_SERVER_PORT"),
+					},
+					&cli.BoolFlag{
+						Name:  "allow-any-origin",
+						Usage: "разрешить WebSocket/runtime с любого Origin (только для доверенной сети)",
+					},
+				},
+				Action: runServer,
+			},
 		}, demoCommands()...),
 	}
 

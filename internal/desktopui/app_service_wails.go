@@ -1,4 +1,4 @@
-//go:build wails || android || ios
+//go:build wails || android || ios || server
 
 package desktopui
 

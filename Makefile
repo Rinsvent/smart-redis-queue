@@ -1,14 +1,18 @@
-.PHONY: build clean docker-up docker-down test test-short test-coverage example manager desktop frontend desktop-darwin desktop-android desktop-ios
+.PHONY: build clean docker-up docker-down test test-short test-coverage example manager server desktop frontend desktop-darwin desktop-android desktop-ios
 
 # Библиотека: проверка сборки
 build:
 	go build ./...
 
-# CLI manager (без Wails/CGO)
+# CLI manager (без Wails/CGO; server/desktop — stubs)
 manager:
 	go build -ldflags "-s -w" -o bin/manager ./cmd/manager
 
-# Frontend для desktop/mobile UI (нужен Node.js 18+)
+# Web UI (тот же frontend). CGO не нужен. Слушайте 0.0.0.0 для коллег в LAN.
+server: frontend
+	go build -tags server -ldflags "-s -w" -o bin/manager-server ./cmd/manager
+
+# Frontend для desktop/mobile/server UI (нужен Node.js 18+)
 frontend:
 	cd internal/desktopui/frontend && npm install && npm run build
 
@@ -42,6 +46,10 @@ desktop-run: desktop
 # go run UI
 desktop-gorun: frontend
 	go run -tags wails,production,gtk3 ./cmd/desktop
+
+# go run web UI
+server-gorun: frontend
+	go run -tags server ./cmd/manager server --host 127.0.0.1 --port 8080
 
 clean:
 	rm -rf bin/ coverage.out coverage.html

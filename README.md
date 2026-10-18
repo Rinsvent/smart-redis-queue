@@ -434,6 +434,7 @@ make manager
 | `publish` | Публиковать заглушечные задачи (поток для живого UI) |
 | `consume` | Consume с заглушкой + stats (график g/a/r в UI) |
 | `desktop` | GUI manager (Wails v3); локально лучше `./cmd/desktop` с `-tags wails,production,gtk3` |
+| `server` | Web UI (тот же frontend); сборка `make server` → `./bin/manager-server server` |
 
 ### Примеры
 
@@ -558,6 +559,23 @@ CI кладёт в Release zip симуляторного `.app`. Для App Sto
 Иконка: `internal/desktopui/appicon.png` / `build/appicon.png`. На Linux пишутся PNG + `.desktop` с `StartupWMClass` = basename бинаря.
 
 CLI: `make manager && ./bin/manager info`. Подкоманда `manager desktop` — только с `-tags wails`; для GUI — `./cmd/desktop`.
+
+#### Web UI (`server`) — тот же frontend без desktop
+
+Wails v3 **server mode**: HTTP + WebSocket, без CGO/GTK. Коллеги открывают браузер.
+
+```bash
+make server
+# только локально:
+./bin/manager-server server --port 8080
+# в LAN (коллеги → http://<ваш-ip>:8080 ):
+./bin/manager-server server --host 0.0.0.0 --port 8080
+```
+
+Флаги: `--host` / `-H`, `--port` / `-p`, `--allow-any-origin` (если Origin ломает WS за прокси).  
+Профили connections — как у desktop (`~/.config/smart-redis-queue/...` на сервере).
+
+Важно: бинарь с `-tags server` и desktop (`-tags wails`) — разные сборки; в одном файле оба режима не совмещаются.
 
 ## Тесты
 

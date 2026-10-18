@@ -1,4 +1,4 @@
-//go:build wails || android || ios
+//go:build wails || android || ios || server
 
 package desktopui
 
@@ -18,16 +18,45 @@ var assets embed.FS
 //go:embed appicon.png
 var appIcon []byte
 
-// Run запускает Wails v3 desktop / mobile UI.
+// RunConfig — параметры запуска UI (desktop / mobile / server).
+type RunConfig struct {
+	// Host/Port используются только в server-сборке (-tags server).
+	Host string
+	Port int
+	// WebSocketAllowAllOrigins — ослабить origin-check (LAN / reverse-proxy).
+	// По умолчанию false: same-origin.
+	WebSocketAllowAllOrigins bool
+}
+
+// Run запускает UI с дефолтным конфигом.
 func Run() error {
-	prepareLinuxWebKitEnv()
+	return RunWithConfig(RunConfig{})
+}
+
+// RunWithConfig запускает Wails v3 UI (desktop / mobile / HTTP server).
+// Тот же frontend/dist и тот же App-сервис.
+func RunWithConfig(cfg RunConfig) error {
+	if !application.System.IsServer() {
+		prepareLinuxWebKitEnv()
+	}
 
 	store, err := NewStore(resolveStorePath())
 	if err != nil {
 		return fmt.Errorf("store: %w", err)
 	}
 	svc := NewApp(store)
-	ensureLinuxDesktopEntry(appIcon)
+	if !application.System.IsServer() {
+		ensureLinuxDesktopEntry(appIcon)
+	}
+
+	host := cfg.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := cfg.Port
+	if port == 0 {
+		port = 8080
+	}
 
 	opts := application.Options{
 		Name:        "Smart Redis Queue",
@@ -48,6 +77,11 @@ func Run() error {
 		},
 		IOS:     application.IOSOptions{},
 		Android: application.AndroidOptions{},
+		Server: application.ServerOptions{
+			Host:                     host,
+			Port:                     port,
+			WebSocketAllowAllOrigins: cfg.WebSocketAllowAllOrigins,
+		},
 	}
 	if application.System.IsPlatform(application.PlatformIOS) {
 		opts.DisableDefaultSignalHandler = true
@@ -61,13 +95,18 @@ func Run() error {
 		BackgroundColour: application.NewRGB(245, 247, 250),
 		URL:              "/",
 	}
-	if runtime.GOOS == "linux" {
+	if runtime.GOOS == "linux" && !application.System.IsServer() {
 		// NVIDIA/GBM: без Never WebKit часто abort'ится (EGL_NOT_INITIALIZED).
 		winOpts.Linux = application.LinuxWindow{
 			WebviewGpuPolicy: application.WebviewGpuPolicyNever,
 		}
 	}
 	app.Window.NewWithOptions(winOpts)
+
+	if application.System.IsServer() {
+		fmt.Fprintf(os.Stderr, "Smart Redis Queue web UI: http://%s:%d/\n", host, port)
+		fmt.Fprintf(os.Stderr, "Health: http://%s:%d/health\n", host, port)
+	}
 
 	return app.Run()
 }
@@ -83,8 +122,8 @@ func prepareLinuxWebKitEnv() {
 	}
 }
 
-// resolveStorePath — на mobile нет $HOME/UserConfigDir; пишем в app sandbox (getFilesDir / Application Support).
-// Пустая строка → NewStore использует defaultStorePath (desktop).
+// resolveStorePath — на mobile нет $HOME/UserConfigDir; пишем в app sandbox.
+// Пустая строка → NewStore использует defaultStorePath (desktop/server).
 func resolveStorePath() string {
 	if application.System.IsMobile() {
 		if p := application.Mobile.StoragePath(); p != "" {
