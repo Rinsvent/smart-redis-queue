@@ -49,7 +49,7 @@ jobs:
             ./cmd/manager
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: linux-amd64
           path: smart-redis-queue-desktop-linux-amd64
@@ -91,7 +91,7 @@ jobs:
             ./cmd/manager
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: windows-amd64
           path: smart-redis-queue-desktop-windows-amd64.exe
@@ -129,14 +129,15 @@ jobs:
           go version
           go env CGO_ENABLED GOOS GOARCH CC
           xcodebuild -version
-          clang --version | head -2
+          # не pipe в head: pipefail + SIGPIPE от clang → ложный exit 1
+          clang --version
           go build -tags wails,production \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-darwin-arm64 \
             ./cmd/manager
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: darwin-arm64
           path: smart-redis-queue-desktop-darwin-arm64
@@ -174,14 +175,14 @@ jobs:
           go version
           go env CGO_ENABLED GOOS GOARCH CC
           xcodebuild -version
-          clang --version | head -2
+          clang --version
           go build -tags wails,production \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-darwin-amd64 \
             ./cmd/manager
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: darwin-amd64
           path: smart-redis-queue-desktop-darwin-amd64
@@ -194,7 +195,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: dist
 
