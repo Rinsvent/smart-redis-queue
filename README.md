@@ -478,15 +478,23 @@ GUI для Redis-хостов (без выбора DB в профиле): обз
 
 На тег `v*` (или вручную **Actions → Release Desktop → Run workflow**) собирается:
 
-| Asset | Платформа |
+| Asset | Что это |
 | --- | --- |
-| `smart-redis-queue-desktop-linux-amd64` | Linux (Ubuntu 24.04+, webkit2gtk-4.1) |
-| `smart-redis-queue-desktop-windows-amd64.exe` | Windows 10 / 11 (WebView2) |
-| `smart-redis-queue-desktop-darwin-arm64` | macOS Apple Silicon |
-| `smart-redis-queue-desktop-darwin-amd64` | macOS Intel (cross-build на macos-14 arm64) |
+| `smart-redis-queue-desktop-*` | **GUI**: запуск без аргументов открывает окно (двойной клик / `./…-desktop-…`) |
+| `smart-redis-queue-cli-*` | **CLI**: `info` / `purge` / `retry` / `seed` / … (подкоманда `desktop` тоже есть при локальной сборке manager с `-tags wails`) |
+
+Платформы: `linux-amd64`, `windows-amd64.exe`, `darwin-arm64`, `darwin-amd64`.
+
+```bash
+# UI
+./smart-redis-queue-desktop-linux-amd64
+
+# CLI
+./smart-redis-queue-cli-linux-amd64 info
+```
 
 Android / iOS: Wails v2 — только desktop; мобильных сборок нет.  
-CI: один macOS job (`macos-14`) собирает оба darwin-бинаря — отдельный `macos-13` часто зависает в очереди и блокировал GitHub Release.
+CI: один macOS job (`macos-14`) собирает оба darwin-бинаря.
 
 Linux / NVIDIA: `WEBKIT_DISABLE_DMABUF_RENDERER=1` выставляется самим приложением при старте `desktop` (и `WebviewGpuPolicy=Never`). Вручную переменная больше не обязательна; при упрямстве Wayland добавьте `GDK_BACKEND=x11`.
 
@@ -509,14 +517,14 @@ go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.0
 # Frontend
 cd internal/desktopui/frontend && npm install && npm run build && cd -
 
-# Запуск GUI (предпочтительно — собранный бинарь, иконка в доке стабильнее)
-make desktop && ./bin/smart-redis-queue desktop
+# Запуск GUI (бинарь сразу открывает UI; иконка в доке стабильнее)
+make desktop && ./bin/smart-redis-queue
 
-# или go run (WM_CLASS=manager; иконка подхватится через runtime .desktop)
-go run -tags wails,production,webkit2_41 ./cmd/manager desktop
+# или go run
+go run -tags wails,production,webkit2_41 ./cmd/desktop
 ```
 
-Если всё ещё падает на Wayland: `GDK_BACKEND=x11 go run -tags wails,production,webkit2_41 ./cmd/manager desktop`
+Если всё ещё падает на Wayland: `GDK_BACKEND=x11 go run -tags wails,production,webkit2_41 ./cmd/desktop`
 
 На Ubuntu 22.04 / системах с `libwebkit2gtk-4.0-dev` тег `webkit2_41` не нужен.
 
@@ -528,9 +536,9 @@ sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev
 
 Профили сохраняются в `~/.config/smart-redis-queue/connections.json` (или `os.UserConfigDir()`). Поле `db` в старых профилях игнорируется. При старте GUI всегда доступен профиль **Local Redis** (`localhost:6379`) — добавляется автоматически, без смены уже выбранного active-хоста.
 
-Иконка: `internal/desktopui/appicon.png`. При старте пишутся PNG + `.desktop` с `StartupWMClass` = **basename текущего бинаря** (`smart-redis-queue` / `manager-desktop` / при `go run` обычно `manager`). Без совпадения с `WM_CLASS` Ubuntu показывает шестерёнку. Для стабильной иконки лучше `make desktop && ./bin/smart-redis-queue desktop`, не `go run`.
+Иконка: `internal/desktopui/appicon.png`. При старте пишутся PNG + `.desktop` с `StartupWMClass` = **basename текущего бинаря** (`smart-redis-queue` / при `go run` обычно `desktop`). Без совпадения с `WM_CLASS` Ubuntu показывает шестерёнку. Для стабильной иконки лучше `make desktop && ./bin/smart-redis-queue`.
 
-Без `-tags wails` команда `desktop` возвращает понятную ошибку — это ожидаемо.
+CLI: `make manager && ./bin/manager info`. Подкоманда `manager desktop` работает только при сборке manager с `-tags wails`; для GUI предпочтителен `./cmd/desktop`.
 
 ## Тесты
 

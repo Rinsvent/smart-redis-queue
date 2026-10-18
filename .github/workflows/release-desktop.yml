@@ -39,20 +39,28 @@ jobs:
         working-directory: internal/desktopui/frontend
         run: npm ci && npm run build
 
-      - name: Build desktop binary
+      - name: Build CLI
+        run: |
+          go build -ldflags "-s -w" \
+            -o smart-redis-queue-cli-linux-amd64 \
+            ./cmd/manager
+
+      - name: Build desktop (opens UI on launch)
         env:
           CGO_ENABLED: '1'
         run: |
           go build -tags wails,production,webkit2_41 \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-linux-amd64 \
-            ./cmd/manager
+            ./cmd/desktop
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:
           name: linux-amd64
-          path: smart-redis-queue-desktop-linux-amd64
+          path: |
+            smart-redis-queue-cli-linux-amd64
+            smart-redis-queue-desktop-linux-amd64
 
   release-windows:
     name: Windows amd64
@@ -78,7 +86,14 @@ jobs:
         working-directory: internal/desktopui/frontend
         run: npm ci && npm run build
 
-      - name: Build desktop binary
+      - name: Build CLI
+        shell: bash
+        run: |
+          go build -ldflags "-s -w" \
+            -o smart-redis-queue-cli-windows-amd64.exe \
+            ./cmd/manager
+
+      - name: Build desktop (opens UI on launch)
         shell: bash
         env:
           CGO_ENABLED: '1'
@@ -88,15 +103,16 @@ jobs:
           go build -tags wails,production \
             -ldflags "-s -w -H windowsgui" \
             -o smart-redis-queue-desktop-windows-amd64.exe \
-            ./cmd/manager
+            ./cmd/desktop
 
-      - name: Upload artifact
+      - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:
           name: windows-amd64
-          path: smart-redis-queue-desktop-windows-amd64.exe
+          path: |
+            smart-redis-queue-cli-windows-amd64.exe
+            smart-redis-queue-desktop-windows-amd64.exe
 
-  # Один job на macos-14: arm64 native + amd64 cross (macos-13 в очереди почти не стартует).
   release-macos:
     name: macOS arm64 + amd64
     runs-on: macos-14
@@ -121,8 +137,17 @@ jobs:
         working-directory: internal/desktopui/frontend
         run: npm ci && npm run build
 
-      # UTType: https://wails.io/docs/guides/troubleshooting/#my-application-wont-compile-on-mac
-      - name: Build darwin-arm64
+      - name: Build CLI (arm64 + amd64)
+        run: |
+          set -euxo pipefail
+          go build -ldflags "-s -w" \
+            -o smart-redis-queue-cli-darwin-arm64 \
+            ./cmd/manager
+          GOARCH=amd64 go build -ldflags "-s -w" \
+            -o smart-redis-queue-cli-darwin-amd64 \
+            ./cmd/manager
+
+      - name: Build desktop darwin-arm64
         env:
           CGO_ENABLED: '1'
           MACOSX_DEPLOYMENT_TARGET: '12.0'
@@ -133,9 +158,9 @@ jobs:
           go build -tags wails,production \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-darwin-arm64 \
-            ./cmd/manager
+            ./cmd/desktop
 
-      - name: Build darwin-amd64 (cross from arm64 host)
+      - name: Build desktop darwin-amd64 (cross from arm64 host)
         env:
           CGO_ENABLED: '1'
           GOARCH: amd64
@@ -144,11 +169,10 @@ jobs:
           CGO_LDFLAGS: '-mmacosx-version-min=12.0 -arch x86_64 -framework UniformTypeIdentifiers'
         run: |
           set -euxo pipefail
-          go env GOOS GOARCH CGO_ENABLED CC CGO_CFLAGS CGO_LDFLAGS
           go build -tags wails,production \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-darwin-amd64 \
-            ./cmd/manager 2>&1 | tee build-macos-amd64.log
+            ./cmd/desktop 2>&1 | tee build-macos-amd64.log
 
       - name: Upload build log (on failure)
         if: failure()
@@ -163,6 +187,8 @@ jobs:
         with:
           name: darwin
           path: |
+            smart-redis-queue-cli-darwin-arm64
+            smart-redis-queue-cli-darwin-amd64
             smart-redis-queue-desktop-darwin-arm64
             smart-redis-queue-desktop-darwin-amd64
 
@@ -181,21 +207,27 @@ jobs:
         run: |
           set -euxo pipefail
           mkdir -p release
+          cp dist/linux-amd64/smart-redis-queue-cli-linux-amd64 release/
           cp dist/linux-amd64/smart-redis-queue-desktop-linux-amd64 release/
+          cp dist/windows-amd64/smart-redis-queue-cli-windows-amd64.exe release/
           cp dist/windows-amd64/smart-redis-queue-desktop-windows-amd64.exe release/
+          cp dist/darwin/smart-redis-queue-cli-darwin-arm64 release/
+          cp dist/darwin/smart-redis-queue-cli-darwin-amd64 release/
           cp dist/darwin/smart-redis-queue-desktop-darwin-arm64 release/
           cp dist/darwin/smart-redis-queue-desktop-darwin-amd64 release/
-          chmod +x release/smart-redis-queue-desktop-linux-amd64 \
-                   release/smart-redis-queue-desktop-darwin-arm64 \
-                   release/smart-redis-queue-desktop-darwin-amd64
+          chmod +x release/smart-redis-queue-* || true
           ls -la release/
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: |
+            release/smart-redis-queue-cli-linux-amd64
             release/smart-redis-queue-desktop-linux-amd64
+            release/smart-redis-queue-cli-windows-amd64.exe
             release/smart-redis-queue-desktop-windows-amd64.exe
+            release/smart-redis-queue-cli-darwin-arm64
+            release/smart-redis-queue-cli-darwin-amd64
             release/smart-redis-queue-desktop-darwin-arm64
             release/smart-redis-queue-desktop-darwin-amd64
           generate_release_notes: true

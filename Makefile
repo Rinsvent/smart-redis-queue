@@ -4,36 +4,36 @@
 build:
 	go build ./...
 
-# Собрать CLI manager
+# CLI manager (без Wails/CGO)
 manager:
-	go build -o bin/manager ./cmd/manager
+	go build -ldflags "-s -w" -o bin/manager ./cmd/manager
 
 # Frontend для desktop UI (нужен Node.js 18+)
 frontend:
 	cd internal/desktopui/frontend && npm install && npm run build
 
-# GUI manager (CGO + Wails; webkit2_41 для Ubuntu 24.04+)
+# GUI: отдельный entrypoint ./cmd/desktop — запуск без подкоманд (двойной клик / ./binary).
 # Бинарь smart-redis-queue — WM_CLASS совпадает с .desktop / иконкой в доке.
-# WEBKIT_DISABLE_DMABUF_RENDERER выставляется в коде (NVIDIA GBM).
 desktop: frontend
-	go build -tags wails,production,webkit2_41 -o bin/smart-redis-queue ./cmd/manager
+	go build -tags wails,production,webkit2_41 -ldflags "-s -w" \
+		-o bin/smart-redis-queue ./cmd/desktop
 	cp -f bin/smart-redis-queue bin/manager-desktop
 
-# Локальная сборка macOS (запускать на Mac; CGO + Xcode CLT).
+# Локальная сборка macOS desktop (запускать на Mac; CGO + Xcode CLT).
 # GOARCH=arm64|amd64 make desktop-darwin
 desktop-darwin: frontend
 	CGO_ENABLED=1 go build -tags wails,production \
 		-ldflags "-s -w" \
 		-o bin/smart-redis-queue-desktop-darwin-$${GOARCH:-$$(go env GOARCH)} \
-		./cmd/manager
+		./cmd/desktop
 
-# Быстрый запуск без ручного env (frontend должен быть собран: make frontend)
+# Быстрый запуск UI
 desktop-run: desktop
-	./bin/smart-redis-queue desktop
+	./bin/smart-redis-queue
 
-# go run (иконка: WM_CLASS=manager → пишется runtime .desktop)
+# go run UI (WM_CLASS обычно = desktop)
 desktop-gorun: frontend
-	go run -tags wails,production,webkit2_41 ./cmd/manager desktop
+	go run -tags wails,production,webkit2_41 ./cmd/desktop
 
 clean:
 	rm -rf bin/ coverage.out coverage.html
