@@ -1,0 +1,33 @@
+# commit 787467dcceea8114752abe341dcdee558c72e6d8
+# feat: script optimization
+# date 2026-10-05 23:09:43 +0700
+# host rinsvent-MS-7D54 go go1.26.2
+# bench_regexp BenchmarkBlocked|BenchmarkParked|BenchmarkIdleReject
+
+goos: linux
+goarch: amd64
+pkg: github.com/Rinsvent/smart-redis-queue
+cpu: AMD Ryzen 7 2700 Eight-Core Processor          
+BenchmarkBlockedGroupIdleGets/parts-100-16         	    6985	    175250 ns/op	        44.02 eval_us/op	        84.56 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkBlockedGroupIdleGets/parts-100-16         	    6741	    165884 ns/op	        41.59 eval_us/op	        79.25 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkBlockedGroupIdleGets/parts-100-16         	    7376	    251872 ns/op	        52.18 eval_us/op	        97.10 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkBlockedGroupIdleGets/parts-500-16         	    3350	    303919 ns/op	        58.38 eval_us/op	       109.1 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkBlockedGroupIdleGets/parts-500-16         	    6422	    175484 ns/op	        44.97 eval_us/op	        85.03 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkBlockedGroupIdleGets/parts-500-16         	    6726	    162713 ns/op	        41.07 eval_us/op	        78.43 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkBlockedGroupIdleGets/parts-1000-16        	    6366	    167659 ns/op	        43.09 eval_us/op	        81.14 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkBlockedGroupIdleGets/parts-1000-16        	    6673	    172072 ns/op	        42.22 eval_us/op	        81.37 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkBlockedGroupIdleGets/parts-1000-16        	    6931	    172332 ns/op	        42.31 eval_us/op	        81.76 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkIdleRejectConnector/part_only/parts-500-16         	    3404	    298925 ns/op	         0.02938 deliver_frac	       158.2 eval_us/op	       198.0 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     540 B/op	      14 allocs/op
+BenchmarkIdleRejectConnector/part_only/parts-500-16         	    3327	    335956 ns/op	         0.03006 deliver_frac	       176.4 eval_us/op	       221.5 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     542 B/op	      14 allocs/op
+BenchmarkIdleRejectConnector/part_only/parts-500-16         	    3598	    440965 ns/op	         0.02779 deliver_frac	       208.5 eval_us/op	       263.5 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     537 B/op	      14 allocs/op
+BenchmarkIdleRejectConnector/block_group/parts-500-16       	    4580	    268375 ns/op	         0.0002183 deliver_frac	        53.29 eval_us/op	        99.79 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkIdleRejectConnector/block_group/parts-500-16       	    6741	    166135 ns/op	         0.0001483 deliver_frac	        43.37 eval_us/op	        82.01 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkIdleRejectConnector/block_group/parts-500-16       	    6943	    178375 ns/op	         0.0001440 deliver_frac	        46.88 eval_us/op	        87.90 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkParkedPartitionsIdleGets/parts-100-16              	    4598	    286696 ns/op	       152.9 eval_us/op	       192.3 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkParkedPartitionsIdleGets/parts-100-16              	    3999	    305591 ns/op	       162.2 eval_us/op	       203.7 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkParkedPartitionsIdleGets/parts-100-16              	    4071	    283076 ns/op	       146.8 eval_us/op	       184.8 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkParkedPartitionsIdleGets/parts-500-16              	    1747	    704581 ns/op	       498.4 eval_us/op	       552.7 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkParkedPartitionsIdleGets/parts-500-16              	    1794	    782317 ns/op	       555.1 eval_us/op	       613.3 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+BenchmarkParkedPartitionsIdleGets/parts-500-16              	    2208	    622405 ns/op	       451.3 eval_us/op	       500.4 redis_cpu_us/op	         0 slow_max_us	         0 slow_n	     480 B/op	      13 allocs/op
+PASS
+ok  	github.com/Rinsvent/smart-redis-queue	35.445s

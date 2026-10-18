@@ -1,0 +1,20 @@
+# commit a96f70e7823454763a31d00c76fb842a7325d963
+# feat: fix locks and add check option
+# date 2026-07-04 15:21:07 +0700
+# host rinsvent-MS-7D54 go go1.26.2
+# load TestPartitionScanLoad_S1000
+# env SRQ_SCAN_CHATS=1000 SRQ_SCAN_DURATION=20s SRQ_SCAN_WORKERS=4
+
+=== RUN   TestPartitionScanLoad_S1000
+    scenarios_partition_scan_load_test.go:47: seed 1000 chats × 1 task (queue=scan-load-1792260888201162514)
+    scenarios_partition_scan_load_test.go:176: --- partition-scan load (report S1000-style) ---
+    scenarios_partition_scan_load_test.go:177: chats=1000 workers=4 ack_rate=15/s duration=20s reject_delay=2s
+    scenarios_partition_scan_load_test.go:179: wall=20.0s  redis_cpu=980m  (staging S1000≈450m)
+    scenarios_partition_scan_load_test.go:180: EVALSHA/s=1315  avg_EVAL_us=705  (staging≈1690/s, 240us)
+    scenarios_partition_scan_load_test.go:181: probe/s(GET+EXISTS)=554690  GET/s=3748 EXISTS/s=550942  SMEMBERS/s=884  INCR/s=1264
+    scenarios_partition_scan_load_test.go:184:   (staging Lua-GET≈154k, SMEMBERS≈570 — на a96f70e :block=EXISTS)
+    scenarios_partition_scan_load_test.go:185: app: Get/s=884 empty_Get/s=453 Ack/s=15.1 Reject/s=416
+    scenarios_partition_scan_load_test.go:188: slowlog(>2ms): n=128 max=3.988ms  (staging max Get 77ms)
+--- PASS: TestPartitionScanLoad_S1000 (20.03s)
+PASS
+ok  	github.com/Rinsvent/smart-redis-queue	20.037s

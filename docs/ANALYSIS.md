@@ -27,7 +27,14 @@
 BenchmarkPublish$|BenchmarkPublishBatch100|BenchmarkConsume$|BenchmarkConsumePrefetch/prefetch-10
 ```
 
-На `HEAD` дополнительно гоняются сценарные бенчи из `scenarios_bench_test.go` (payload / zstd / ordered).
+На `HEAD` дополнительно: `scenarios_bench_test.go` (payload / zstd / ordered) и `scenarios_cpu_bench_test.go` (blocked group / idle reject / Redis CPU).
+
+CPU-only matrix (не затирает core `.txt`):
+
+```bash
+BENCH_CPU=1 ./scripts/bench-commits.sh 0959fb3 787467d HEAD
+# → docs/bench-results/<sha>-cpu.txt
+```
 
 ### 1.2 Результаты core-бенчей (медиана µs/op)
 
@@ -49,16 +56,91 @@ BenchmarkPublish$|BenchmarkPublishBatch100|BenchmarkConsume$|BenchmarkConsumePre
 2. **PublishBatch100** заметно хуже с `0959fb3` (+34%) и на HEAD (+37%): цена индексов groups/ready/blocked на каждую задачу в батче. Script/` :count` частично отыграли (до ~+18%), фичи F3–F6 снова подняли batch cost.
 3. **Consume pf=1** в пределах шума (+7% на HEAD). Оптимизации `:count`/ping не дают явного выигрыша на *этом* микробенче (unordered, без groups/RL).
 4. **Prefetch-10** всплеск на `83fd113` (+32%) потом сошёл; HEAD ≈ +4% к baseline.
-5. **Вывод «стало ли лучше после оптимизаций»:** относительно **prod₀** одиночный Publish/Consume — паритет; batch publish — **хуже**. Относительно **prod₁** (`0959fb3`) batch почти такой же, single path не хуже. Выигрыш последних фич — функциональный (RL/debounce/race/compress), не latency empty-queue microbench. Где реально мерять рост — §3 (ordered, payload, zstd).
+5. **Вывод «стало ли лучше после оптимизаций»:** относительно **prod₀** одиночный Publish/Consume — паритет; batch publish — **хуже**. Относительно **prod₁** (`0959fb3`) batch почти такой же, single path не хуже. Выигрыш последних фич — функциональный (RL/debounce/race/compress), не latency empty-queue microbench. Где реально мерять рост — §3 (ordered, payload, zstd) и **§1.4 (Redis CPU / blocked connector)**.
 
-### 1.3 Как перезапустить
+### 1.3 Redis CPU / blocked connector (медиана)
+
+Prod-кейс: партиция = чат `!<connector>:<chat>`, лимит на коннектор; без group-block — до N холостых `Get → Reject` и Get O(партиций) по CPU Redis.
+
+Метрики из `INFO CPU` / `COMMANDSTATS` / `SLOWLOG` (см. `scenarios_cpu_bench_test.go`):
+
+| Метрика | Смысл |
+|---------|--------|
+| `redis_cpu_us/op` | Δ(used_cpu_sys+user) Redis / op, µs |
+| `eval_us/op` | usec eval+evalsha / op |
+| `slow_max_us` / `slow_n` | max и count SLOWLOG (порог записи 5ms на время бенча) |
+| `deliver_frac` | доля Get, вернувших задачу (IdleReject) |
+
+Сырьё: `docs/bench-results/{0959fb3,787467d,244f70d}-cpu.txt` (один host, `count=3`, медианы).
+
+#### BlockedGroup idle Get (группа уже запаркована)
+
+| parts | 0959fb3 redis_cpu | 787467d | HEAD |
+|------:|------------------:|--------:|-----:|
+| 100 | 80 | 85 | 92 |
+| 500 | 80 | 85 | 94 |
+| 1000 | 82 | 81 | 92 |
+
+**Вывод:** с момента появления `BlockGroups` (`0959fb3`) idle Get под запаркованной группой **не растёт с N** (~80–95 µs Redis CPU). Это как раз фикс «Get 77ms / pod CPU 490m» при массовой парковке коннектора. Дальнейшие коммиты не ухудшили.
+
+#### IdleReject connector (Get → Reject), parts=500
+
+| Режим | 0959fb3 cpu | HEAD cpu | deliver_frac (HEAD) |
+|-------|------------:|---------:|--------------------:|
+| `part_only` (Reject только чат) | 222 | **223** | ~0.03 |
+| `block_group` (Reject + BlockGroups) | 105 | **92** | ~0.00015 |
+
+**Вывод:** `block_group` ≈ **2.2–2.4× меньше** Redis CPU на попытку Get и почти ноль холостых выдач. Паттерн для app: после упирания в MAX на коннектор — `RejectWithDelay(..., connectorGroup)`, не только partition.
+
+#### Parked partitions idle Get (все чаты в blocked, группа свободна)
+
+| parts | 0959fb3 cpu | HEAD cpu |
+|------:|------------:|---------:|
+| 100 | 182 | 214 |
+| 500 | 498 | 538 |
+
+Здесь CPU **растёт с N** (обход ready/admission). Не деградация HEAD vs 0959fb3 (шум/фичи), а оставшийся O(parked)-класс; group-block его обходит.
+
+#### Slowlog-алерт в тестах
+
+```bash
+go test -run='TestBlockedGroupGet_SlowlogBudget' -count=1 .
+# жёстче (5ms): SRQ_BENCH_STRICT=1 go test -run='TestBlockedGroupGet_SlowlogBudget' .
+```
+
+На HEAD при 1000 parts + BlockGroups slowlog пуст (`slow_max=0`, Lua ≪ 5ms). Тест падает, если Lua Get снова уйдёт в десятки ms. Это не замена prod-мониторинга SLOWLOG, а регрессионный предохранитель в CI/local.
+
+#### Partition-scan load на `a96f70e` (отчёт S1000)
+
+Воспроизведение: 1000 `!conn:*`, 4 воркера, 15 Ack/с, остальное `Reject(2s)` → `:block` на чат (без group-block).  
+`BENCH_SCAN=1 ./scripts/bench-commits.sh a96f70e` → `docs/bench-results/a96f70e-scan.txt`.
+
+| | Staging S1000 (отчёт) | Local `a96f70e` 20s | Local HEAD (тот же тест, без BlockGroups) |
+|--|----------------------:|--------------------:|------------------------------------------:|
+| Redis CPU | ≈450m (лимит пода 500m) | **980m** | 977m |
+| EVALSHA/s | ≈1690 | **1315** | 1834 |
+| avg EVAL µs | ≈240 | **705** | 493 |
+| Lua probes/s | GET ≈154k | **EXISTS+GET ≈555k** | GET ≈2.9k (EXISTS=0) |
+| SMEMBERS/s | ≈570 | **884** | 1123 |
+| Reject/s | ≈560 | **416** | 438 |
+| Ack/s | ≈15 | **15.1** | 11.6 |
+| slowlog max | Get 77ms | 4–9ms | ≈3ms |
+
+**Вывод:** на `a96f70e` паттерн отчёта ловится: Redis CPU у потолка, сотни Reject/с при 15 Ack/с, **сотни тысяч EXISTS/s** на `:block` (в отчёте это было GET — тот же класс O(партиций) probe).  
+`SRQ_EXPECT_SCAN_COST=1` на этом коммите — жёсткий assert (avg EVAL≥80µs, CPU≥100m, probes≥2k/s).  
+На HEAD без `BlockGroups` probes резко падают (ZSET blocked), но CPU от IdleReject всё ещё высокий — нужен group-block в app (`Reject(..., connector)`), см. IdleReject выше.
+
+### 1.4 Как перезапустить
 
 ```bash
 # Redis на :6379
 ./scripts/bench-commits.sh a96f70e 0959fb3 787467d 83fd113 9250ef6 HEAD
+# CPU / blocked connector (отдельные *-cpu.txt):
+BENCH_CPU=1 ./scripts/bench-commits.sh 0959fb3 787467d HEAD
 # только сценарии на текущем дереве:
-go test -run='^$' -bench='BenchmarkPayload|BenchmarkCompress|BenchmarkOrdered|BenchmarkConsumePrefetch' \
+go test -run='^$' -bench='BenchmarkPayload|BenchmarkCompress|BenchmarkOrdered|BenchmarkBlocked|BenchmarkParked|BenchmarkIdleReject' \
   -benchtime=1s -count=3 -timeout=45m .
+go test -run='TestBlockedGroupGet_SlowlogBudget' -count=1 .
 ```
 
 ---
@@ -205,25 +287,32 @@ Decode на Get окупается на крупных телах; allocs на d
 
 Масштабирование почти линейное по числу ordered-партиций в одном drain — узкое место: обход ready/groups и per-partition Get, не размер payload.
 
-### 3.7 Куда ещё добавить сценарии
+### 3.7 Redis CPU / blocked connector (кратко)
+
+См. §1.3. Главный сигнал: **BlockGroups** держит idle Get ~const по N; **part-only Reject** жрёт ~2× CPU и выдаёт лишние задачи. Slowlog-тест — `TestBlockedGroupGet_SlowlogBudget`.
+
+### 3.8 Куда ещё добавить сценарии
 
 | Сценарий | Зачем | Статус |
 |----------|--------|--------|
 | Prefetch × ordered × N groups | prod-like hot path | частично (есть prefetch + ordered отдельно) |
-| Rate-limit deny path (Get empty) | стоимость «пустого» Get под RL | нет |
+| Blocked group / idle reject + Redis CPU | prod connector MAX | **есть** (`scenarios_cpu_bench_test.go`) |
+| Rate-limit deny path (Get empty, F4 RL) | стоимость «пустого» Get под RL | нет |
 | Debounce in-flight overwrite | стоимость лишнего GET/SET | нет |
 | Concurrency tags contention | HASH locks под конкуренцией | нет |
 | Parallel consumers (уже есть `BenchmarkConsumeParallel`) | fairness / lock | есть в `queue_test.go` |
 | Incompressible payload ± zstd | честный worst case | нет |
 | Batch Publish 1/10/100/1000 | amortized Lua | batch 10/100 есть |
+| a96f70e pre-groups partition scan | baseline до BlockGroups | **есть** (`TestPartitionScanLoad_S1000`, `BENCH_SCAN=1`) |
 
 ---
 
 ## 4. Сводка оценки
 
 1. **Исторически:** `a96f70e` → `0959fb3` добавили groups/ready/block: **batch publish −34%**, single path почти без изменений. Дальнейшие opt (`script`, `:count`, ping) частично вернули batch, но не до baseline. **HEAD** ≈ паритет с prod по single Publish/Consume, batch всё ещё ~+37% к prod₀ / ≈ prod₁.  
-2. **Vs брокеры:** SRQ — не Kafka-replacement, а Redis work-queue с редкими first-class фичами (debounce, race!, dual RL, ordered reclaim). Матрица §2.2.  
-3. **Сценарии:** zstd окупается с ~16 KiB на сжимаемых данных (и сильно режет Redis memory); prefetch помогает; ordered ≈ O(partitions). Зоны роста: batch publish индексы, RL/debounce/race бенчи, incompressible payload.
+2. **Redis CPU (connector):** с `0959fb3` idle Get под `BlockGroups` ≈ O(1) по N; IdleReject `block_group` ≈ **2.2×** дешевле `part_only` по `redis_cpu_us/op`. Это целевой выигрыш групп/ready, не видимый на empty-queue microbench.  
+3. **Vs брокеры:** SRQ — не Kafka-replacement, а Redis work-queue с редкими first-class фичами (debounce, race!, dual RL, ordered reclaim). Матрица §2.2.  
+4. **Сценарии:** zstd окупается с ~16 KiB на сжимаемых данных; prefetch помогает; ordered ≈ O(partitions); CPU-регрессии ловим §1.3 + slowlog-тестом.
 
 ---
 
@@ -231,7 +320,9 @@ Decode на Get окупается на крупных телах; allocs на d
 
 | Путь | Содержание |
 |------|------------|
-| `scripts/bench-commits.sh` | multi-commit worktree runner |
+| `scripts/bench-commits.sh` | multi-commit worktree runner (`BENCH_CPU=1` → `*-cpu.txt`) |
 | `scenarios_bench_test.go` | payload / compress / ordered |
-| `docs/bench-results/<sha>.txt` | сырые `go test -bench` |
+| `scenarios_cpu_bench_test.go` | blocked group / idle reject / Redis CPU + slowlog test |
+| `docs/bench-results/<sha>.txt` | сырые core `go test -bench` |
+| `docs/bench-results/<sha>-cpu.txt` | CPU / blocked-connector прогоны |
 | `docs/bench-results/HEAD.txt` | полный сценарный прогон HEAD |
