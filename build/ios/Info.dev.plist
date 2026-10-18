@@ -3,19 +3,19 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleExecutable</key>
-    <string>srqtest</string>
+    <string>smart-redis-queue</string>
     <key>CFBundleIdentifier</key>
-    <string>com.example.srqtest.dev</string>
+    <string>com.rinsvent.smartredisqueue.dev</string>
     <key>CFBundleName</key>
-    <string>My Product (Dev)</string>
+    <string>Smart Redis Queue (Dev)</string>
     <key>CFBundleDisplayName</key>
-    <string>My Product (Dev)</string>
+    <string>Smart Redis Queue (Dev)</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1.0-dev</string>
+    <string>1.0.0-dev</string>
     <key>CFBundleVersion</key>
-    <string>0.1.0</string>
+    <string>1.0.0</string>
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>MinimumOSVersion</key>
@@ -51,11 +51,11 @@
     <true/>
     
     <key>NSHumanReadableCopyright</key>
-    <string>© 2026, My Company</string>
+    <string>© Rinsvent</string>
     
     
     <key>CFBundleGetInfoString</key>
-    <string>This is a comment</string>
+    <string>Smart Redis Queue manager</string>
     
 </dict>
 </plist>

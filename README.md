@@ -482,10 +482,10 @@ GUI для Redis-хостов (без выбора DB в профиле): обз
 | --- | --- |
 | `smart-redis-queue-desktop-*` | **GUI**: запуск без аргументов открывает окно (двойной клик / `./…-desktop-…`) |
 | `smart-redis-queue-cli-*` | **CLI**: `info` / `purge` / `retry` / `seed` / … |
-| `smart-redis-queue-android.apk` | **Android** (experimental Wails v3) |
+| `smart-redis-queue-android.apk` | **Android** APK (experimental Wails v3) |
+| `smart-redis-queue-ios-simulator-arm64.app.zip` | **iOS Simulator** `.app` (experimental; ad-hoc). Device/IPA — локально с Apple signing |
 
-Платформы desktop: `linux-amd64`, `windows-amd64.exe`, `darwin-arm64`, `darwin-amd64`.  
-iOS: только локально на Mac (`wails3 task ios:run` / `ios:package`) — в Releases нет (нужны Xcode + signing).
+Платформы desktop: `linux-amd64`, `windows-amd64.exe`, `darwin-arm64`, `darwin-amd64`.
 
 ```bash
 # UI
@@ -537,12 +537,18 @@ wails3 task android:run          # emulator
 wails3 task android:package:fat  # APK
 ```
 
-iOS (experimental; только macOS + Xcode):
+iOS (experimental; только macOS + полный Xcode):
 
 ```bash
-wails3 task ios:run
-wails3 task ios:package
+wails3 doctor
+wails3 task ios:run                              # Simulator
+wails3 task ios:package                          # production .app (simulator)
+# Device / IPA (нужны Apple Development identity + provisioning):
+# wails3 task ios:package IOS_PLATFORM=device CODESIGN_IDENTITY="Apple Development: …"
+# wails3 task ios:package:ipa IOS_PLATFORM=device …
 ```
+
+CI кладёт в Release zip симуляторного `.app`. Для App Store / устройства — подпись локально или через `wails3 task ios:xcode`.
 
 Профили: `~/.config/smart-redis-queue/connections.json` (или `os.UserConfigDir()`). При старте GUI есть **Local Redis** (`localhost:6379`).
 

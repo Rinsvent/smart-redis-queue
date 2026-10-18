@@ -12,7 +12,7 @@ includes:
 # For automatically managed signing & provisioning, use `task ios:xcode` and
 # build from the generated Xcode project instead.
 vars:
-  BUNDLE_ID: '{{.BUNDLE_ID | default "com.wails.app"}}'
+  BUNDLE_ID: '{{.BUNDLE_ID | default "com.rinsvent.smartredisqueue"}}'
   IOS_PLATFORM: '{{.IOS_PLATFORM | default "simulator"}}'
   MIN_IOS_VERSION: '{{.MIN_IOS_VERSION | default "15.0"}}'
   IOS_SDK: '{{if eq .IOS_PLATFORM "device"}}iphoneos{{else}}iphonesimulator{{end}}'
@@ -41,7 +41,7 @@ tasks:
   build:
     summary: Creates a build of the application for iOS
     deps:
-      - task: generate:ios:overlay
+      # overlay skipped: RegisterIOS / WailsIOSMain live in cmd/desktop/main_ios.go
       - task: generate:ios:xcode
       - task: common:go:mod:tidy
       - task: common:build:frontend

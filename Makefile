@@ -1,4 +1,4 @@
-.PHONY: build clean docker-up docker-down test test-short test-coverage example manager desktop frontend desktop-darwin desktop-android
+.PHONY: build clean docker-up docker-down test test-short test-coverage example manager desktop frontend desktop-darwin desktop-android desktop-ios
 
 # Библиотека: проверка сборки
 build:
@@ -28,9 +28,12 @@ desktop-darwin: frontend
 		./cmd/desktop
 
 # Android APK (experimental Wails v3). Нужны SDK/NDK + `wails3` / Task.
-# Пример: wails3 task android:package
 desktop-android:
-	wails3 task android:package
+	wails3 task android:package:fat
+
+# iOS Simulator .app (experimental; только macOS + Xcode).
+desktop-ios:
+	wails3 task ios:package IOS_PLATFORM=simulator
 
 # Быстрый запуск UI
 desktop-run: desktop
