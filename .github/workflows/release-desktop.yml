@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -93,10 +94,90 @@ jobs:
           name: windows-amd64
           path: smart-redis-queue-desktop-windows-amd64.exe
 
+  release-macos-arm64:
+    name: macOS arm64
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: internal/desktopui/frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: internal/desktopui/frontend
+        run: npm ci && npm run build
+
+      - name: Build desktop binary
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go build -tags wails,production \
+            -ldflags "-s -w" \
+            -o smart-redis-queue-desktop-darwin-arm64 \
+            ./cmd/manager
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64
+          path: smart-redis-queue-desktop-darwin-arm64
+
+  release-macos-amd64:
+    name: macOS amd64
+    runs-on: macos-13
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: internal/desktopui/frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: internal/desktopui/frontend
+        run: npm ci && npm run build
+
+      - name: Build desktop binary
+        env:
+          CGO_ENABLED: '1'
+        run: |
+          go build -tags wails,production \
+            -ldflags "-s -w" \
+            -o smart-redis-queue-desktop-darwin-amd64 \
+            ./cmd/manager
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: darwin-amd64
+          path: smart-redis-queue-desktop-darwin-amd64
+
   publish:
     name: GitHub Release
-    needs: [release-linux, release-windows]
+    needs: [release-linux, release-windows, release-macos-arm64, release-macos-amd64]
     runs-on: ubuntu-latest
+    # На workflow_dispatch без тега — только артефакты jobs выше; Release создаём на tag push.
+    if: startsWith(github.ref, 'refs/tags/v')
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -108,7 +189,11 @@ jobs:
           mkdir -p release
           cp dist/linux-amd64/smart-redis-queue-desktop-linux-amd64 release/
           cp dist/windows-amd64/smart-redis-queue-desktop-windows-amd64.exe release/
-          chmod +x release/smart-redis-queue-desktop-linux-amd64
+          cp dist/darwin-arm64/smart-redis-queue-desktop-darwin-arm64 release/
+          cp dist/darwin-amd64/smart-redis-queue-desktop-darwin-amd64 release/
+          chmod +x release/smart-redis-queue-desktop-linux-amd64 \
+                   release/smart-redis-queue-desktop-darwin-arm64 \
+                   release/smart-redis-queue-desktop-darwin-amd64
 
       - name: Create release
         uses: softprops/action-gh-release@v2
@@ -116,6 +201,8 @@ jobs:
           files: |
             release/smart-redis-queue-desktop-linux-amd64
             release/smart-redis-queue-desktop-windows-amd64.exe
+            release/smart-redis-queue-desktop-darwin-arm64
+            release/smart-redis-queue-desktop-darwin-amd64
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

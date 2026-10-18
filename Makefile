@@ -1,4 +1,4 @@
-.PHONY: build clean docker-up docker-down test test-short test-coverage example manager desktop frontend
+.PHONY: build clean docker-up docker-down test test-short test-coverage example manager desktop frontend desktop-darwin
 
 # Библиотека: проверка сборки
 build:
@@ -18,6 +18,14 @@ frontend:
 desktop: frontend
 	go build -tags wails,production,webkit2_41 -o bin/smart-redis-queue ./cmd/manager
 	cp -f bin/smart-redis-queue bin/manager-desktop
+
+# Локальная сборка macOS (запускать на Mac; CGO + Xcode CLT).
+# GOARCH=arm64|amd64 make desktop-darwin
+desktop-darwin: frontend
+	CGO_ENABLED=1 go build -tags wails,production \
+		-ldflags "-s -w" \
+		-o bin/smart-redis-queue-desktop-darwin-$${GOARCH:-$$(go env GOARCH)} \
+		./cmd/manager
 
 # Быстрый запуск без ручного env (frontend должен быть собран: make frontend)
 desktop-run: desktop

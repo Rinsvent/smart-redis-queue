@@ -476,16 +476,22 @@ GUI для Redis-хостов (без выбора DB в профиле): обз
 
 #### Готовые бинарники (GitHub Releases)
 
-На тег `v*` workflow собирает:
+На тег `v*` (или вручную **Actions → Release Desktop → Run workflow**) собирается:
 
 | Asset | Платформа |
 | --- | --- |
 | `smart-redis-queue-desktop-linux-amd64` | Linux (Ubuntu 24.04+, webkit2gtk-4.1) |
 | `smart-redis-queue-desktop-windows-amd64.exe` | Windows 10 / 11 (WebView2) |
+| `smart-redis-queue-desktop-darwin-arm64` | macOS Apple Silicon |
+| `smart-redis-queue-desktop-darwin-amd64` | macOS Intel |
+
+Android / iOS: Wails v2 — только desktop; мобильных сборок нет.
 
 Linux / NVIDIA: `WEBKIT_DISABLE_DMABUF_RENDERER=1` выставляется самим приложением при старте `desktop` (и `WebviewGpuPolicy=Never`). Вручную переменная больше не обязательна; при упрямстве Wayland добавьте `GDK_BACKEND=x11`.
 
 Windows: нужен [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (обычно уже есть на Win10/11). Windows 8 не поддерживается.
+
+macOS: бинарники без notarization — при первом запуске может понадобиться **Open** из контекстного меню (Gatekeeper).
 
 #### Сборка из исходников
 
