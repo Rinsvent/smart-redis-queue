@@ -248,9 +248,14 @@ jobs:
       - name: Build Android APK (fat)
         run: |
           set -euxo pipefail
+          # "could not import C (no metadata for C)" в логе bindings — ожидаемо:
+          # generate bindings идёт с CGO=0 (без NDK). На сам APK/libwails.so не влияет.
           wails3 task android:package:fat
           ls -la bin/ || true
           find bin -name '*.apk' | head -20
+          # Sanity: fat APK must contain arm64 native lib
+          APK=$(find bin -name '*.apk' | head -1)
+          unzip -l "$APK" | grep -E 'lib/arm64-v8a/libwails\.so'
 
       - name: Rename APK
         run: |

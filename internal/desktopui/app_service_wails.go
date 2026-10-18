@@ -11,6 +11,8 @@ import (
 // ServiceStartup — Wails v3 lifecycle (вместо v2 OnStartup / startup).
 func (a *App) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {
 	a.ctx = ctx
-	_ = a.EnsureActive()
+	// Не блокируем готовность UI/assets Redis-dial'ом (на mobile это даёт чёрный экран /
+	// waitForAppReady timeout). UI сам зовёт EnsureActive при работе с очередями.
+	go func() { _ = a.EnsureActive() }()
 	return nil
 }

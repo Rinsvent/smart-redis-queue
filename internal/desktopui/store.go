@@ -33,7 +33,13 @@ type Store struct {
 func defaultStorePath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
-		return "", err
+		// Android/iOS Go runtime часто без $HOME → UserConfigDir падает.
+		// Desktop/mobile UI предпочитает явный path (см. resolveStorePath в run_wails.go).
+		if home, err2 := os.UserHomeDir(); err2 == nil && home != "" && home != "/" {
+			dir = filepath.Join(home, ".config")
+		} else {
+			dir = filepath.Join(os.TempDir(), "config")
+		}
 	}
 	return filepath.Join(dir, "smart-redis-queue", "connections.json"), nil
 }

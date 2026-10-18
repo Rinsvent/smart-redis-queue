@@ -537,6 +537,9 @@ wails3 task android:run          # emulator
 wails3 task android:package:fat  # APK
 ```
 
+В логах CI при bindings может быть `could not import C (no metadata for C)` — это нормально (генерация без CGO/NDK), на APK не влияет.  
+На телефоне Redis по умолчанию (`localhost`) недоступен: в UI добавьте адрес хоста/VPN.
+
 iOS (experimental; только macOS + полный Xcode):
 
 ```bash

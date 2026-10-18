@@ -6,6 +6,7 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
@@ -21,7 +22,7 @@ var appIcon []byte
 func Run() error {
 	prepareLinuxWebKitEnv()
 
-	store, err := NewStore("")
+	store, err := NewStore(resolveStorePath())
 	if err != nil {
 		return fmt.Errorf("store: %w", err)
 	}
@@ -80,4 +81,15 @@ func prepareLinuxWebKitEnv() {
 	if os.Getenv("WEBKIT_DISABLE_DMABUF_RENDERER") == "" {
 		_ = os.Setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
 	}
+}
+
+// resolveStorePath — на mobile нет $HOME/UserConfigDir; пишем в app sandbox (getFilesDir / Application Support).
+// Пустая строка → NewStore использует defaultStorePath (desktop).
+func resolveStorePath() string {
+	if application.System.IsMobile() {
+		if p := application.Mobile.StoragePath(); p != "" {
+			return filepath.Join(p, "connections.json")
+		}
+	}
+	return ""
 }
