@@ -35,8 +35,10 @@ import {
   Tooltip,
   Typography,
   createTheme,
+  useMediaQuery,
 } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
+import ArrowBackIcon from '@mui/icons-material/ArrowBack'
 import BlockIcon from '@mui/icons-material/Block'
 import CalculateOutlinedIcon from '@mui/icons-material/CalculateOutlined'
 import CheckIcon from '@mui/icons-material/Check'
@@ -99,6 +101,10 @@ const POLL_PRESETS = [
 function buildTheme(mode) {
   const dark = mode === 'dark'
   return createTheme({
+    // Bootstrap-aligned sm (576) for mobile master-detail / compact toolbar.
+    breakpoints: {
+      values: { xs: 0, sm: 576, md: 768, lg: 992, xl: 1200 },
+    },
     palette: {
       mode,
       primary: { main: dark ? '#5B9BD5' : '#1F6AA5' },
@@ -118,8 +124,12 @@ function buildTheme(mode) {
     components: {
       MuiCssBaseline: {
         styleOverrides: {
+          html: {
+            // iOS notch / Android WebView with viewport-fit=cover
+            padding: 0,
+          },
           body: {
-            minHeight: '100vh',
+            minHeight: '100dvh',
             backgroundImage: dark
               ? 'radial-gradient(ellipse at top left, #1a2433 0%, #12151A 55%)'
               : 'radial-gradient(ellipse at top left, #e8eef6 0%, #EEF1F5 55%)',
@@ -171,6 +181,8 @@ function readPollMs() {
 export default function App() {
   const [themeMode, setThemeMode] = useState(() => localStorage.getItem('srq-theme') || 'light')
   const theme = useMemo(() => buildTheme(themeMode), [themeMode])
+  // Bootstrap sm — below this: compact toolbar + master-detail (list XOR detail).
+  const isCompact = useMediaQuery('(max-width:575.95px)')
 
   const [connections, setConnections] = useState([])
   const [activeId, setActiveId] = useState('')
@@ -806,18 +818,57 @@ export default function App() {
         ? `Showing ${rows.length} of ${listTotal}`
         : `${listTotal} in Redis`
 
+  const showQueueList = !isCompact || !selectedQueue
+  const showQueueDetail = !isCompact || !!selectedQueue
+
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <Box sx={{ height: '100vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <Box
+        sx={{
+          height: '100dvh',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+          // Extra CSS safe-area for iOS; Android pads the WebView via WindowInsets.
+          pt: 'env(safe-area-inset-top, 0px)',
+          pb: 'env(safe-area-inset-bottom, 0px)',
+        }}
+      >
         <AppBar position="sticky" color="transparent" elevation={0} sx={{ flexShrink: 0 }}>
-          <Toolbar sx={{ gap: 2, flexWrap: 'wrap' }}>
-            <Typography variant="h6" sx={{ mr: 1, color: 'text.primary' }}>
-              Smart Redis Queue
+          <Toolbar
+            variant={isCompact ? 'dense' : 'regular'}
+            sx={{
+              gap: { xs: 0.5, sm: 1.5 },
+              flexWrap: 'nowrap',
+              minHeight: { xs: 48, sm: 64 },
+              px: { xs: 1, sm: 2 },
+            }}
+          >
+            <Typography
+              variant="h6"
+              noWrap
+              sx={{
+                mr: { xs: 0.5, sm: 1 },
+                color: 'text.primary',
+                flexShrink: 0,
+                fontSize: { xs: '0.95rem', sm: '1.25rem' },
+                maxWidth: { xs: connections.length > 0 ? 48 : 'none', sm: 'none' },
+                overflow: 'hidden',
+              }}
+            >
+              {isCompact && connections.length > 0 ? 'SRQ' : 'Smart Redis Queue'}
             </Typography>
             {connections.length > 0 && (
               <>
-                <FormControl size="small" sx={{ minWidth: 220 }}>
+                <FormControl
+                  size="small"
+                  sx={{
+                    minWidth: { xs: 0, sm: 180 },
+                    flex: { xs: '1 1 auto', sm: '0 1 260px' },
+                    maxWidth: { xs: '100%', sm: 320 },
+                  }}
+                >
                   <InputLabel>Host</InputLabel>
                   <Select
                     label="Host"
@@ -826,32 +877,38 @@ export default function App() {
                   >
                     {connections.map((c) => (
                       <MenuItem key={c.id} value={c.id}>
-                        {c.name} ({c.addr})
+                        {isCompact ? c.name : `${c.name} (${c.addr})`}
                       </MenuItem>
                     ))}
                   </Select>
                 </FormControl>
-                <IconButton onClick={() => setAddOpen(true)} title="Add">
-                  <AddIcon />
+                <IconButton size="small" onClick={() => setAddOpen(true)} title="Add">
+                  <AddIcon fontSize="small" />
                 </IconButton>
-                <IconButton onClick={onDeleteConn} disabled={!activeId} title="Remove">
-                  <DeleteOutlineIcon />
+                <IconButton size="small" onClick={onDeleteConn} disabled={!activeId} title="Remove">
+                  <DeleteOutlineIcon fontSize="small" />
                 </IconButton>
                 <IconButton
+                  size="small"
                   onClick={refreshCatalog}
                   disabled={!activeId || catalogLoading}
                   title="Refresh catalog (all DBs)"
                 >
-                  {catalogLoading ? <CircularProgress size={18} /> : <RefreshIcon />}
+                  {catalogLoading ? <CircularProgress size={16} /> : <RefreshIcon fontSize="small" />}
                 </IconButton>
               </>
             )}
-            <Box sx={{ flexGrow: 1 }} />
+            <Box sx={{ flexGrow: { xs: 0, sm: 1 }, minWidth: { xs: 0, sm: 8 } }} />
             <IconButton
+              size="small"
               onClick={() => setThemeMode((m) => (m === 'light' ? 'dark' : 'light'))}
               title="Theme"
             >
-              {themeMode === 'light' ? <DarkModeOutlinedIcon /> : <LightModeOutlinedIcon />}
+              {themeMode === 'light' ? (
+                <DarkModeOutlinedIcon fontSize="small" />
+              ) : (
+                <LightModeOutlinedIcon fontSize="small" />
+              )}
             </IconButton>
           </Toolbar>
         </AppBar>
@@ -890,16 +947,16 @@ export default function App() {
               flex: 1,
               minHeight: 0,
               display: 'grid',
-              gridTemplateColumns: { xs: '1fr', md: '260px 1fr' },
+              gridTemplateColumns: { xs: '1fr', sm: '240px 1fr' },
               gap: 0,
             }}
           >
             <Box
               sx={{
-                borderRight: 1,
+                borderRight: { xs: 0, sm: 1 },
                 borderColor: 'divider',
                 p: 1.5,
-                display: 'flex',
+                display: showQueueList ? 'flex' : 'none',
                 flexDirection: 'column',
                 minHeight: 0,
                 bgcolor: 'background.paper',
@@ -958,8 +1015,8 @@ export default function App() {
 
             <Box
               sx={{
-                p: 2.5,
-                display: 'flex',
+                p: { xs: 1.5, sm: 2.5 },
+                display: showQueueDetail ? 'flex' : 'none',
                 flexDirection: 'column',
                 minHeight: 0,
                 overflow: 'hidden',
@@ -980,9 +1037,30 @@ export default function App() {
                       rowGap={1}
                     >
                       <Box sx={{ minWidth: 0, flex: '1 1 160px' }}>
-                        <Typography variant="h5" noWrap title={selectedMeta.name}>
-                          {selectedMeta.name}
-                        </Typography>
+                        <Stack direction="row" alignItems="center" spacing={0.5} sx={{ minWidth: 0 }}>
+                          {isCompact && (
+                            <IconButton
+                              size="small"
+                              onClick={() => {
+                                resetQueueView()
+                                setSelectedQueue('')
+                              }}
+                              title="Back to queues"
+                              edge="start"
+                              sx={{ mr: 0.25 }}
+                            >
+                              <ArrowBackIcon fontSize="small" />
+                            </IconButton>
+                          )}
+                          <Typography
+                            variant={isCompact ? 'h6' : 'h5'}
+                            noWrap
+                            title={selectedMeta.name}
+                            sx={{ minWidth: 0 }}
+                          >
+                            {selectedMeta.name}
+                          </Typography>
+                        </Stack>
                         <Stack direction="row" alignItems="center" spacing={0.25}>
                           <Typography color="text.secondary" variant="body2" noWrap>
                             {detail
@@ -1022,7 +1100,7 @@ export default function App() {
                         spacing={0.75}
                         flexWrap="wrap"
                         useFlexGap
-                        sx={{ ml: { md: 'auto' } }}
+                        sx={{ ml: { sm: 'auto' } }}
                       >
                         <Typography variant="body2" color="text.secondary">
                           DB:

@@ -92,6 +92,8 @@ func RunWithConfig(cfg RunConfig) error {
 		Title:            "Smart Redis Queue",
 		Width:            1280,
 		Height:           800,
+		MinWidth:         720,
+		MinHeight:        480,
 		BackgroundColour: application.NewRGB(245, 247, 250),
 		URL:              "/",
 	}
