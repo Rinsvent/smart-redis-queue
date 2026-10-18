@@ -1,4 +1,4 @@
-//go:build wails
+//go:build wails || android || ios
 
 package main
 
@@ -8,7 +8,8 @@ import (
 	"github.com/Rinsvent/smart-redis-queue/internal/desktopui"
 )
 
-// Отдельный entrypoint для релизного desktop-бинаря: двойной клик / ./binary → сразу UI.
+// Отдельный entrypoint для релизного desktop/mobile-бинаря:
+// двойной клик / ./binary → сразу UI (Wails v3).
 func main() {
 	if err := desktopui.Run(); err != nil {
 		log.Fatal(err)

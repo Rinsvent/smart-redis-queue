@@ -6,3 +6,11 @@ coverage.html
 *.test
 node_modules/
 internal/desktopui/frontend/node_modules/
+internal/desktopui/frontend/bindings/
+build/android/overlay.json
+build/android/app/src/main/jniLibs/
+build/android/app/build/
+build/android/.gradle/
+build/ios/xcode/
+build/ios/DerivedData/
+*.syso

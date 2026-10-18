@@ -1,4 +1,4 @@
-//go:build !wails
+//go:build !wails && !android && !ios
 
 package main
 
@@ -10,5 +10,5 @@ import (
 )
 
 func runDesktop(ctx context.Context, c *cli.Command) error {
-	return fmt.Errorf("desktop UI requires: go run -tags wails,production,webkit2_41 ./cmd/manager desktop\n(see README: Ubuntu 24.04 needs libwebkit2gtk-4.1-dev)")
+	return fmt.Errorf("desktop UI requires: go run -tags wails,production,gtk3 ./cmd/desktop\n(see README: Linux needs libgtk-3-dev libwebkit2gtk-4.1-dev + -tags gtk3 for Wails v3 legacy GTK3)")
 }

@@ -1,4 +1,4 @@
-//go:build !wails
+//go:build !wails && !android && !ios
 
 package main
 
@@ -9,6 +9,6 @@ import (
 
 func main() {
 	fmt.Fprintln(os.Stderr, "desktop UI requires build tags, e.g.:")
-	fmt.Fprintln(os.Stderr, "  go build -tags wails,production,webkit2_41 -o bin/smart-redis-queue ./cmd/desktop")
+	fmt.Fprintln(os.Stderr, "  go build -tags wails,production,gtk3 -o bin/smart-redis-queue ./cmd/desktop")
 	os.Exit(1)
 }

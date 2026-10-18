@@ -30,7 +30,7 @@ jobs:
           cache: npm
           cache-dependency-path: internal/desktopui/frontend/package-lock.json
 
-      - name: Install GTK / WebKit
+      - name: Install GTK3 / WebKit (Wails v3 legacy gtk3)
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev
@@ -49,7 +49,7 @@ jobs:
         env:
           CGO_ENABLED: '1'
         run: |
-          go build -tags wails,production,webkit2_41 \
+          go build -tags wails,production,gtk3 \
             -ldflags "-s -w" \
             -o smart-redis-queue-desktop-linux-amd64 \
             ./cmd/desktop
@@ -99,7 +99,6 @@ jobs:
           CGO_ENABLED: '1'
         run: |
           set -euxo pipefail
-          go list -m github.com/wailsapp/wails/v2 github.com/wailsapp/go-webview2
           go build -tags wails,production \
             -ldflags "-s -w -H windowsgui" \
             -o smart-redis-queue-desktop-windows-amd64.exe \
@@ -192,9 +191,78 @@ jobs:
             smart-redis-queue-desktop-darwin-arm64
             smart-redis-queue-desktop-darwin-amd64
 
+  release-android:
+    name: Android APK (experimental)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: internal/desktopui/frontend/package-lock.json
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android packages
+        run: |
+          set -euxo pipefail
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
+            "ndk;26.3.11579264"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/26.3.11579264" >> "$GITHUB_ENV"
+
+      - name: Install wails3 + Task
+        run: |
+          CGO_ENABLED=0 go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.31
+          go install github.com/go-task/task/v3/cmd/task@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      - name: Build frontend
+        working-directory: internal/desktopui/frontend
+        run: npm ci && npm run build
+
+      - name: Build Android APK (fat)
+        run: |
+          set -euxo pipefail
+          wails3 task android:package:fat
+          ls -la bin/ || true
+          find . -name '*.apk' | head -20
+
+      - name: Rename APK
+        run: |
+          set -euxo pipefail
+          APK=$(find bin -name '*.apk' | head -1)
+          test -n "$APK"
+          cp "$APK" smart-redis-queue-android.apk
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: android
+          path: smart-redis-queue-android.apk
+
   publish:
     name: GitHub Release
-    needs: [release-linux, release-windows, release-macos]
+    needs: [release-linux, release-windows, release-macos, release-android]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     steps:
@@ -215,6 +283,7 @@ jobs:
           cp dist/darwin/smart-redis-queue-cli-darwin-amd64 release/
           cp dist/darwin/smart-redis-queue-desktop-darwin-arm64 release/
           cp dist/darwin/smart-redis-queue-desktop-darwin-amd64 release/
+          cp dist/android/smart-redis-queue-android.apk release/
           chmod +x release/smart-redis-queue-* || true
           ls -la release/
 
@@ -230,6 +299,7 @@ jobs:
             release/smart-redis-queue-cli-darwin-amd64
             release/smart-redis-queue-desktop-darwin-arm64
             release/smart-redis-queue-desktop-darwin-amd64
+            release/smart-redis-queue-android.apk
           generate_release_notes: true
           fail_on_unmatched_files: true
         env:

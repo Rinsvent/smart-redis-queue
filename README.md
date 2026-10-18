@@ -26,7 +26,7 @@
 
 ## Требования
 
-- Go 1.25+ (см. `go.mod`; desktop UI тянет Wails / `golang.org/x`)
+- Go 1.25+ (см. `go.mod`; desktop/mobile UI — Wails v3)
 - Redis 6+
 
 ## Установка
@@ -433,7 +433,7 @@ make manager
 | `seed` | Демо-данные на нескольких DB (`demo-mail` / `demo-tg` / `demo-mixed`) |
 | `publish` | Публиковать заглушечные задачи (поток для живого UI) |
 | `consume` | Consume с заглушкой + stats (график g/a/r в UI) |
-| `desktop` | GUI manager (Wails); `-tags wails,production,webkit2_41` (Ubuntu 24.04+) |
+| `desktop` | GUI manager (Wails v3); локально лучше `./cmd/desktop` с `-tags wails,production,gtk3` |
 
 ### Примеры
 
@@ -466,11 +466,11 @@ make manager
 
 Глобальные флаги: `-a` (addr), `-P` (password), `--db`. Переменные: `REDIS_ADDR`, `REDIS_PASSWORD`.
 
-### Desktop UI (Wails)
+### Desktop / Mobile UI (Wails v3)
 
 GUI для Redis-хостов (без выбора DB в профиле): обзор очередей по всем DB, режимы Partitions / Groups / Tags, purge, block/unblock партиций (rate-limit ZSET `blocked`), retry, payload по ID и операции по тегам.
 
-Сборка GUI вынесена за build-тег `wails`, чтобы обычный `go build ./...` и CI не требовали CGO/GTK.
+Стек: **Wails v3** (`github.com/wailsapp/wails/v3`). Сборка GUI за build-тегом `wails` (плюс `android` / `ios` для мобилок), чтобы обычный `go build ./...` и тесты библиотеки не требовали CGO/GTK.
 
 Профиль: `name` + `addr` + `password`. Каталог очередей строится SCAN’ом `queue:*:partitions` и `queue:*:consumers` по DB `0..N-1` (N из `CONFIG GET databases`, иначе 16). Обновление каталога — раз в 5 минут и кнопкой Refresh. Одноимённые очереди на разных DB схлопываются в списке; в карточке — табы по DB.
 
@@ -481,9 +481,11 @@ GUI для Redis-хостов (без выбора DB в профиле): обз
 | Asset | Что это |
 | --- | --- |
 | `smart-redis-queue-desktop-*` | **GUI**: запуск без аргументов открывает окно (двойной клик / `./…-desktop-…`) |
-| `smart-redis-queue-cli-*` | **CLI**: `info` / `purge` / `retry` / `seed` / … (подкоманда `desktop` тоже есть при локальной сборке manager с `-tags wails`) |
+| `smart-redis-queue-cli-*` | **CLI**: `info` / `purge` / `retry` / `seed` / … |
+| `smart-redis-queue-android.apk` | **Android** (experimental Wails v3) |
 
-Платформы: `linux-amd64`, `windows-amd64.exe`, `darwin-arm64`, `darwin-amd64`.
+Платформы desktop: `linux-amd64`, `windows-amd64.exe`, `darwin-arm64`, `darwin-amd64`.  
+iOS: только локально на Mac (`wails3 task ios:run` / `ios:package`) — в Releases нет (нужны Xcode + signing).
 
 ```bash
 # UI
@@ -493,52 +495,60 @@ GUI для Redis-хостов (без выбора DB в профиле): обз
 ./smart-redis-queue-cli-linux-amd64 info
 ```
 
-Android / iOS: Wails v2 — только desktop; мобильных сборок нет.  
-CI: один macOS job (`macos-14`) собирает оба darwin-бинаря.
+Linux / NVIDIA: `WEBKIT_DISABLE_DMABUF_RENDERER=1` выставляется приложением (и `WebviewGpuPolicy=Never`). При упрямстве Wayland: `GDK_BACKEND=x11`.
 
-Linux / NVIDIA: `WEBKIT_DISABLE_DMABUF_RENDERER=1` выставляется самим приложением при старте `desktop` (и `WebviewGpuPolicy=Never`). Вручную переменная больше не обязательна; при упрямстве Wayland добавьте `GDK_BACKEND=x11`.
-
-Windows: нужен [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/) (обычно уже есть на Win10/11). Windows 8 не поддерживается.
-
-macOS: бинарники без notarization — при первом запуске может понадобиться **Open** из контекстного меню (Gatekeeper).
+Windows: нужен [WebView2 Runtime](https://developer.microsoft.com/microsoft-edge/webview2/).  
+macOS: без notarization — при первом запуске **Open** из контекстного меню (Gatekeeper).
 
 #### Сборка из исходников
 
 Требования:
 
-- Go 1.25+, CGO, зависимости Wails для вашей ОС ([дока Wails](https://wails.io/docs/gettingstarted/installation))
-- Node.js 18+ (для frontend; Vite 6)
+- Go 1.25+ (см. `go.mod`), CGO, [Wails v3](https://v3.wails.io/getting-started/installation/)
+- Node.js 18+ (frontend; Vite 6)
+- Linux desktop: GTK3 + WebKit2GTK 4.1 и тег `gtk3` (legacy path Wails v3; GTK4/WebKitGTK 6.0 — дефолт v3, у нас в CI пока GTK3)
 - Redis для проверки подключений из UI
 
 ```bash
-# CLI Wails (один раз)
-go install github.com/wailsapp/wails/v2/cmd/wails@v2.17.0
+# CLI wails3 (один раз; на Linux без gtk4 ставьте с CGO_ENABLED=0)
+CGO_ENABLED=0 go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.31
 
 # Frontend
 cd internal/desktopui/frontend && npm install && npm run build && cd -
 
-# Запуск GUI (бинарь сразу открывает UI; иконка в доке стабильнее)
+# Desktop GUI
 make desktop && ./bin/smart-redis-queue
 
-# или go run
-go run -tags wails,production,webkit2_41 ./cmd/desktop
+# или
+go run -tags wails,production,gtk3 ./cmd/desktop
 ```
 
-Если всё ещё падает на Wayland: `GDK_BACKEND=x11 go run -tags wails,production,webkit2_41 ./cmd/desktop`
-
-На Ubuntu 22.04 / системах с `libwebkit2gtk-4.0-dev` тег `webkit2_41` не нужен.
-
-Зависимости ОС (Ubuntu 24.04):
+Зависимости ОС (Ubuntu 24.04, legacy GTK3):
 
 ```bash
 sudo apt install libgtk-3-dev libwebkit2gtk-4.1-dev
 ```
 
-Профили сохраняются в `~/.config/smart-redis-queue/connections.json` (или `os.UserConfigDir()`). Поле `db` в старых профилях игнорируется. При старте GUI всегда доступен профиль **Local Redis** (`localhost:6379`) — добавляется автоматически, без смены уже выбранного active-хоста.
+Android (experimental; нужны SDK/NDK 26.3.x, JDK):
 
-Иконка: `internal/desktopui/appicon.png`. При старте пишутся PNG + `.desktop` с `StartupWMClass` = **basename текущего бинаря** (`smart-redis-queue` / при `go run` обычно `desktop`). Без совпадения с `WM_CLASS` Ubuntu показывает шестерёнку. Для стабильной иконки лучше `make desktop && ./bin/smart-redis-queue`.
+```bash
+wails3 doctor
+wails3 task android:run          # emulator
+wails3 task android:package:fat  # APK
+```
 
-CLI: `make manager && ./bin/manager info`. Подкоманда `manager desktop` работает только при сборке manager с `-tags wails`; для GUI предпочтителен `./cmd/desktop`.
+iOS (experimental; только macOS + Xcode):
+
+```bash
+wails3 task ios:run
+wails3 task ios:package
+```
+
+Профили: `~/.config/smart-redis-queue/connections.json` (или `os.UserConfigDir()`). При старте GUI есть **Local Redis** (`localhost:6379`).
+
+Иконка: `internal/desktopui/appicon.png` / `build/appicon.png`. На Linux пишутся PNG + `.desktop` с `StartupWMClass` = basename бинаря.
+
+CLI: `make manager && ./bin/manager info`. Подкоманда `manager desktop` — только с `-tags wails`; для GUI — `./cmd/desktop`.
 
 ## Тесты
 

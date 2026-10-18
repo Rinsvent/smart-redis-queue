@@ -1,4 +1,4 @@
-//go:build wails && linux
+//go:build (wails || android || ios) && linux && !android
 
 package desktopui
 
@@ -13,8 +13,8 @@ import (
 const linuxAppID = "smart-redis-queue"
 
 // ensureLinuxDesktopEntry пишет иконку + .desktop под реальный WM_CLASS
-// текущего процесса (basename бинаря). При `go run ./cmd/manager` это
-// обычно "manager"; при `./bin/smart-redis-queue` — "smart-redis-queue".
+// текущего процесса (basename бинаря). При `go run ./cmd/desktop` это
+// обычно "desktop"; при `./bin/smart-redis-queue` — "smart-redis-queue".
 // Без совпадения StartupWMClass↔WM_CLASS Ubuntu рисует шестерёнку.
 func ensureLinuxDesktopEntry(iconPNG []byte) {
 	if len(iconPNG) == 0 {
@@ -53,6 +53,12 @@ func ensureLinuxDesktopEntry(iconPNG []byte) {
 		return
 	}
 
+	// cmd/desktop и *-desktop-* открывают UI без подкоманды; CLI manager — с `desktop`.
+	execSuffix := ""
+	if wmClass == "manager" {
+		execSuffix = " desktop"
+	}
+
 	writeDesktop := func(filename, execPath, class string, noDisplay bool) {
 		lines := []string{
 			"[Desktop Entry]",
@@ -60,7 +66,7 @@ func ensureLinuxDesktopEntry(iconPNG []byte) {
 			"Version=1.0",
 			"Name=Smart Redis Queue",
 			"Comment=Desktop manager for Smart Redis Queue",
-			"Exec=" + quoteDesktopExec(execPath) + " desktop",
+			"Exec=" + quoteDesktopExec(execPath) + execSuffix,
 			"Icon=" + iconPath,
 			"Terminal=false",
 			"Categories=Development;Utility;",

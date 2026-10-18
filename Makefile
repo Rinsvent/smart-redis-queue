@@ -1,4 +1,4 @@
-.PHONY: build clean docker-up docker-down test test-short test-coverage example manager desktop frontend desktop-darwin
+.PHONY: build clean docker-up docker-down test test-short test-coverage example manager desktop frontend desktop-darwin desktop-android
 
 # Библиотека: проверка сборки
 build:
@@ -8,14 +8,14 @@ build:
 manager:
 	go build -ldflags "-s -w" -o bin/manager ./cmd/manager
 
-# Frontend для desktop UI (нужен Node.js 18+)
+# Frontend для desktop/mobile UI (нужен Node.js 18+)
 frontend:
 	cd internal/desktopui/frontend && npm install && npm run build
 
-# GUI: отдельный entrypoint ./cmd/desktop — запуск без подкоманд (двойной клик / ./binary).
-# Бинарь smart-redis-queue — WM_CLASS совпадает с .desktop / иконкой в доке.
+# GUI: Wails v3, entrypoint ./cmd/desktop — запуск без подкоманд.
+# Linux: legacy GTK3 (`gtk3`) пока нет gtk4/webkitgtk-6.0 в CI/дефолтном окружении.
 desktop: frontend
-	go build -tags wails,production,webkit2_41 -ldflags "-s -w" \
+	go build -tags wails,production,gtk3 -ldflags "-s -w" \
 		-o bin/smart-redis-queue ./cmd/desktop
 	cp -f bin/smart-redis-queue bin/manager-desktop
 
@@ -27,13 +27,18 @@ desktop-darwin: frontend
 		-o bin/smart-redis-queue-desktop-darwin-$${GOARCH:-$$(go env GOARCH)} \
 		./cmd/desktop
 
+# Android APK (experimental Wails v3). Нужны SDK/NDK + `wails3` / Task.
+# Пример: wails3 task android:package
+desktop-android:
+	wails3 task android:package
+
 # Быстрый запуск UI
 desktop-run: desktop
 	./bin/smart-redis-queue
 
-# go run UI (WM_CLASS обычно = desktop)
+# go run UI
 desktop-gorun: frontend
-	go run -tags wails,production,webkit2_41 ./cmd/desktop
+	go run -tags wails,production,gtk3 ./cmd/desktop
 
 clean:
 	rm -rf bin/ coverage.out coverage.html

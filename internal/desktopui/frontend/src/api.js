@@ -1,13 +1,10 @@
-function bridge() {
-  return window?.go?.desktopui?.App
-}
+import { Call } from '@wailsio/runtime'
 
-async function call(name, ...args) {
-  const app = bridge()
-  if (!app || typeof app[name] !== 'function') {
-    throw new Error(`Wails binding missing: ${name}`)
-  }
-  return app[name](...args)
+// FQN: packagePath.Type.Method (Wails v3)
+const svc = 'github.com/Rinsvent/smart-redis-queue/internal/desktopui.App'
+
+function call(name, ...args) {
+  return Call.ByName(`${svc}.${name}`, ...args)
 }
 
 export const api = {

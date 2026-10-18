@@ -1,19 +1,14 @@
-//go:build wails
+//go:build wails || android || ios
 
 package desktopui
 
 import (
-	"context"
 	"embed"
 	"fmt"
 	"os"
 	"runtime"
 
-	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
-	"github.com/wailsapp/wails/v2/pkg/options/linux"
-	"github.com/wailsapp/wails/v2/pkg/options/mac"
+	"github.com/wailsapp/wails/v3/pkg/application"
 )
 
 //go:embed all:frontend/dist
@@ -22,7 +17,7 @@ var assets embed.FS
 //go:embed appicon.png
 var appIcon []byte
 
-// Run запускает Wails desktop UI.
+// Run запускает Wails v3 desktop / mobile UI.
 func Run() error {
 	prepareLinuxWebKitEnv()
 
@@ -30,45 +25,54 @@ func Run() error {
 	if err != nil {
 		return fmt.Errorf("store: %w", err)
 	}
-	app := NewApp(store)
+	svc := NewApp(store)
 	ensureLinuxDesktopEntry(appIcon)
 
-	opts := &options.App{
-		Title:  "Smart Redis Queue",
-		Width:  1280,
-		Height: 800,
-		AssetServer: &assetserver.Options{
-			Assets: assets,
+	opts := application.Options{
+		Name:        "Smart Redis Queue",
+		Description: "Desktop manager for Smart Redis Queue",
+		Icon:        appIcon,
+		Services: []application.Service{
+			application.NewService(svc),
 		},
-		BackgroundColour: &options.RGBA{R: 245, G: 247, B: 250, A: 255},
-		OnStartup: func(ctx context.Context) {
-			app.startup(ctx)
-			_ = app.EnsureActive()
+		Assets: application.AssetOptions{
+			Handler: application.AssetFileServerFS(assets),
 		},
-		Bind: []interface{}{app},
-		Mac: &mac.Options{
-			About: &mac.AboutInfo{
-				Title:   "Smart Redis Queue",
-				Message: "Desktop manager",
-				Icon:    appIcon,
-			},
+		Mac: application.MacOptions{
+			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
+		Linux: application.LinuxOptions{
+			ProgramName:   "smart-redis-queue",
+			ApplicationID: "com.rinsvent.smartredisqueue",
+		},
+		IOS:     application.IOSOptions{},
+		Android: application.AndroidOptions{},
+	}
+	if application.System.IsPlatform(application.PlatformIOS) {
+		opts.DisableDefaultSignalHandler = true
+	}
+	app := application.New(opts)
+
+	winOpts := application.WebviewWindowOptions{
+		Title:            "Smart Redis Queue",
+		Width:            1280,
+		Height:           800,
+		BackgroundColour: application.NewRGB(245, 247, 250),
+		URL:              "/",
 	}
 	if runtime.GOOS == "linux" {
-		opts.Linux = &linux.Options{
-			Icon: appIcon,
-			// Не влияет на WM_CLASS (он = basename argv[0]), но полезно для группировки.
-			ProgramName: "smart-redis-queue",
-			// NVIDIA/GBM: без этого WebKit часто abort'ится (EGL_NOT_INITIALIZED).
-			WebviewGpuPolicy: linux.WebviewGpuPolicyNever,
+		// NVIDIA/GBM: без Never WebKit часто abort'ится (EGL_NOT_INITIALIZED).
+		winOpts.Linux = application.LinuxWindow{
+			WebviewGpuPolicy: application.WebviewGpuPolicyNever,
 		}
 	}
+	app.Window.NewWithOptions(winOpts)
 
-	return wails.Run(opts)
+	return app.Run()
 }
 
 // prepareLinuxWebKitEnv — до инициализации GTK/WebKit.
-// Раньше это делали вручную в shell; теперь бинарь сам переживает NVIDIA GBM.
+// Wails v3 сам ставит DMABUF=1 на NVIDIA; оставляем явный fallback для всех Linux desktop.
 func prepareLinuxWebKitEnv() {
 	if runtime.GOOS != "linux" {
 		return

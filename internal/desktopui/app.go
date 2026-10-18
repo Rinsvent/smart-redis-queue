@@ -158,10 +158,6 @@ func NewApp(store *Store) *App {
 	}
 }
 
-func (a *App) startup(ctx context.Context) {
-	a.ctx = ctx
-}
-
 func (a *App) ctxOrBackground() context.Context {
 	if a.ctx != nil {
 		return a.ctx
