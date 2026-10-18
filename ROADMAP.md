@@ -105,7 +105,7 @@
 
 ## Порядок (ориентир)
 
-1. Документация: EOS-паттерн, fan-out vs work-queue, scale/multi-tenant (§5, §8–10) — можно влить в README из `docs/ANALYSIS.md`.
+1. ~~Документация: EOS-паттерн, fan-out vs work-queue, scale/multi-tenant~~ — сайт GitHub Pages (`docs/` + MkDocs): [rinsvent.github.io/smart-redis-queue](https://rinsvent.github.io/smart-redis-queue/). ANALYSIS остаётся детальным приложением.
 2. Auto-ack (§6).
 3. Selective groups / routing (§7).
 4. Шардинг по DB (§1) + заметки Cluster.

@@ -1,6 +1,6 @@
 # Smart Redis Queue — анализ производительности и позиционирования
 
-Черновик для последующего переноса фрагментов в README.  
+Черновик / детальный разбор. Краткая версия на сайте: [Бенчмарки](benchmarks.md), [Сравнение](comparison.md).  
 Сырые прогоны: [`docs/bench-results/`](bench-results/).
 
 **Среда прогонов (этот документ):** Linux amd64, AMD Ryzen 7 2700, Redis localhost:6379, Go из `go env GOVERSION`, `benchtime=1s`, `count=3`, в таблицах — **медиана** ns/op.
@@ -58,9 +58,9 @@ BENCH_CPU=1 ./scripts/bench-commits.sh 0959fb3 787467d HEAD
 4. **Prefetch-10** всплеск на `83fd113` (+32%) потом сошёл; HEAD ≈ +4% к baseline.
 5. **Вывод «стало ли лучше после оптимизаций»:** относительно **prod₀** одиночный Publish/Consume — паритет; batch publish — **хуже**. Относительно **prod₁** (`0959fb3`) batch почти такой же, single path не хуже. Выигрыш последних фич — функциональный (RL/debounce/race/compress), не latency empty-queue microbench. Где реально мерять рост — §3 (ordered, payload, zstd) и **§1.4 (Redis CPU / blocked connector)**.
 
-### 1.3 Redis CPU / blocked connector (медиана)
+### 1.3 Redis CPU / blocked account (медиана)
 
-Prod-кейс: партиция = чат `!<connector>:<chat>`, лимит на коннектор; без group-block — до N холостых `Get → Reject` и Get O(партиций) по CPU Redis.
+Prod-кейс (в бенчах исторически `connector`/`chat` = **аккаунт API** / **ресурс**): партиция = `!<account>:<resource>`, лимит на аккаунт; без group-block — до N холостых `Get → Reject` и Get O(партиций) по CPU Redis.
 
 Метрики из `INFO CPU` / `COMMANDSTATS` / `SLOWLOG` (см. `scenarios_cpu_bench_test.go`):
 
@@ -90,7 +90,7 @@ Prod-кейс: партиция = чат `!<connector>:<chat>`, лимит на 
 | `part_only` (Reject только чат) | 222 | **223** | ~0.03 |
 | `block_group` (Reject + BlockGroups) | 105 | **92** | ~0.00015 |
 
-**Вывод:** `block_group` ≈ **2.2–2.4× меньше** Redis CPU на попытку Get и почти ноль холостых выдач. Паттерн для app: после упирания в MAX на коннектор — `RejectWithDelay(..., connectorGroup)`, не только partition.
+**Вывод:** `block_group` ≈ **2.2–2.4× меньше** Redis CPU на попытку Get и почти ноль холостых выдач. Паттерн для app: после упирания в MAX на аккаунт — `RejectWithDelay(..., accountGroup)`, не только partition.
 
 #### Parked partitions idle Get (все чаты в blocked, группа свободна)
 

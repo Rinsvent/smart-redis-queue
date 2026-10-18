@@ -2,8 +2,11 @@
 
 [![CI](https://github.com/Rinsvent/smart-redis-queue/actions/workflows/ci.yml/badge.svg)](https://github.com/Rinsvent/smart-redis-queue/actions/workflows/ci.yml)
 [![coverage](https://raw.githubusercontent.com/Rinsvent/smart-redis-queue/main/.github/badges/coverage.svg)](https://github.com/Rinsvent/smart-redis-queue/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-blue?logo=markdown)](https://rinsvent.github.io/smart-redis-queue/)
 
 Очередь задач на Redis с поддержкой партиций, приоритетов, отложенного выполнения и строгих гарантий порядка.
+
+**Документация:** [rinsvent.github.io/smart-redis-queue](https://rinsvent.github.io/smart-redis-queue/) — зачем SRQ, get started, фичи, сравнение с Kafka/Rabbit, масштабирование, гарантии, apps/server, бенчмарки, roadmap.
 
 ## Возможности
 
@@ -155,37 +158,37 @@ if errors.As(err, &bp) {
 
 ### Группы и rate limit
 
-Группа — scope для парковки (например id коннектора). При Publish задаётся `Task.Groups`; пустые → `_default`.
+Группа — scope для парковки (например API-аккаунт / ключ). При Publish задаётся `Task.Groups`; пустые → `_default`. Типичный кейс — воркеры ходят во внешний API с квотами: порядок на ресурс + лимит на аккаунт. Подробнее в [доке](https://rinsvent.github.io/smart-redis-queue/features/rate-limit/).
 
 ```go
 producer.Publish(ctx, &redisqueue.Task{
     ID:        "msg-1",
-    Partition: "!163865653:chat-42",
-    Groups:    []string{"conn:163865653"}, // одна группа на партицию — оптимально
+    Partition: "!acct_9f3a:order_8841", // порядок по ресурсу
+    Groups:    []string{"acct:9f3a"},   // одна группа на партицию — оптимально
     Payload:   []byte(`{}`),
     Scheduled: time.Now(),
 })
 
 consumer.Consume(ctx, func(task *redisqueue.Task) error {
-    if connectorRateLimited {
+    if accountRateLimited {
         // Паркует всю группу: Get не обходит её ready, пока не истечёт Delay.
         // Для ordered (!) дополнительно блокируется сама партиция в blocked.
-        return redisqueue.NewRejectWithDelay(errors.New("rate limit"), 0.3, "conn:163865653")
+        return redisqueue.NewRejectWithDelay(errors.New("rate limit"), 0.3, "acct:9f3a")
     }
     return nil
 })
 
 // Без задачи — Consumer или Admin:
-consumer.BlockGroups(ctx, 0.3, "conn:163865653")
-admin.BlockGroups(ctx, "my-queue", 0.3, "conn:163865653")
+consumer.BlockGroups(ctx, 0.3, "acct:9f3a")
+admin.BlockGroups(ctx, "my-queue", 0.3, "acct:9f3a")
 ```
 
 #### Транспортный rate limit на Get (opt-in)
 
 Чтобы не делать Get → внешний Allow → Reject, лимиты вшиваются в Get (алгоритмы как в [rate-limiter](https://github.com/Rinsvent/rate-limiter)). Два слоя AND:
 
-- **Group** — квота коннектора/токена по **текущей** группе обхода Get; deny → блок этой группы на `RetryAfter`
-- **Partition** — квота чата/юзера; deny → `blocked` только этой партиции
+- **Group** — квота аккаунта/токена по **текущей** группе обхода Get; deny → блок этой группы на `RetryAfter`
+- **Partition** — квота ресурса (заказ, документ, mailbox); deny → `blocked` только этой партиции
 
 `Algorithm` (пусто = `token-bucket`): `token-bucket`, `leaky-bucket`, `fixed-window-counter`, `sliding-window-log`, `sliding-window-counter`.
 
@@ -202,7 +205,7 @@ _ = consumer.SetRateLimit(&redisqueue.RateLimitConfig{
 ```
 
 Любой слой можно опустить (`nil`). Без `SetRateLimit` — прежний Get без ключей `queue:{q}:rl:*`.  
-Адаптеры tg/vk — обычно разные очереди/consumer с разными Rates. Не путать с backpressure по тегу (F3) и с ручным `RejectWithDelay` в handler.
+Разные внешние API — обычно разные очереди/consumer с разными Rates. Не путать с backpressure по тегу (F3) и с ручным `RejectWithDelay` в handler.
 
 Группы: `queue:{name}:groups` (ZSET) — score `≤ now` = свободна, `> now` = блок; свободные = `ZRANGEBYSCORE -inf now`.  
 Партиции (ordered Reject): `queue:{name}:blocked` — member=partition → unlockAt.  

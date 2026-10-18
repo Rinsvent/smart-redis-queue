@@ -1,0 +1,92 @@
+site_name: Smart Redis Queue
+site_description: Очередь задач на Redis — порядок, rate limit, debounce и ops без отдельного брокера
+site_url: https://rinsvent.github.io/smart-redis-queue/
+repo_url: https://github.com/Rinsvent/smart-redis-queue
+repo_name: Rinsvent/smart-redis-queue
+edit_uri: edit/main/docs/
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: ru
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Тёмная тема
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Светлая тема
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+
+plugins:
+  - search:
+      lang:
+        - ru
+        - en
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Rinsvent/smart-redis-queue
+
+nav:
+  - Главная: index.md
+  - Зачем SRQ: why.md
+  - Быстрый старт: getting-started.md
+  - Фичи:
+      - Обзор: features/index.md
+      - Партиции и порядок: features/partitions.md
+      - Группы и rate limit: features/rate-limit.md
+      - Debounce и идемпотентность: features/debounce-idempotency.md
+      - Concurrency tags (race!): features/race.md
+      - Backpressure и теги: features/backpressure-tags.md
+      - Сжатие и метрики: features/compression-stats.md
+  - Сравнение очередей: comparison.md
+  - Масштабирование: scaling.md
+  - Гарантии доставки: delivery.md
+  - Приложения и сервер: apps.md
+  - Бенчмарки: benchmarks.md
+  - Roadmap: roadmap.md
+  - FAQ: faq.md
+  - Contributing: contributing.md
+  - Справка:
+      - API: reference/api.md
+      - Ключи Redis: reference/redis-keys.md
+      - Анализ (черновик): ANALYSIS.md

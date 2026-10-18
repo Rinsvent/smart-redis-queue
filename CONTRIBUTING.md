@@ -2,6 +2,8 @@
 
 Спасибо за интерес к проекту!
 
+Документация сайта: [rinsvent.github.io/smart-redis-queue](https://rinsvent.github.io/smart-redis-queue/) (исходники — `docs/`, `mkdocs.yml`).
+
 ## Как внести вклад
 
 1. **Fork** репозитория

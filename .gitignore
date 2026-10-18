@@ -1,4 +1,6 @@
 .idea
+site/
+.venv-docs/
 bin/
 *.exe
 coverage.out

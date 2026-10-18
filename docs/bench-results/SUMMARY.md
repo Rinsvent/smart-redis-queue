@@ -13,9 +13,9 @@ Host: Ryzen 7 2700, Redis localhost:6379, go1.26.2, `benchtime=1s`, `count=3`, m
 
 Δ HEAD vs a96f70e: Publish −4%, Batch100 +37%, Consume +7%, pf10 +4%.
 
-## Redis CPU / blocked connector (`*-cpu.txt`)
+## Redis CPU / blocked account (`*-cpu.txt`)
 
-Медиана `redis_cpu_us/op`. Сырьё: `0959fb3-cpu.txt`, `787467d-cpu.txt`, `244f70d-cpu.txt`.
+Медиана `redis_cpu_us/op` (в именах бенчей `connector` = аккаунт API). Сырьё: `0959fb3-cpu.txt`, `787467d-cpu.txt`, `244f70d-cpu.txt`.
 
 | Bench | 0959fb3 | 787467d | HEAD |
 |-------|--------:|--------:|-----:|
