@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -36,32 +39,37 @@ func demoCommands() []*cli.Command {
 		},
 		{
 			Name:  "publish",
-			Usage: "Публиковать заглушечные задачи (для живого UI / статистики)",
+			Usage: "Публиковать быстрее consumer’ов; потолок глубины — backpressure (~10k ± jitter)",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "queue", Aliases: []string{"q"}, Value: "demo-mail", Usage: "имя очереди"},
-				&cli.IntFlag{Name: "count", Aliases: []string{"n"}, Value: 20, Usage: "сколько задач (0 = бесконечно до Ctrl+C)"},
-				&cli.DurationFlag{Name: "interval", Value: 200 * time.Millisecond, Usage: "пауза между задачами в потоке"},
-				&cli.StringFlag{Name: "groups", Value: "smtp:1,smtp:2", Usage: "группы через запятую (ротация)"},
-				&cli.StringFlag{Name: "tags", Value: "campaign:live,batch:demo", Usage: "теги через запятую"},
-				&cli.StringFlag{Name: "partition", Value: "", Usage: "фиксированная партиция; пусто = !chat:{i%N} / plain:{i}"},
+				&cli.IntFlag{Name: "count", Aliases: []string{"n"}, Value: 0, Usage: "сколько задач (0 = бесконечно до Ctrl+C)"},
+				&cli.DurationFlag{Name: "interval", Value: 0, Usage: "пауза между батчами (0 = крутить без паузы)"},
+				&cli.StringFlag{Name: "groups", Value: "acct:0,acct:1,acct:2,acct:3,acct:4,acct:5,acct:6,acct:7", Usage: "группы/аккаунты через запятую"},
+				&cli.StringFlag{Name: "tags", Value: "all,demo,campaign:live", Usage: "теги (всегда +all; первый — ключ backpressure)"},
+				&cli.StringFlag{Name: "partition", Value: "", Usage: "фиксированная партиция; пусто = !{group}:res:{i}"},
 				&cli.BoolFlag{Name: "ordered", Value: true, Usage: "партиции с префиксом ! (если --partition пуст)"},
-				&cli.IntFlag{Name: "partitions", Value: 8, Usage: "число ротируемых партиций"},
+				&cli.IntFlag{Name: "partitions", Value: 2000, Usage: "число логических партиций (ротация res внутри групп)"},
 				&cli.IntFlag{Name: "priority", Value: 0, Usage: "priority задач"},
-				&cli.IntFlag{Name: "batch", Value: 1, Usage: "размер Publish batch"},
+				&cli.IntFlag{Name: "batch", Value: 100, Usage: "размер Publish batch"},
+				&cli.IntFlag{Name: "backpressure", Value: 10000, Usage: "лимит глубины по тегу (0 = выкл); к нему добавляется jitter"},
+				&cli.IntFlag{Name: "backpressure-jitter", Value: 500, Usage: "случайный ± к --backpressure на каждый Publish"},
+				&cli.DurationFlag{Name: "backpressure-wait", Value: 50 * time.Millisecond, Usage: "пауза при ErrBackpressure перед ретраем"},
 			},
 			Action: runPublish,
 		},
 		{
 			Name:  "consume",
-			Usage: "Consume с заглушкой handler + stats (график Get/Ack/Reject в UI)",
+			Usage: "Пул воркеров: sleep 20ms–2s (95% ≤100ms), BlockGroups при stub-429, stats для UI",
 			Flags: []cli.Flag{
 				&cli.StringFlag{Name: "queue", Aliases: []string{"q"}, Value: "demo-mail", Usage: "имя очереди"},
-				&cli.DurationFlag{Name: "delay", Value: 50 * time.Millisecond, Usage: "искусственная задержка handler"},
-				&cli.Float64Flag{Name: "fail-rate", Value: 0.05, Usage: "доля Reject (0..1)"},
+				&cli.IntFlag{Name: "workers", Aliases: []string{"w"}, Value: 8, Usage: "размер ConsumerPool"},
+				&cli.Float64Flag{Name: "fail-rate", Value: 0.02, Usage: "доля stub-429 → RejectWithDelay+BlockGroups (0..1)"},
+				&cli.DurationFlag{Name: "block-for", Value: 800 * time.Millisecond, Usage: "на сколько парковать группу при stub-429"},
+				&cli.IntFlag{Name: "group-rate", Value: 40, Usage: "Get rate limit на группу (token/s, 0 = выкл)"},
 				&cli.DurationFlag{Name: "stats", Value: 5 * time.Minute, Usage: "retention метрик (0 = выкл)"},
-				&cli.StringFlag{Name: "stats-tags", Value: "campaign:live,batch:demo", Usage: "теги для SCARD-сэмпла"},
-				&cli.IntFlag{Name: "prefetch", Value: 5, Usage: "prefetch"},
-				&cli.DurationFlag{Name: "poll", Value: 300 * time.Millisecond, Usage: "poll interval"},
+				&cli.StringFlag{Name: "stats-tags", Value: "all,demo,campaign:live", Usage: "теги для SCARD-сэмпла"},
+				&cli.IntFlag{Name: "prefetch", Value: 5, Usage: "prefetch на воркер"},
+				&cli.DurationFlag{Name: "poll", Value: 200 * time.Millisecond, Usage: "poll interval"},
 				&cli.DurationFlag{Name: "for", Value: 0, Usage: "сколько работать (0 = до Ctrl+C)"},
 			},
 			Action: runConsume,
@@ -100,6 +108,27 @@ func splitCSV(s string) []string {
 		if p != "" {
 			out = append(out, p)
 		}
+	}
+	return out
+}
+
+// ensureAllTag — тег all первым (удобно для CountByTag / backpressure / stats).
+func ensureAllTag(tags []string) []string {
+	out := make([]string, 0, len(tags)+1)
+	seen := map[string]struct{}{}
+	add := func(t string) {
+		if t == "" {
+			return
+		}
+		if _, ok := seen[t]; ok {
+			return
+		}
+		seen[t] = struct{}{}
+		out = append(out, t)
+	}
+	add("all")
+	for _, t := range tags {
+		add(t)
 	}
 	return out
 }
@@ -146,28 +175,25 @@ func runSeed(ctx context.Context, c *cli.Command) error {
 						Payload:   []byte(fmt.Sprintf(`{"db":%d,"kind":"mail","i":%d,"text":"hello-mail"}`, db, i)),
 						Scheduled: now,
 						Groups:    g,
-						Tags:      []string{"campaign:spring", "channel:email", fmt.Sprintf("batch:%d", i/4)},
+						Tags:      []string{"all", "campaign:spring", "channel:email", fmt.Sprintf("batch:%d", i/4)},
 					})
 				}
-				// unordered + delayed
 				tasks = append(tasks,
 					&redisqueue.Task{
 						ID: fmt.Sprintf("mail-plain-db%d", db), Partition: "inbox",
 						Payload: []byte(`{"kind":"plain"}`), Scheduled: now, Groups: []string{"smtp:1"},
-						Tags: []string{"campaign:spring", "plain"},
+						Tags: []string{"all", "campaign:spring", "plain"},
 					},
 					&redisqueue.Task{
 						ID: fmt.Sprintf("mail-later-db%d", db), Partition: "!user:99",
 						Payload: []byte(`{"kind":"delayed"}`), Scheduled: time.Now().Add(30 * time.Second),
-						Groups: []string{"smtp:2"}, Tags: []string{"campaign:spring", "delayed"},
+						Groups: []string{"smtp:2"}, Tags: []string{"all", "campaign:spring", "delayed"},
 					},
 				)
 				if err := producer.Publish(ctx, tasks...); err != nil {
 					return err
 				}
-				// заблокировать группу на 20s — видно в UI Groups
 				_ = admin.BlockGroups(ctx, "demo-mail", 20, "smtp:2")
-				// взять 2 задачи in-flight без Ack
 				cons := redisqueue.NewConsumer(rdb, "demo-mail", fmt.Sprintf("seed-hold-db%d", db))
 				defer cons.Close()
 				cons.SetPrefetchCount(2)
@@ -195,14 +221,14 @@ func runSeed(ctx context.Context, c *cli.Command) error {
 						Payload:   []byte(fmt.Sprintf(`{"db":%d,"adapter":"tg","i":%d}`, db, i)),
 						Scheduled: now,
 						Groups:    []string{token},
-						Tags:      []string{"broadcast", "adapter:tg", fmt.Sprintf("prio:%d", i%2)},
+						Tags:      []string{"all", "broadcast", "adapter:tg", fmt.Sprintf("prio:%d", i%2)},
 					})
 				}
 				for i := 0; i < 4; i++ {
 					tasks = append(tasks, &redisqueue.Task{
 						ID: fmt.Sprintf("tg-fan-db%d-%d", db, i), Partition: "bulk",
 						Payload: []byte(`{"kind":"bulk"}`), Scheduled: now,
-						Groups: []string{"token:aaa"}, Tags: []string{"broadcast", "bulk"},
+						Groups: []string{"token:aaa"}, Tags: []string{"all", "broadcast", "bulk"},
 					})
 				}
 				if err := producer.Publish(ctx, tasks...); err != nil {
@@ -217,13 +243,13 @@ func runSeed(ctx context.Context, c *cli.Command) error {
 			build: func(db int, producer *redisqueue.Producer, admin *redisqueue.Admin, rdb *redis.Client) error {
 				tasks := []*redisqueue.Task{
 					{ID: fmt.Sprintf("mix-a-db%d", db), Partition: "!shop:1", Payload: []byte(`{"x":1}`), Scheduled: now,
-						Groups: []string{"conn:east"}, Tags: []string{"region:east", "mix"}},
+						Groups: []string{"conn:east"}, Tags: []string{"all", "region:east", "mix"}},
 					{ID: fmt.Sprintf("mix-b-db%d", db), Partition: "!shop:2", Payload: []byte(`{"x":2}`), Scheduled: now,
-						Groups: []string{"conn:west"}, Tags: []string{"region:west", "mix"}},
+						Groups: []string{"conn:west"}, Tags: []string{"all", "region:west", "mix"}},
 					{ID: fmt.Sprintf("mix-c-db%d", db), Partition: "jobs", Payload: []byte(`{"x":3}`), Scheduled: now,
-						Groups: []string{"conn:east", "conn:west"}, Tags: []string{"region:multi", "mix", "race!file:logo"}},
+						Groups: []string{"conn:east", "conn:west"}, Tags: []string{"all", "region:multi", "mix", "race!file:logo"}},
 					{ID: fmt.Sprintf("mix-d-db%d", db), Partition: "!shop:1", Priority: 2, Payload: []byte(`{"x":4,"prio":2}`), Scheduled: now,
-						Groups: []string{"conn:east"}, Tags: []string{"region:east", "mix", "priority"}},
+						Groups: []string{"conn:east"}, Tags: []string{"all", "region:east", "mix", "priority"}},
 				}
 				if err := producer.Publish(ctx, tasks...); err != nil {
 					return err
@@ -235,7 +261,7 @@ func runSeed(ctx context.Context, c *cli.Command) error {
 		},
 	}
 
-	rootDB := c.Root().Int("db") // ignored; seed uses --dbs
+	rootDB := c.Root().Int("db")
 	_ = rootDB
 
 	for _, db := range dbs {
@@ -263,6 +289,48 @@ func runSeed(ctx context.Context, c *cli.Command) error {
 	return nil
 }
 
+func demoPartition(idx, nParts int, groups []string, fixedPart string, ordered bool) (part string, g []string) {
+	if fixedPart != "" {
+		g = groups
+		if len(groups) > 0 {
+			g = []string{groups[idx%len(groups)]}
+		}
+		return fixedPart, g
+	}
+	if len(groups) == 0 {
+		if ordered {
+			return fmt.Sprintf("!res:%d", idx%nParts), nil
+		}
+		return fmt.Sprintf("res:%d", idx%nParts), nil
+	}
+	gName := groups[idx%len(groups)]
+	perGroup := nParts / len(groups)
+	if perGroup < 1 {
+		perGroup = 1
+	}
+	res := (idx / len(groups)) % perGroup
+	if ordered {
+		part = fmt.Sprintf("!%s:res:%d", gName, res)
+	} else {
+		part = fmt.Sprintf("%s:res:%d", gName, res)
+	}
+	return part, []string{gName}
+}
+
+func backpressureLimit(base, jitter int) int64 {
+	if base <= 0 {
+		return 0
+	}
+	lim := base
+	if jitter > 0 {
+		lim += rand.Intn(2*jitter+1) - jitter
+	}
+	if lim < 1 {
+		lim = 1
+	}
+	return int64(lim)
+}
+
 func runPublish(ctx context.Context, c *cli.Command) error {
 	rdb := redisClient(c)
 	defer rdb.Close()
@@ -271,7 +339,7 @@ func runPublish(ctx context.Context, c *cli.Command) error {
 	count := c.Int("count")
 	interval := c.Duration("interval")
 	groups := splitCSV(c.String("groups"))
-	tags := splitCSV(c.String("tags"))
+	tags := ensureAllTag(splitCSV(c.String("tags")))
 	fixedPart := c.String("partition")
 	ordered := c.Bool("ordered")
 	nParts := c.Int("partitions")
@@ -283,19 +351,30 @@ func runPublish(ctx context.Context, c *cli.Command) error {
 	if batch < 1 {
 		batch = 1
 	}
+	bpBase := c.Int("backpressure")
+	bpJitter := c.Int("backpressure-jitter")
+	bpWait := c.Duration("backpressure-wait")
+	bpTag := "all"
+	if bpBase > 0 {
+		bpTag = tags[0] // ensureAllTag → always "all" first
+	}
 
 	producer := redisqueue.NewProducer(rdb, queue)
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	published := 0
-	fmt.Printf("Publish → %s db=%d (count=%d batch=%d interval=%s). Ctrl+C to stop.\n",
-		queue, c.Root().Int("db"), count, batch, interval)
+	bpHits := 0
+	started := time.Now()
+	lastReport := started
+	lastPublished := 0
+	fmt.Printf("Publish → %s db=%d parts≈%d groups=%d batch=%d interval=%s bp=%d±%d tag=%q. Ctrl+C to stop.\n",
+		queue, c.Root().Int("db"), nParts, len(groups), batch, interval, bpBase, bpJitter, bpTag)
 
 	for count == 0 || published < count {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("Stopped. published=%d\n", published)
+			fmt.Printf("Stopped. published=%d backpressure_hits=%d\n", published, bpHits)
 			return nil
 		default:
 		}
@@ -308,18 +387,7 @@ func runPublish(ctx context.Context, c *cli.Command) error {
 		now := time.Now().Add(-time.Second)
 		for i := 0; i < n; i++ {
 			idx := published + i
-			part := fixedPart
-			if part == "" {
-				if ordered {
-					part = fmt.Sprintf("!chat:%d", idx%nParts)
-				} else {
-					part = fmt.Sprintf("plain:%d", idx%nParts)
-				}
-			}
-			g := groups
-			if len(groups) > 0 {
-				g = []string{groups[idx%len(groups)]}
-			}
+			part, g := demoPartition(idx, nParts, groups, fixedPart, ordered)
 			tasks = append(tasks, &redisqueue.Task{
 				ID:        fmt.Sprintf("live-%d-%d", time.Now().UnixNano(), idx),
 				Partition: part,
@@ -330,24 +398,64 @@ func runPublish(ctx context.Context, c *cli.Command) error {
 				Tags:      tags,
 			})
 		}
-		if err := producer.Publish(ctx, tasks...); err != nil {
+
+		var opts []redisqueue.PublishOption
+		if lim := backpressureLimit(bpBase, bpJitter); lim > 0 && bpTag != "" {
+			opts = append(opts, redisqueue.WithTagBackpressure(bpTag, lim))
+		}
+
+		var err error
+		if len(opts) > 0 {
+			err = producer.PublishWith(ctx, opts, tasks...)
+		} else {
+			err = producer.Publish(ctx, tasks...)
+		}
+		if err != nil {
+			var bp *redisqueue.ErrBackpressure
+			if errors.As(err, &bp) {
+				bpHits++
+				if bpHits == 1 || bpHits%50 == 0 {
+					fmt.Printf("  backpressure tag=%s depth=%d limit=%d (hits=%d published=%d) — ждём consumer\n",
+						bp.Tag, bp.Count, bp.Limit, bpHits, published)
+				}
+				select {
+				case <-ctx.Done():
+					fmt.Printf("Stopped. published=%d backpressure_hits=%d\n", published, bpHits)
+					return nil
+				case <-time.After(bpWait):
+				}
+				continue
+			}
 			return err
 		}
+
 		published += len(tasks)
-		if published%50 == 0 || (count > 0 && published >= count) {
-			fmt.Printf("  published=%d\n", published)
+		if time.Since(lastReport) >= time.Second {
+			delta := published - lastPublished
+			fmt.Printf("  published=%d (+%d/s) bp_hits=%d elapsed=%s\n",
+				published, delta, bpHits, time.Since(started).Truncate(time.Second))
+			lastReport = time.Now()
+			lastPublished = published
 		}
 		if interval > 0 {
 			select {
 			case <-ctx.Done():
-				fmt.Printf("Stopped. published=%d\n", published)
+				fmt.Printf("Stopped. published=%d backpressure_hits=%d\n", published, bpHits)
 				return nil
 			case <-time.After(interval):
 			}
 		}
 	}
-	fmt.Printf("Done. published=%d\n", published)
+	fmt.Printf("Done. published=%d backpressure_hits=%d\n", published, bpHits)
 	return nil
+}
+
+// demoHandlerDelay: 95% — 20..100ms; 5% — 100ms..2s.
+func demoHandlerDelay() time.Duration {
+	if rand.Float64() < 0.95 {
+		return time.Duration(20+rand.Intn(81)) * time.Millisecond
+	}
+	return time.Duration(100+rand.Intn(1901)) * time.Millisecond
 }
 
 func runConsume(ctx context.Context, c *cli.Command) error {
@@ -355,10 +463,15 @@ func runConsume(ctx context.Context, c *cli.Command) error {
 	defer rdb.Close()
 
 	queue := c.String("queue")
-	delay := c.Duration("delay")
+	workers := c.Int("workers")
+	if workers < 1 {
+		workers = 1
+	}
 	failRate := c.Float64("fail-rate")
+	blockFor := c.Duration("block-for")
+	groupRate := c.Int("group-rate")
 	statsRet := c.Duration("stats")
-	statsTags := splitCSV(c.String("stats-tags"))
+	statsTags := ensureAllTag(splitCSV(c.String("stats-tags")))
 	prefetch := c.Int("prefetch")
 	poll := c.Duration("poll")
 	forDur := c.Duration("for")
@@ -371,43 +484,54 @@ func runConsume(ctx context.Context, c *cli.Command) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	consumer := redisqueue.NewConsumer(rdb, queue, "")
-	defer consumer.Close()
-	consumer.SetPrefetchCount(prefetch)
-	consumer.SetPollInterval(poll)
+	pool := redisqueue.NewConsumerPool(rdb, queue)
+	pool.SetCount(workers)
+	pool.SetPrefetchCount(prefetch)
+	pool.SetPollInterval(poll)
 	if statsRet > 0 {
-		consumer.SetStatsRetention(statsRet)
+		pool.SetStatsRetention(statsRet)
 		if len(statsTags) > 0 {
-			consumer.SetTagsStats(statsTags...)
+			pool.SetTagsStats(statsTags...)
+		}
+	}
+	if groupRate > 0 {
+		if err := pool.SetRateLimit(&redisqueue.RateLimitConfig{
+			Algorithm: redisqueue.RateLimitTokenBucket,
+			Group: &redisqueue.RateLimitLayer{
+				Rates: []redisqueue.Rate{{Duration: time.Second, Value: groupRate}},
+			},
+		}); err != nil {
+			return fmt.Errorf("SetRateLimit: %w", err)
 		}
 	}
 
-	var acked, rejected int
-	fmt.Printf("Consume ← %s db=%d delay=%s fail-rate=%.2f stats=%s. Ctrl+C to stop.\n",
-		queue, c.Root().Int("db"), delay, failRate, statsRet)
+	var acked, rejected atomic.Int64
+	fmt.Printf("Consume ← %s db=%d workers=%d fail-rate=%.2f group-rate=%d/s block-for=%s stats=%s. Ctrl+C to stop.\n",
+		queue, c.Root().Int("db"), workers, failRate, groupRate, blockFor, statsRet)
 
-	n := 0
-	err := consumer.Consume(ctx, func(task *redisqueue.Task) error {
-		if delay > 0 {
-			time.Sleep(delay)
-		}
-		n++
-		if failRate > 0 && float64(n%100) < failRate*100 {
-			rejected++
-			if rejected%10 == 1 {
-				fmt.Printf("  reject %s (acked=%d rejected=%d)\n", task.ID, acked, rejected)
+	pool.Consume(ctx, func(task *redisqueue.Task) error {
+		time.Sleep(demoHandlerDelay())
+		if failRate > 0 && rand.Float64() < failRate {
+			rejected.Add(1)
+			n := rejected.Load()
+			delaySec := blockFor.Seconds()
+			if delaySec < 0.05 {
+				delaySec = 0.05
 			}
-			return redisqueue.NewRejectWithDelay(fmt.Errorf("stub fail"), 0.2)
+			groups := task.Groups
+			if n%20 == 1 {
+				fmt.Printf("  stub-429 %s groups=%v (acked=%d rejected=%d) → BlockGroups\n",
+					task.ID, groups, acked.Load(), n)
+			}
+			return redisqueue.NewRejectWithDelay(fmt.Errorf("stub upstream 429"), delaySec, groups...)
 		}
-		acked++
-		if acked%20 == 0 {
-			fmt.Printf("  ack progress acked=%d rejected=%d last=%s\n", acked, rejected, task.ID)
+		acked.Add(1)
+		if a := acked.Load(); a%100 == 0 {
+			fmt.Printf("  ack progress acked=%d rejected=%d last=%s\n", a, rejected.Load(), task.ID)
 		}
 		return nil
 	})
-	if err != nil && ctx.Err() == nil {
-		return err
-	}
-	fmt.Printf("Stopped. acked=%d rejected=%d\n", acked, rejected)
+
+	fmt.Printf("Stopped. acked=%d rejected=%d\n", acked.Load(), rejected.Load())
 	return nil
 }

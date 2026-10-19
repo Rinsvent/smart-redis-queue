@@ -54,12 +54,14 @@ import RefreshIcon from '@mui/icons-material/Refresh'
 import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined'
 import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined'
 import { api } from './api'
-import RatesChart, { buildChartSeries } from './RatesChart'
+import RatesChart, { buildChartSeries, QUEUE_SERIES, REDIS_SERIES } from './RatesChart'
 
 const WATCH_KEY = 'srq-watch-tags'
 const CHART_OPEN_KEY = 'srq-chart-open'
 const CHART_RANGE_KEY = 'srq-chart-range'
+const CHART_DASH_KEY = 'srq-chart-dash'
 const WATCH_POLL_MS = 5000
+const REDIS_POLL_MS = 1000
 
 const CHART_RANGES = [
   { id: '1m', label: '1m', sec: 60 },
@@ -68,6 +70,54 @@ const CHART_RANGES = [
   { id: '1h', label: '1h', sec: 3600 },
   { id: 'all', label: 'all', sec: 0 }, // 0 → весь stats:index
 ]
+
+const CHART_DASHBOARDS = [
+  { id: 'queue', label: 'Queue rates' },
+  { id: 'redis', label: 'Redis host' },
+]
+
+/** Build Redis host series from Go points (ops/cpu/mem/slowlog already computed). */
+function buildRedisChartSeries(samples, fromSec, toSec) {
+  const sorted = [...(samples || [])]
+    .map((s) => ({
+      sec: Number(s.sec ?? s.Sec) || 0,
+      ops: Number(s.ops ?? s.Ops) || 0,
+      cpuUsPerSec: Number(s.cpuUsPerSec ?? s.CpuUsPerSec) || 0,
+      memMB: Number(s.memMB ?? s.MemMB) || 0,
+      slowlogLen: Number(s.slowlogLen ?? s.SlowlogLen) || 0,
+      slowlogMaxUs: Number(s.slowlogMaxUs ?? s.SlowlogMaxUs) || 0,
+    }))
+    .filter((s) => s.sec > 0)
+    .sort((a, b) => a.sec - b.sec)
+
+  if (sorted.length === 0) return []
+
+  const bySec = new Map(sorted.map((s) => [s.sec, s]))
+  // Не раздуваем нулями «пустое» окно до первого сэмпла — иначе график выглядит мёртвым.
+  const from = Math.max(Math.floor(fromSec), sorted[0].sec)
+  const to = Math.max(Math.floor(toSec), from + 1)
+  const out = []
+  let last = {
+    ops: 0,
+    cpuUsPerSec: 0,
+    memMB: 0,
+    slowlogLen: 0,
+    slowlogMaxUs: 0,
+  }
+  for (let sec = from; sec <= to; sec++) {
+    if (bySec.has(sec)) last = bySec.get(sec)
+    out.push({
+      sec,
+      ops: last.ops,
+      cpuUsPerSec: last.cpuUsPerSec,
+      memMB: last.memMB,
+      slowlogLen: last.slowlogLen,
+      slowlogMaxUs: last.slowlogMaxUs,
+      tags: {},
+    })
+  }
+  return out
+}
 
 function loadWatchMap() {
   try {
@@ -205,8 +255,13 @@ export default function App() {
     const v = localStorage.getItem(CHART_RANGE_KEY)
     return CHART_RANGES.some((r) => r.id === v) ? v : '5m'
   })
+  const [chartDash, setChartDash] = useState(() => {
+    const v = localStorage.getItem(CHART_DASH_KEY)
+    return CHART_DASHBOARDS.some((d) => d.id === v) ? v : 'queue'
+  })
   const [redisStats, setRedisStats] = useState([])
   const [statsBounds, setStatsBounds] = useState({ from: 0, to: 0 })
+  const [hostMetrics, setHostMetrics] = useState([]) // Redis INFO/SLOWLOG samples
   const [watchMap, setWatchMap] = useState(loadWatchMap)
   const [watchSeries, setWatchSeries] = useState({}) // tag → [{sec,n}]
   const [loading, setLoading] = useState(false)
@@ -470,8 +525,16 @@ export default function App() {
   }, [chartRange])
 
   useEffect(() => {
+    localStorage.setItem(CHART_DASH_KEY, chartDash)
+  }, [chartDash])
+
+  useEffect(() => {
     localStorage.setItem(WATCH_KEY, JSON.stringify(watchMap))
   }, [watchMap])
+
+  useEffect(() => {
+    setHostMetrics([])
+  }, [activeId])
 
   const watchedTags = useMemo(() => {
     if (!selectedQueue) return []
@@ -485,27 +548,43 @@ export default function App() {
 
   const chartSeries = useMemo(() => {
     const now = Math.floor(Date.now() / 1000)
-    const watches = watchedTags.map((tag) => ({
-      tag,
-      points: watchSeries[tag] || [],
-    }))
     let from
     let to = now
     if (chartWindowSec <= 0) {
-      const bFrom = Number(statsBounds.from ?? statsBounds.From) || 0
-      const bTo = Number(statsBounds.to ?? statsBounds.To) || 0
-      if (bFrom > 0) {
-        from = bFrom
-        to = Math.max(bTo, now)
+      if (chartDash === 'redis') {
+        from = now - 3600
       } else {
-        from = now - 300
+        const bFrom = Number(statsBounds.from ?? statsBounds.From) || 0
+        const bTo = Number(statsBounds.to ?? statsBounds.To) || 0
+        if (bFrom > 0) {
+          from = bFrom
+          to = Math.max(bTo, now)
+        } else {
+          from = now - 300
+        }
       }
     } else {
       from = now - chartWindowSec
     }
     if (to - from < 2) from = to - 2
+
+    if (chartDash === 'redis') {
+      return buildRedisChartSeries(hostMetrics, from, to)
+    }
+    const watches = watchedTags.map((tag) => ({
+      tag,
+      points: watchSeries[tag] || [],
+    }))
     return buildChartSeries(redisStats, from, to, watches)
-  }, [redisStats, watchSeries, watchedTags, chartWindowSec, statsBounds])
+  }, [
+    chartDash,
+    hostMetrics,
+    redisStats,
+    watchSeries,
+    watchedTags,
+    chartWindowSec,
+    statsBounds,
+  ])
 
   const toggleWatchTag = (tag) => {
     const k = watchKey(activeId, selectedQueue, activeDb)
@@ -573,8 +652,20 @@ export default function App() {
     })
   }, [selectedQueue, activeDb, watchedTags, chartWindowSec])
 
+  const loadHostMetrics = useCallback(async () => {
+    if (!activeId) return
+    const rangeSec = chartWindowSec > 0 ? chartWindowSec : 3600
+    try {
+      const pts = await api.listRedisMetrics(activeDb, rangeSec)
+      setHostMetrics(Array.isArray(pts) ? pts : [])
+    } catch (e) {
+      setHostMetrics([])
+      console.warn('ListRedisMetrics failed', e)
+    }
+  }, [activeId, activeDb, chartWindowSec])
+
   useEffect(() => {
-    if (!selectedQueue) return undefined
+    if (!selectedQueue || chartDash !== 'queue') return undefined
     loadRedisStats()
     pollWatchedTags()
     const id = setInterval(() => {
@@ -582,7 +673,14 @@ export default function App() {
       pollWatchedTags()
     }, WATCH_POLL_MS)
     return () => clearInterval(id)
-  }, [selectedQueue, activeDb, loadRedisStats, pollWatchedTags])
+  }, [selectedQueue, activeDb, chartDash, loadRedisStats, pollWatchedTags])
+
+  useEffect(() => {
+    if (!activeId || !chartOpen || chartDash !== 'redis') return undefined
+    loadHostMetrics()
+    const id = setInterval(loadHostMetrics, REDIS_POLL_MS)
+    return () => clearInterval(id)
+  }, [activeId, activeDb, chartOpen, chartDash, loadHostMetrics])
 
   useEffect(() => {
     if (filterTimer.current) clearTimeout(filterTimer.current)
@@ -1158,11 +1256,27 @@ export default function App() {
                           justifyContent="space-between"
                           spacing={1}
                           sx={{ mb: 0.75 }}
+                          flexWrap="wrap"
+                          useFlexGap
                         >
-                          <Typography variant="caption" color="text.secondary">
-                            Stats window
-                          </Typography>
-                          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+                          <FormControl size="small" sx={{ minWidth: 140 }}>
+                            <Select
+                              value={chartDash}
+                              onChange={(e) => setChartDash(e.target.value)}
+                              displayEmpty
+                              sx={{ fontSize: 13, height: 32 }}
+                            >
+                              {CHART_DASHBOARDS.map((d) => (
+                                <MenuItem key={d.id} value={d.id}>
+                                  {d.label}
+                                </MenuItem>
+                              ))}
+                            </Select>
+                          </FormControl>
+                          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap alignItems="center">
+                            <Typography variant="caption" color="text.secondary" sx={{ mr: 0.5 }}>
+                              Window
+                            </Typography>
                             {CHART_RANGES.map((r) => {
                               const active = chartRange === r.id
                               return (
@@ -1188,7 +1302,19 @@ export default function App() {
                             })}
                           </Stack>
                         </Stack>
-                        <RatesChart series={chartSeries} height={160} />
+                        <RatesChart
+                          series={chartSeries}
+                          height={160}
+                          lines={chartDash === 'redis' ? REDIS_SERIES : QUEUE_SERIES}
+                          showTags={chartDash === 'queue'}
+                          emptyHint={
+                            chartDash === 'redis'
+                              ? hostMetrics.length === 0
+                                ? 'No Redis metrics yet (rebuild desktop / check connection)'
+                                : 'Collecting Redis INFO / SLOWLOG…'
+                              : undefined
+                          }
+                        />
                       </Box>
                     )}
 

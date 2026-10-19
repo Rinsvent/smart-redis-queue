@@ -25,6 +25,8 @@ export const api = {
   countTags: (name, db) => call('CountTags', name, db),
   listQueueStats: (name, db, lastSec) => call('ListQueueStats', name, db, lastSec ?? 3600),
   queueStatsBounds: (name, db) => call('QueueStatsBounds', name, db),
+  sampleRedisMetrics: (db) => call('SampleRedisMetrics', db),
+  listRedisMetrics: (db, lastSec) => call('ListRedisMetrics', db, lastSec ?? 300),
   blockPartition: (queue, partition, waitTimeSec, db) =>
     call('BlockPartition', queue, partition, waitTimeSec, db),
   unblockPartition: (queue, partition, db) => call('UnblockPartition', queue, partition, db),

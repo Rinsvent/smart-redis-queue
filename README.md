@@ -463,9 +463,12 @@ make manager
 # Демо для Desktop UI (DB 0,1,2)
 ./bin/manager seed --dbs 0,1,2
 
-# Живой publish / consume (разные терминалы → UI + график stats)
-./bin/manager --db 0 publish -q demo-mail -n 0 --interval 200ms
-./bin/manager --db 0 consume -q demo-mail --stats 5m --stats-tags campaign:live,batch:demo
+# Живой publish / consume (нагрузка «много партиций», правильный BlockGroups)
+# Publish быстрее воркеров; глубина режется backpressure ~10k±jitter.
+# Consume: 8 воркеров, sleep 20ms–2s (95% ≤100ms), stub-429 → BlockGroups.
+./bin/manager --db 0 publish -q demo-mail
+./bin/manager --db 0 consume -q demo-mail
+# В UI: график → Queue rates / Redis host (INFO ops, CPU, SLOWLOG)
 ```
 
 Глобальные флаги: `-a` (addr), `-P` (password), `--db`. Переменные: `REDIS_ADDR`, `REDIS_PASSWORD`.

@@ -15,7 +15,7 @@ make manager
 | `purge` | Очистить очередь или партицию |
 | `retry` | Вернуть in-progress после падения consumer |
 | `seed` | Демо-данные на нескольких DB |
-| `publish` / `consume` | Поток для живого UI и графика stats |
+| `publish` / `consume` | Нагрузка: ~2k партиций, 8 воркеров, backpressure ~10k, BlockGroups; график Queue / Redis |
 | `desktop` | GUI (удобнее собирать через `make desktop`) |
 | `server` | Web UI (сборка `make server`) |
 
@@ -25,7 +25,13 @@ make manager
 ./bin/manager purge -q my-queue
 ./bin/manager retry -q my-queue
 ./bin/manager seed --dbs 0,1,2
+
+# Живой сценарий (два терминала): publish быстрее consumer’ов, потолок — backpressure
+./bin/manager --db 0 publish -q demo-mail
+./bin/manager --db 0 consume -q demo-mail
 ```
+
+По умолчанию: ~2000 партиций / 8 групп `acct:*`, backpressure ~10000±500; consume — 8 воркеров, sleep 20ms–2s (95% ≤100ms), stub-429 → `BlockGroups`, Get rate limit на группу. В Desktop UI: дашборд **Queue rates** или **Redis host** (ops/s, CPU, SLOWLOG).
 
 Флаги: `-a` addr, `-P` password, `--db`. Env: `REDIS_ADDR`, `REDIS_PASSWORD`.
 

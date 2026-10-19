@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -141,6 +142,13 @@ type App struct {
 
 	prevMu sync.Mutex
 	prev   map[string]sample // key: name@db
+
+	// Кольцо сэмплов Redis INFO/SLOWLOG для графика «Redis host».
+	redisMu      sync.Mutex
+	redisSamples []RedisMetricPoint
+	redisLastCPU float64
+	redisLastAt  time.Time
+	redisHasLast bool
 }
 
 type sample struct {
@@ -148,6 +156,8 @@ type sample struct {
 	inProgress int64
 	at         time.Time
 }
+
+const redisMetricsKeep = 3600
 
 func NewApp(store *Store) *App {
 	return &App{
@@ -291,8 +301,18 @@ func (a *App) connect(c Connection) error {
 	return nil
 }
 
+func (a *App) clearRedisMetrics() {
+	a.redisMu.Lock()
+	a.redisSamples = nil
+	a.redisLastCPU = 0
+	a.redisLastAt = time.Time{}
+	a.redisHasLast = false
+	a.redisMu.Unlock()
+}
+
 func (a *App) disconnect() {
 	a.stopCatalogLoop()
+	a.clearRedisMetrics()
 
 	a.mu.Lock()
 	for _, c := range a.clients {
@@ -731,6 +751,120 @@ func (a *App) QueueStatsBounds(name string, db int) (StatsBoundsView, error) {
 		return StatsBoundsView{}, err
 	}
 	return StatsBoundsView{From: from, To: to}, nil
+}
+
+// RedisMetricPoint — точка для графика Redis host (уже с дельтами CPU).
+type RedisMetricPoint struct {
+	Sec          int64   `json:"sec"`
+	Ops          int64   `json:"ops"`
+	CpuUsPerSec  float64 `json:"cpuUsPerSec"`
+	MemMB        float64 `json:"memMB"`
+	SlowlogLen   int64   `json:"slowlogLen"`
+	SlowlogMaxUs int64   `json:"slowlogMaxUs"`
+}
+
+// SampleRedisMetrics снимает INFO+SLOWLOG, кладёт в кольцо и возвращает последнюю точку.
+func (a *App) SampleRedisMetrics(db int) (RedisMetricPoint, error) {
+	rdb, err := a.clientForDB(db)
+	if err != nil {
+		return RedisMetricPoint{}, err
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 3*time.Second)
+	defer cancel()
+
+	now := time.Now()
+	// Полный INFO: несколько секций в одном вызове на Redis 6 могут ломать команду.
+	info, err := rdb.Info(ctx).Result()
+	if err != nil {
+		return RedisMetricPoint{}, err
+	}
+
+	var ops, usedMem int64
+	var usedCPU float64
+	for _, line := range strings.Split(info, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		k, v, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "instantaneous_ops_per_sec":
+			ops, _ = strconv.ParseInt(v, 10, 64)
+		case "used_cpu_sys", "used_cpu_user":
+			if f, e := strconv.ParseFloat(v, 64); e == nil {
+				usedCPU += f
+			}
+		case "used_memory":
+			usedMem, _ = strconv.ParseInt(v, 10, 64)
+		}
+	}
+
+	var slowLen, slowMax int64
+	if n, err := rdb.SlowLogLen(ctx).Result(); err == nil {
+		slowLen = n
+	}
+	if entries, err := rdb.SlowLogGet(ctx, 32).Result(); err == nil {
+		for _, e := range entries {
+			us := e.Duration.Microseconds()
+			if us > slowMax {
+				slowMax = us
+			}
+		}
+	}
+
+	pt := RedisMetricPoint{
+		Sec:          now.Unix(),
+		Ops:          ops,
+		MemMB:        float64(usedMem) / (1024 * 1024),
+		SlowlogLen:   slowLen,
+		SlowlogMaxUs: slowMax,
+	}
+
+	a.redisMu.Lock()
+	defer a.redisMu.Unlock()
+	if a.redisHasLast && now.After(a.redisLastAt) {
+		dt := now.Sub(a.redisLastAt).Seconds()
+		if dt > 0 {
+			dCPU := usedCPU - a.redisLastCPU
+			if dCPU < 0 {
+				dCPU = 0
+			}
+			pt.CpuUsPerSec = (dCPU / dt) * 1e6
+		}
+	}
+	a.redisLastCPU = usedCPU
+	a.redisLastAt = now
+	a.redisHasLast = true
+
+	a.redisSamples = append(a.redisSamples, pt)
+	if len(a.redisSamples) > redisMetricsKeep {
+		a.redisSamples = append([]RedisMetricPoint(nil), a.redisSamples[len(a.redisSamples)-redisMetricsKeep:]...)
+	}
+	return pt, nil
+}
+
+// ListRedisMetrics — точки за lastSec (0 = всё кольцо, max 1h). Перед отдачей делает Sample.
+func (a *App) ListRedisMetrics(db int, lastSec int) ([]RedisMetricPoint, error) {
+	if _, err := a.SampleRedisMetrics(db); err != nil {
+		return nil, err
+	}
+	if lastSec <= 0 || lastSec > redisMetricsKeep {
+		lastSec = redisMetricsKeep
+	}
+	cutoff := time.Now().Unix() - int64(lastSec)
+
+	a.redisMu.Lock()
+	defer a.redisMu.Unlock()
+	out := make([]RedisMetricPoint, 0, len(a.redisSamples))
+	for _, p := range a.redisSamples {
+		if p.Sec >= cutoff {
+			out = append(out, p)
+		}
+	}
+	return out, nil
 }
 
 // BlockPartition — rate-limit block на waitTimeSec секунд.

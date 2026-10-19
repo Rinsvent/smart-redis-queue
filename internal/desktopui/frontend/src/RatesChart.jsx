@@ -1,10 +1,20 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
-const SERIES = [
+export const QUEUE_SERIES = [
   { key: 'get', label: 'get', color: '#1F6AA5' },
   { key: 'ack', label: 'ack', color: '#2E7D32' },
   { key: 'reject', label: 'reject', color: '#C62828' },
 ]
+
+export const REDIS_SERIES = [
+  { key: 'ops', label: 'ops/s', color: '#1F6AA5' },
+  { key: 'cpuUsPerSec', label: 'cpu µs/s', color: '#EF6C00' },
+  { key: 'slowlogLen', label: 'slowlog len', color: '#C62828' },
+  { key: 'slowlogMaxUs', label: 'slow max µs', color: '#6A1B9A' },
+  { key: 'memMB', label: 'mem MB', color: '#00838F' },
+]
+
+const SERIES = QUEUE_SERIES
 
 const TAG_COLORS = ['#6A1B9A', '#00838F', '#EF6C00', '#4527A0', '#00695C', '#AD1457']
 
@@ -78,10 +88,14 @@ export function buildChartSeries(points, fromSec, toSec, watchSeries) {
   return out
 }
 
-export default function RatesChart({ series, height = 160 }) {
+export default function RatesChart({ series, height = 160, lines = QUEUE_SERIES, showTags = true, emptyHint }) {
   const wrapRef = useRef(null)
   const [width, setWidth] = useState(0)
   const [selected, setSelected] = useState(() => new Set())
+
+  useEffect(() => {
+    setSelected(new Set())
+  }, [lines])
 
   useEffect(() => {
     const el = wrapRef.current
@@ -97,10 +111,11 @@ export default function RatesChart({ series, height = 160 }) {
 
   const h = height
   // l=28 — подписи оси; линия стартует ровно на оси (x=pad.l)
-  const pad = { t: 8, r: 4, b: 16, l: 28 }
+  const pad = { t: 8, r: 4, b: 16, l: 36 }
   const n = series.length
 
   const tagKeys = useMemo(() => {
+    if (!showTags) return []
     const keys = []
     for (const row of series) {
       for (const t of Object.keys(row.tags || {})) {
@@ -108,11 +123,11 @@ export default function RatesChart({ series, height = 160 }) {
       }
     }
     return keys
-  }, [series])
+  }, [series, showTags])
 
   const legends = useMemo(() => {
     return [
-      ...SERIES.map((s) => ({ ...s, vals: series.map((r) => r[s.key] || 0) })),
+      ...(lines || SERIES).map((s) => ({ ...s, vals: series.map((r) => r[s.key] || 0) })),
       ...tagKeys.map((t, i) => ({
         key: `t:${t}`,
         label: t,
@@ -120,7 +135,7 @@ export default function RatesChart({ series, height = 160 }) {
         vals: series.map((r) => r.tags?.[t] ?? 0),
       })),
     ]
-  }, [series, tagKeys])
+  }, [series, tagKeys, lines])
 
   const visible = useMemo(() => {
     if (selected.size === 0) return legends
@@ -142,7 +157,7 @@ export default function RatesChart({ series, height = 160 }) {
         ref={wrapRef}
         style={{ height, display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: 0.6 }}
       >
-        No stats yet (enable worker SetStatsRetention / watch tags)
+        {emptyHint || 'No stats yet (enable worker SetStatsRetention / watch tags)'}
       </div>
     )
   }
