@@ -1,6 +1,6 @@
 # Smart Redis Queue — анализ производительности и позиционирования
 
-Черновик / детальный разбор. Краткая версия на сайте: [Бенчмарки](benchmarks.md), [Сравнение](comparison.md).  
+Внутренний разбор (сравнение коммитов, prod-регрессии). На сайт GitHub Pages не публикуется — там только цифры с HEAD, см. `benchmarks.md`.  
 Сырые прогоны: [`docs/bench-results/`](bench-results/).
 
 **Среда прогонов (этот документ):** Linux amd64, AMD Ryzen 7 2700, Redis localhost:6379, Go из `go env GOVERSION`, `benchtime=1s`, `count=3`, в таблицах — **медиана** ns/op.
@@ -60,7 +60,7 @@ BENCH_CPU=1 ./scripts/bench-commits.sh 0959fb3 787467d HEAD
 
 ### 1.3 Redis CPU / blocked account (медиана)
 
-Prod-кейс (в бенчах исторически `connector`/`chat` = **аккаунт API** / **ресурс**): партиция = `!<account>:<resource>`, лимит на аккаунт; без group-block — до N холостых `Get → Reject` и Get O(партиций) по CPU Redis.
+Prod-кейс: партиция = `!<account>:<resource>`, лимит на аккаунт; без group-block — до N холостых `Get → Reject` и Get O(партиций) по CPU Redis.
 
 Метрики из `INFO CPU` / `COMMANDSTATS` / `SLOWLOG` (см. `scenarios_cpu_bench_test.go`):
 

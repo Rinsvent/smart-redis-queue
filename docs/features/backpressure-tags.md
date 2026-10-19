@@ -2,7 +2,7 @@
 
 ## Теги
 
-Индексация задач для подсчёта и массового удаления. Задаются при Publish. Разделитель в Redis — `#` (`TagSeparator`); символ `#` внутри значения запрещён.
+Теги задаются при Publish. По ним можно считать задачи и удалять пачками. В значении тега нельзя использовать `#` — это разделитель внутри Redis.
 
 ```go
 producer.Publish(ctx, &redisqueue.Task{
@@ -16,7 +16,9 @@ admin := redisqueue.NewAdmin(rdb)
 n, _ := admin.CountByTag(ctx, "my-queue", "campaign:spring")
 ```
 
-### Admin: удаление
+`CountByTag` считает pending и in-progress. После remove или Ack задача из индекса пропадает.
+
+### Удаление через Admin
 
 ```go
 res, _ := admin.Remove(ctx, "my-queue", "msg-1")
@@ -24,7 +26,7 @@ res, _ := admin.Remove(ctx, "my-queue", "msg-1")
 
 for {
     batch, err := admin.RemoveByTag(ctx, "my-queue", "campaign:spring", redisqueue.RemoveByTagOptions{
-        Limit:         100, // default 100, max 1000
+        Limit:         100, // по умолчанию 100, максимум 1000
         ReturnPayload: true,
     })
     if err != nil || len(batch) == 0 {
@@ -33,11 +35,9 @@ for {
 }
 ```
 
-`CountByTag` считает pending + in-progress; после remove/ack уже нет.
+## Backpressure на Publish
 
-## Tag backpressure (Publish)
-
-Opt-in лимит глубины: продюсер не заливает задачи, пока по тегу уже «полный» буфер (`SCARD` + размер батча > limit). При отказе **ни одна** задача из вызова не добавляется → `ErrBackpressure`.
+Можно ограничить глубину очереди по тегу. Перед записью смотрится `SCARD` + размер батча; если лимит превышен, **ни одна** задача из вызова не пишется — ошибка `ErrBackpressure`.
 
 ```go
 err := producer.PublishWith(ctx, []redisqueue.PublishOption{
@@ -48,14 +48,14 @@ err := producer.PublishWith(ctx, []redisqueue.PublishOption{
 
 var bp *redisqueue.ErrBackpressure
 if errors.As(err, &bp) {
-    // подождать / уменьшить батч; bp.Tag, bp.Count, bp.Limit
+    // подождать или уменьшить батч; bp.Tag, bp.Count, bp.Limit
 }
 ```
 
-Несколько лимитов — AND (срабатывает первый превышенный):
+Несколько лимитов — все должны пройти:
 
 ```go
 redisqueue.WithTagLimits(map[string]int64{"provider:ses": 100, "campaign:spring": 200})
 ```
 
-Рекомендация: один стабильный тег потока на задачу. Не путать с rate limit по времени и с idempotency TTL.
+Удобнее один стабильный тег потока на задачу. Это не rate limit по времени и не окно по ID после Ack.

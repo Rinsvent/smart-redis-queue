@@ -1,12 +1,12 @@
 # Contributing
 
-Спасибо за интерес к проекту.
+Спасибо, что заглянули.
 
 ## Как внести вклад
 
 1. Fork репозитория
 2. Ветка: `git checkout -b feature/amazing-feature`
-3. Стиль: `gofmt`
+3. Код через `gofmt`
 4. Тесты на новую функциональность
 5. `make test`
 6. Commit / push / Pull Request
@@ -22,17 +22,13 @@ make test
 
 ## Issues
 
-Укажите:
-
-- версию Go и Redis;
-- минимальный repro;
-- ожидаемое и фактическое поведение.
+Напишите версии Go и Redis, минимальный repro, что ожидали и что получили.
 
 ## Документация сайта
 
-Страницы — Markdown в `docs/`, навигация — `mkdocs.yml`.
+Страницы — Markdown в `docs/`, навигация — `mkdocs.yml`. Внутренний разбор бенчей по коммитам (`ANALYSIS.md`, `bench-results/`) в сайт не входит.
 
-Локально (через [uv](https://github.com/astral-sh/uv) или venv):
+Локально:
 
 ```bash
 uv venv .venv-docs
@@ -44,4 +40,4 @@ CI публикует GitHub Pages из `main` (workflow `docs.yml`).
 
 ## Фичи
 
-Новые возможности — **opt-in**. Не ускоряйте hot path ценой обязательного оверхеда без флага. Идеи и приоритеты: [Roadmap](roadmap.md).
+Новое по возможности включайте флагом. Не ускоряйте hot path ценой обязательного оверхеда для всех. Идеи — в [Roadmap](roadmap.md).

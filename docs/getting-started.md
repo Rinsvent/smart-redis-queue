@@ -7,7 +7,7 @@ docker compose up -d
 # Redis на localhost:6379
 ```
 
-## 2. Установка
+## 2. Библиотека
 
 ```bash
 go get github.com/Rinsvent/smart-redis-queue
@@ -58,21 +58,21 @@ func main() {
 go run ./examples/basic
 ```
 
-## 4. Минимальный паттерн под rate-limited API
+## 4. Внешний API с лимитами
 
-Публикуем работу с порядком на ресурс и группой на аккаунт:
+Публикуем задачу с порядком на ресурс и группой на аккаунт:
 
 ```go
 err := producer.Publish(ctx, &redisqueue.Task{
     ID:        "job-42",
-    Partition: "!acct_9f3a:order_8841", // порядок по заказу
-    Groups:    []string{"acct:9f3a"},   // парковка всего аккаунта
+    Partition: "!acct_9f3a:order_8841",
+    Groups:    []string{"acct:9f3a"},
     Payload:   []byte(`{"op":"sync"}`),
     Scheduled: time.Now(),
 })
 ```
 
-На consumer — квоты на Get (не Get → внешний Allow → Reject):
+На consumer можно повесить квоты прямо на Get — без схемы «взяли задачу → сходили в Allow → вернули назад»:
 
 ```go
 _ = consumer.SetRateLimit(&redisqueue.RateLimitConfig{
@@ -89,7 +89,7 @@ _ = consumer.SetRateLimit(&redisqueue.RateLimitConfig{
 })
 ```
 
-Если внешний API всё же вернул 429 — паркуем группу:
+Если провайдер всё же ответил 429 — паркуем группу:
 
 ```go
 return redisqueue.NewRejectWithDelay(err, 2.0, "acct:9f3a")
@@ -105,14 +105,14 @@ make manager
 ./bin/manager info -q my-queue
 ```
 
-Web UI (тот же frontend, без CGO):
+Web UI (тот же интерфейс, что у Desktop, без CGO):
 
 ```bash
 make server
 ./bin/manager-server server --host 127.0.0.1 --port 34115
 ```
 
-Desktop / мобильные сборки — [Приложения и сервер](apps.md).
+Desktop и мобильные сборки — [Приложения и сервер](apps.md).
 
 ## Дальше
 

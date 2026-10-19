@@ -1,17 +1,17 @@
 # Группы и rate limit
 
-Главный сценарий SRQ: воркеры вызывают **внешний API с квотами** и должны им следовать, не устраивая шторм Get → Reject.
+Типичный сценарий: воркеры ходят во внешний API и обязаны соблюдать его квоты — без шторма «взяли задачу → поняли, что нельзя → вернули».
 
-## Модель
+## Из чего складывается
 
 | Сущность | Роль |
 |----------|------|
 | **Partition** | Порядок и локальный лимит на ресурс (`!acct:resource`) |
-| **Group** | Scope парковки на аккаунт / API-ключ (`acct:…`) |
-| **Get RateLimit** | Opt-in: deny **до** выдачи задачи (group ∧ partition) |
-| **RejectWithDelay / BlockGroups** | Ручная парковка после 429 / MAX от провайдера |
+| **Group** | Парковка всего аккаунта / ключа (`acct:…`) |
+| **Rate limit на Get** | Лимиты до выдачи задачи (группа и партиция) |
+| **RejectWithDelay / BlockGroups** | Парковка после 429 или MAX от провайдера |
 
-Пустые `Task.Groups` → `_default`.
+Если `Task.Groups` пустой — используется `_default`.
 
 ## Publish
 
@@ -25,18 +25,18 @@ producer.Publish(ctx, &redisqueue.Task{
 })
 ```
 
-Одна группа на партицию — оптимально для обхода ready.
+Одна группа на партицию — самый простой и предсказуемый вариант.
 
-## Get-side RateLimit (opt-in)
+## Rate limit на Get
 
-Чтобы не делать Get → внешний Allow → Reject, лимиты вшиваются в Get. Алгоритмы как в [rate-limiter](https://github.com/Rinsvent/rate-limiter):
+Лимиты можно повесить на Get. Алгоритмы те же, что в [rate-limiter](https://github.com/Rinsvent/rate-limiter):
 
 `token-bucket`, `leaky-bucket`, `fixed-window-counter`, `sliding-window-log`, `sliding-window-counter`.
 
-Два слоя **AND**:
+Два слоя работают вместе:
 
-- **Group** — квота аккаунта / ключа; deny → блок группы на `RetryAfter`
-- **Partition** — квота ресурса; deny → `blocked` только этой партиции
+- **Group** — квота аккаунта / ключа; при отказе группа блокируется на `RetryAfter`
+- **Partition** — квота ресурса; при отказе блокируется только эта партиция
 
 ```go
 _ = consumer.SetRateLimit(&redisqueue.RateLimitConfig{
@@ -53,9 +53,9 @@ _ = consumer.SetRateLimit(&redisqueue.RateLimitConfig{
 })
 ```
 
-Любой слой можно опустить (`nil`). Без `SetRateLimit` — прежний Get без ключей `rl:*`.
+Любой слой можно не задавать. Без `SetRateLimit` Get работает как раньше, без ключей `rl:*`.
 
-Разные провайдеры (email / maps / billing) — обычно **разные очереди** и разные Rates.
+Разные провайдеры (почта, карты, биллинг) обычно разносят по разным очередям со своими Rates.
 
 ## Парковка после 429
 
@@ -63,42 +63,42 @@ _ = consumer.SetRateLimit(&redisqueue.RateLimitConfig{
 consumer.Consume(ctx, func(task *redisqueue.Task) error {
     err := callExternalAPI(task)
     if isRateLimited(err) {
-        // Паркует всю группу: Get не обходит её ready, пока не истечёт Delay.
-        // Для ordered (!) дополнительно блокируется партиция в blocked.
+        // Паркует всю группу: Get её не обходит, пока не истечёт Delay.
+        // Для ordered (!) дополнительно блокируется сама партиция.
         return redisqueue.NewRejectWithDelay(err, 2.0, "acct:9f3a")
     }
     return err
 })
 ```
 
-Без задачи:
+Без задачи под рукой:
 
 ```go
 consumer.BlockGroups(ctx, 2.0, "acct:9f3a")
 admin.BlockGroups(ctx, "jobs", 2.0, "acct:9f3a")
 ```
 
-### Почему важна парковка группы
+### Зачем парковать группу
 
-Если при лимите аккаунта reject’ить только партиции ресурса, Get продолжает обходить тысячи партиций → рост Redis CPU.
+Если при лимите аккаунта reject’ить только партиции ресурсов, Get продолжает обходить тысячи партиций — Redis CPU растёт вместе с их числом.
 
-С `BlockGroups` idle Get под запаркованной группой **не растёт с N** (~80–95 µs Redis CPU на бенчах). См. [Бенчмарки](../benchmarks.md).
+С `BlockGroups` простой Get по запаркованной группе почти не зависит от числа партиций. Цифры — в [Бенчмарках](../benchmarks.md).
 
-## Как устроено в Redis
+## Как это лежит в Redis
 
-- `queue:{name}:groups` (ZSET) — score `≤ now` свободна, `> now` блок
-- `queue:{name}:blocked` — member=partition → unlockAt (ordered Reject / partition RL)
-- Ready группы обходится через `ZRANGE` с random index (не грузит миллионы партиций в Lua разом)
-- Нет свободных групп → Get пуст
+- `queue:{name}:groups` — ZSET; score `≤ now` значит группа свободна
+- `queue:{name}:blocked` — заблокированные партиции (время разблокировки)
+- готовые группы обходятся порциями со случайного места, без загрузки миллионов партиций в один Lua-вызов
+- свободных групп нет — Get пустой
 
 ## Примеры доменов
 
 | API | Group | Partition |
 |-----|-------|-----------|
-| Stripe-like payments | `merchant:{id}` | `!merchant:{id}:payment:{pid}` |
-| SendGrid / SES | `domain:{name}` | `!domain:{name}:recipient:{hash}` |
+| Платежи | `merchant:{id}` | `!merchant:{id}:payment:{pid}` |
+| Email (SES / SendGrid) | `domain:{name}` | `!domain:{name}:recipient:{hash}` |
 | Google Maps | `project:{id}` | `!project:{id}:job:{jid}` |
 | OpenAI / LLM | `org:{id}` | `!org:{id}:thread:{tid}` |
 | GitHub REST | `token:{hash}` | `!token:{hash}:repo:{nwo}` |
 
-Не путать с [backpressure по тегу](backpressure-tags.md) (глубина Publish) и с [idempotency TTL](debounce-idempotency.md) (окно по ID после Ack).
+Не путать с [backpressure по тегу](backpressure-tags.md) (глубина при Publish) и с [idempotency TTL](debounce-idempotency.md) (повтор того же ID после Ack).

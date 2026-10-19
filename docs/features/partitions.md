@@ -4,24 +4,22 @@
 
 `Task.Partition` — ключ маршрутизации внутри очереди.
 
-- Без префикса `!` — unordered: несколько consumer’ов могут брать задачи параллельно.
-- С префиксом `!` — **ordered**: в каждый момент партицию держит один consumer; порядок строго сохраняется.
+- Без префикса `!` — несколько consumer’ов могут брать задачи параллельно.
+- С префиксом `!` — **ordered**: партицию в каждый момент держит один consumer, порядок сохраняется.
 
 ```go
 producer.Publish(ctx,
     &redisqueue.Task{ID: "1", Partition: "!order:8841", Payload: []byte("a"), Scheduled: time.Now()},
     &redisqueue.Task{ID: "2", Partition: "!order:8841", Payload: []byte("b"), Scheduled: time.Now()},
 )
-// Всегда: 1, затем 2
+// Всегда: сначала 1, потом 2
 ```
 
-### Reclaim
-
-При падении воркера heartbeat истекает (~120s), задача возвращается в ZSET с **исходным score** (не `priority+1`). Порядок не ломается.
+Если воркер упал, heartbeat истекает (~120s) и задача возвращается в очередь с исходным score — порядок не ломается.
 
 ## Приоритет
 
-Внутри партиции больший `Priority` обрабатывается раньше:
+Внутри партиции больший `Priority` идёт раньше:
 
 ```go
 producer.Publish(ctx,
@@ -31,7 +29,7 @@ producer.Publish(ctx,
 // high, затем low
 ```
 
-## Delayed / Scheduled
+## Отложенный запуск
 
 ```go
 producer.Publish(ctx, &redisqueue.Task{
@@ -41,18 +39,18 @@ producer.Publish(ctx, &redisqueue.Task{
 })
 ```
 
-Задача недоступна Get, пока `Scheduled` не наступит.
+До наступления `Scheduled` задача в Get не попадёт.
 
 ## Батч Publish
 
 ```go
 err := producer.Publish(ctx, tasks...)
-// атомарно: либо все, либо ошибка (в т.ч. дубликаты ID)
+// либо все задачи записались, либо ошибка (в том числе из‑за дубликатов ID)
 ```
 
-## Рекомендации по имени партиции
+## Как называть партиции
 
-Для внешних API с порядком на ресурс:
+Для внешних API с порядком на ресурс удобна схема:
 
 ```text
 !{account_or_token}:{resource_id}
@@ -64,7 +62,7 @@ err := producer.Publish(ctx, tasks...)
 |-------|-----------|
 | Платёжный API | `!merchant_12:payment_9001` |
 | Почтовый провайдер | `!mailbox_ab:thread_55` |
-| Maps / geocode | `!project_7:batch_3` |
+| Geocoding / Maps | `!project_7:batch_3` |
 | LLM API | `!org_42:conversation_9` |
 
 Группу для парковки квоты аккаунта задавайте отдельно — см. [Rate limit](rate-limit.md).

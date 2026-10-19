@@ -15,8 +15,8 @@ make manager
 | `purge` | Очистить очередь или партицию |
 | `retry` | Вернуть in-progress после падения consumer |
 | `seed` | Демо-данные на нескольких DB |
-| `publish` / `consume` | Поток для живого UI + stats |
-| `desktop` | GUI (лучше собирать через `make desktop`) |
+| `publish` / `consume` | Поток для живого UI и графика stats |
+| `desktop` | GUI (удобнее собирать через `make desktop`) |
 | `server` | Web UI (сборка `make server`) |
 
 ```bash
@@ -31,7 +31,7 @@ make manager
 
 ## Web server
 
-Тот же frontend, что Desktop, без CGO/GTK — удобно на сервере и в CI:
+Тот же frontend, что у Desktop, но без CGO/GTK — удобно на сервере:
 
 ```bash
 make server
@@ -39,39 +39,39 @@ make server
 # Health: http://127.0.0.1:34115/health
 ```
 
-Для remote UI за прокси при необходимости: `--allow-any-origin` (осторожно в проде).
+Для UI за прокси при необходимости есть `--allow-any-origin` (в проде включайте осознанно).
 
-Сборка идёт с `-tags server` (не путать с desktop `-tags wails`).
+Сборка идёт с `-tags server`, не путать с desktop (`-tags wails`).
 
 ## Desktop UI (Wails v3)
 
 GUI для Redis-хостов:
 
 - профили подключений (`~/.config/smart-redis-queue/connections.json` на Linux);
-- каталог очередей по всем DB (SCAN);
+- каталог очередей по всем DB;
 - режимы Partitions / Groups / Tags;
 - purge, block/unblock, retry, payload по ID, операции по тегам;
-- график stats + watch тегов.
+- график stats и watch тегов.
 
 ```bash
 make desktop
-# или релизы GitHub: *-desktop-*
+# или готовые бинарники из GitHub Releases: *-desktop-*
 ```
 
-Linux: GTK3 / WebKit. Windows: WebView2. macOS: Gatekeeper может спросить подтверждение.
+Linux — GTK3 / WebKit, Windows — WebView2, на macOS Gatekeeper может спросить подтверждение.
 
-## Mobile (экспериментально)
+## Mobile
 
-Android APK и iOS simulator-сборки из CI/релизов. На телефоне Redis — не `localhost` хоста разработки: укажите доступный адрес в профиле.
+Android APK и iOS simulator-сборки из CI/релизов. На телефоне Redis — не `localhost` машины разработки: в профиле укажите доступный адрес.
 
 ## Что чем собирать
 
-| Артефакт | Make / теги | CGO |
-|----------|-------------|-----|
+| Артефакт | Как | CGO |
+|----------|-----|-----|
 | Библиотека / тесты | `go test ./...` | нет |
 | CLI | `make manager` | нет |
-| Web server | `make server` (`server`) | нет |
-| Desktop | `make desktop` (`wails`, Linux + `gtk3`) | да |
-| Android / iOS | `build/android`, `build/ios` Taskfile | NDK / Xcode |
+| Web server | `make server` | нет |
+| Desktop | `make desktop` (Linux + `gtk3`) | да |
+| Android / iOS | Taskfile в `build/android`, `build/ios` | NDK / Xcode |
 
-Подробности и asset’ы релизов — в [README на GitHub](https://github.com/Rinsvent/smart-redis-queue).
+Подробности и ассеты релизов — в [README на GitHub](https://github.com/Rinsvent/smart-redis-queue).

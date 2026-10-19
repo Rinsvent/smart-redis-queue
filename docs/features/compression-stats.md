@@ -1,29 +1,27 @@
 # Сжатие и метрики
 
-## zstd на Producer (opt-in)
+## zstd на Producer
 
-Большие JSON/текст жрут память Redis и раздувают EVAL ARGV. Порог по умолчанию 1 KiB:
+Крупный JSON и текст занимают память Redis и раздувают аргументы Lua. Можно включить сжатие (порог по умолчанию — 1 KiB):
 
 ```go
 producer.SetCompression(redisqueue.CompressionZstd)
-// или PublishWith(..., WithCompression(CompressionZstd), ...)
+// или точечно: PublishWith(..., WithCompression(CompressionZstd), ...)
 ```
 
-В Redis — маркер `RQC` + zstd; Get/Admin отдают уже разжатый `Task.Payload`. Старые raw-значения работают. Без `SetCompression` — ноль CPU на сжатие.
+В Redis лежит маркер `RQC` и zstd; Get и Admin отдают уже разжатый `Task.Payload`. Старые несжатые значения читаются как раньше. Без `SetCompression` на сжатие CPU не тратится.
 
-На хорошо сжимаемых ≥16–64 KiB zstd часто **ускоряет** Publish и режет footprint на порядки. Плохо сжимаемые бинарники (jpeg/gzip) меряйте отдельно. См. [Бенчмарки](../benchmarks.md).
+На хорошо сжимаемых телах от ~16 KiB Publish часто становится быстрее, а размер значения в Redis падает сильно. Уже сжатые бинарники (jpeg, gzip) лучше померить отдельно — там zstd может только добавить CPU. См. [Бенчмарки](../benchmarks.md).
 
-## Метрики очереди (opt-in)
+## Метрики
 
 По умолчанию выключены.
 
 ```go
-consumer.SetStatsRetention(time.Hour)          // g/a/r раз в секунду
-consumer.SetTagsStats("all", "campaign:spring") // SCARD тегов ~1s
+consumer.SetStatsRetention(time.Hour)          // get/ack/reject раз в секунду
+consumer.SetTagsStats("all", "campaign:spring") // SCARD выбранных тегов ~раз в секунду
 ```
 
-- **get / ack / reject** — flush в `queue:{q}:stats:{sec}`; несколько хостов суммируются
-- **TagsStats** — только указанные теги → поля `t:{tag}`
-- Чтобы видеть «total», тегируйте задачи (например `all`) и добавьте тег в `SetTagsStats`
+Несколько хостов пишут в одни и те же секундные ключи — счётчики суммируются. Чтобы видеть «всего в очереди», тегируйте задачи (например `all`) и добавьте этот тег в `SetTagsStats`.
 
-Desktop UI: график get/ack/reject + watch тегов (локальный poll, без записи в Redis).
+В Desktop UI есть график get/ack/reject и локальный watch тегов (poll на машине, в Redis ничего не пишет).

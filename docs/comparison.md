@@ -1,58 +1,55 @@
 # Сравнение очередей
 
-SRQ — не Kafka-replacement, а **Redis work-queue** с редкими first-class фичами (debounce, race!, dual RL, ordered reclaim).
+SRQ — очередь задач на Redis. Не пытается заменить Kafka как лог событий; зато закрывает порядок, delayed, dual rate limit, debounce и `race!` без второго брокера.
 
-Легенда: **Y** = из коробки; **P** = частично / своими руками; **—** = нет или не цель.
+Легенда: **Y** — есть из коробки; **P** — частично или своими руками; **—** — нет или не цель.
 
 | Фича | Kafka | RabbitMQ | NATS core | NATS JetStream | **SRQ** |
 |------|:-----:|:--------:|:---------:|:--------------:|:-------:|
-| Persist / replay по offset | Y | P | — | Y | P (до Ack; journal — бэклог) |
+| Persist / replay по offset | Y | P | — | Y | P (живёт до Ack; журнал — в планах) |
 | At-least-once + ack | Y | Y | — | Y | Y |
 | Exactly-once end-to-end | P | — | — | P | **P** (см. ниже) |
-| Порядок в partition/key | Y | P | — | Y | **Y** (`!` + locks) |
+| Порядок в partition/key | Y | P | — | Y | **Y** (`!`) |
 | Priority queues | — | Y | — | — | **Y** |
 | Delayed / scheduled | P | Y | — | Y | **Y** |
-| Consumer groups / competing | Y | Y | Y | Y | **Y** |
+| Competing consumers | Y | Y | Y | Y | **Y** |
 | Prefetch / batch get | Y | Y | — | Y | **Y** |
-| Topic/exchange routing | Y | Y | Y | Y | P (groups/partitions) |
+| Topic/exchange routing | Y | Y | Y | Y | P (groups / partitions) |
 | Fan-out / pub-sub | Y | Y | Y | Y | — |
-| Dead-letter / retry delay | Y | Y | — | Y | **Y** |
-| Queue depth backpressure | P | Y | — | Y | **Y** (теги) |
-| Token / sliding / leaky RL в брокере | — | P | — | P | **Y** (5 algo, group+partition) |
-| Cross-partition mutex | — | — | — | — | **Y** (`race!`) |
+| Retry delay / dead-letter | Y | Y | — | Y | **Y** |
+| Backpressure по глубине | P | Y | — | Y | **Y** (теги) |
+| Token / sliding / leaky RL в брокере | — | P | — | P | **Y** (группа + партиция) |
+| Mutex между партициями | — | — | — | — | **Y** (`race!`) |
 | Debounce / latest payload | — | — | — | — | **Y** (`deb!`) |
-| Idempotency window после success | P | — | — | P | **Y** |
-| Payload compression | Y | Y | Y | Y | **Y** (zstd) |
-| Horizontal scale | Y | Y | Y | Y | **Y\*** (= Redis) |
+| Окно идемпотентности после успеха | P | — | — | P | **Y** |
+| Сжатие payload | Y | Y | Y | Y | **Y** (zstd) |
+| Горизонтальный масштаб | Y | Y | Y | Y | **Y\*** (через Redis) |
 | Multi-tenant isolation | Y | Y | Y | Y | P (queue / DB / ACL) |
-| UI / ops tooling | Y | Y | P | P | **Y** (CLI + Wails) |
+| UI / ops | Y | Y | P | P | **Y** (CLI + Desktop) |
 
-\*Координация всегда через Redis; throughput = topology Redis + шардинг очередей. Не «scale без Redis».
+\*Координация всегда через Redis. Throughput растёт вместе с topology Redis и шардингом очередей — не «масштаб без Redis».
 
-## Уточнения
+## Exactly-once
 
-### Exactly-once
+У Kafka EOS завязан на транзакции брокера. У SRQ доставка **at-least-once**: Get → Ack, при падении — reclaim.
 
-У Kafka EOS = транзакции брокера. У SRQ доставка **at-least-once** (Get → Ack; падение → reclaim).
+«Ровно один раз» по бизнесу обычно собирают так:
 
-Эффективный e2e once по *бизнесу*:
+- стабильный `Task.ID` и идемпотентный handler;
+- при желании — idempotency TTL после Ack (повторный Publish того же ID не примется, пока жив TTL);
+- ordered `!`, если важен порядок в ключе.
 
-- тот же `Task.ID` + F1 idempotency TTL и/или идемпотентный handler;
-- при необходимости ordered `!`.
+Брокер сам не обещает EOS без идемпотентности на вашей стороне — как у большинства очередей. Подробнее: [Гарантии доставки](delivery.md).
 
-Гарантии «брокер сам сделал EOS без идемпотентности handler» нет — как у большинства очередей. В матрице **P**, не «нет». Подробнее: [Гарантии доставки](delivery.md).
+## Fan-out
 
-### Fan-out
+Fan-out — это broadcast: одно сообщение получают несколько независимых подписчиков. SRQ так не работает: задачу забирает один воркер.
 
-Broadcast: один publish → много независимых подписчиков. SRQ = competing consumers → в матрице «—».
+## Что выбрать
 
-### Когда выбирать что
-
-| Нужно | Выбор |
-|-------|--------|
+| Нужно | Обычно берут |
+|-------|----------------|
 | Event log, replay, fan-out | Kafka / JetStream |
-| Классический AMQP, enterprise routing | RabbitMQ |
-| Уже есть Redis + порядок + API rate limits | **SRQ** |
-| Только pub/sub без ack | NATS core / Redis PubSub |
-
-Полный черновик анализа: [ANALYSIS.md](ANALYSIS.md).
+| Классический AMQP и сложный routing | RabbitMQ |
+| Уже есть Redis + порядок + лимиты API | **SRQ** |
+| Лёгкий pub/sub без ack | NATS core / Redis PubSub |

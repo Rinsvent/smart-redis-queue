@@ -1,4 +1,4 @@
-# API (кратко)
+# API
 
 Пакет: `github.com/Rinsvent/smart-redis-queue`.
 
@@ -6,7 +6,7 @@
 
 `Task` — `ID`, `Partition`, `Priority`, `Payload`, `Scheduled`, `Tags`, `Groups`, `RejectCount`.
 
-`Producer`, `Consumer`, `ConsumerPool`, `Admin`.
+Основные объекты: `Producer`, `Consumer`, `ConsumerPool`, `Admin`.
 
 ## Producer
 
@@ -16,7 +16,7 @@
 | `Publish` / `PublishWith` | Публикация (батч атомарно) |
 | `SetCompression` / `WithCompression` | zstd |
 | `WithTagBackpressure` / `WithTagLimits` | глубина по тегу |
-| `Lock` | distributed lock helper |
+| `Lock` | простой distributed lock |
 
 Ошибки: `ErrTasksAlreadyExist`, `ErrBackpressure`.
 
@@ -28,17 +28,17 @@
 | `Ack` / `Reject` / `BlockGroups` | Завершение / парковка |
 | `SetPollInterval` / `SetPrefetchCount` | Поллинг |
 | `SetIdempotencyTtl` | Окно после Ack |
-| `SetRateLimit` | Dual RL на Get |
+| `SetRateLimit` | Rate limit на Get |
 | `SetConcurrencyTags` | `race!` |
 | `SetStatsRetention` / `SetTagsStats` | Метрики |
-| `SetCheckDeadConsumerLocksOnGet` | Reclaim probe |
+| `SetCheckDeadConsumerLocksOnGet` | Probe dead locks |
 | `Use` | Middleware |
 | Pool: `SetCount` | Число воркеров |
 
-Хелперы: `NewRejectWithDelay`, `DebounceID`, `RaceTagPrefix`, …
+Хелперы: `NewRejectWithDelay`, `DebounceID`, `RaceTagPrefix` и другие.
 
 ## Admin
 
 `ListQueues`, `Inspect`, `QueueOverview`, `ListPartitions`, `ListGroups`, `ListTags`, `CountTags`, `BlockGroups`, `BlockPartition`, `UnblockPartition`, `Remove`, `RemoveByTag`, `CountByTag`, `Purge`, `Retry`, `QueueStatsBounds`, `ListQueueStats`.
 
-Полные сигнатуры — в GoDoc / исходниках пакета. Примеры — в [фичах](../features/index.md) и README репозитория.
+Полные сигнатуры — в GoDoc и исходниках. Примеры — в [фичах](../features/index.md).

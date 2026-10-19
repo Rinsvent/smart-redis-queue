@@ -7,6 +7,11 @@ edit_uri: edit/main/docs/
 docs_dir: docs
 site_dir: site
 
+# Внутренний разбор бенчей по коммитам — только в репо, не на Pages.
+exclude_docs: |
+  ANALYSIS.md
+  bench-results/**
+
 theme:
   name: material
   language: ru
@@ -89,4 +94,3 @@ nav:
   - Справка:
       - API: reference/api.md
       - Ключи Redis: reference/redis-keys.md
-      - Анализ (черновик): ANALYSIS.md

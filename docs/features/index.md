@@ -1,21 +1,20 @@
 # Фичи
 
-Все тяжёлые возможности — **opt-in**: без флага hot path остаётся лёгким.
+Тяжёлые режимы включаются явно. Без флага горячий путь остаётся простым.
 
 | Фича | Зачем | Страница |
 |------|--------|----------|
-| Ordered-партиции (`!`) | Строгий порядок + один consumer | [Партиции](partitions.md) |
-| Priority / Scheduled | Важное раньше; delayed jobs | [Партиции](partitions.md) |
-| Groups + BlockGroups | Парковка scope (аккаунт / ключ API) | [Rate limit](rate-limit.md) |
-| Get-side RateLimit | Dual RL до выдачи задачи | [Rate limit](rate-limit.md) |
-| Idempotency TTL | Окно dedupe после Ack | [Debounce / idempotency](debounce-idempotency.md) |
-| Debounce (`deb!`) | Всегда последний payload | [Debounce / idempotency](debounce-idempotency.md) |
-| Concurrency tags (`race!`) | Mutex ресурса между партициями | [race!](race.md) |
-| Tag backpressure | Лимит глубины на Publish | [Backpressure / tags](backpressure-tags.md) |
-| Tags + Admin | Подсчёт / массовое удаление | [Backpressure / tags](backpressure-tags.md) |
-| zstd | Меньше RAM Redis на крупных payload | [Compression / stats](compression-stats.md) |
-| Stats | get/ack/reject в Redis + UI | [Compression / stats](compression-stats.md) |
-| Prefetch / Pool / Middleware | Throughput и наблюдаемость | ниже и [API](../reference/api.md) |
+| Ordered-партиции (`!`) | Строгий порядок, один consumer | [Партиции](partitions.md) |
+| Priority / Scheduled | Важное раньше; отложенный запуск | [Партиции](partitions.md) |
+| Groups + BlockGroups | Парковка scope (аккаунт, ключ API) | [Rate limit](rate-limit.md) |
+| Rate limit на Get | Два слоя лимитов до выдачи задачи | [Rate limit](rate-limit.md) |
+| Idempotency TTL | Не принимать тот же ID после успешного Ack | [Debounce / идемпотентность](debounce-idempotency.md) |
+| Debounce (`deb!`) | В очереди всегда последний payload | [Debounce / идемпотентность](debounce-idempotency.md) |
+| Concurrency tags (`race!`) | Один shared-ресурс — один in-flight | [race!](race.md) |
+| Tag backpressure | Не раздувать очередь по тегу | [Backpressure / теги](backpressure-tags.md) |
+| Tags + Admin | Подсчёт и массовое удаление | [Backpressure / теги](backpressure-tags.md) |
+| zstd | Меньше памяти Redis на крупных payload | [Сжатие / метрики](compression-stats.md) |
+| Stats | get/ack/reject в Redis и в UI | [Сжатие / метрики](compression-stats.md) |
 
 ## Prefetch и пул
 
@@ -28,9 +27,9 @@ pool.SetCount(5)
 pool.Consume(ctx, process)
 ```
 
-Для ordered-партиций reject первой задачи в prefetch-батче отклоняет остальные с сохранением порядка.
+Для ordered-партиций: если первая задача из prefetch-батча ушла в Reject, остальные тоже возвращаются с сохранением порядка.
 
-Паника в handler не роняет процесс: `HandlerPanicError` → Reject.
+Паника в handler процесс не роняет — превращается в ошибку и идёт в Reject.
 
 ## Middleware
 
@@ -45,3 +44,5 @@ pool.Use(func(next redisqueue.HandlerFunc) redisqueue.HandlerFunc {
     }
 })
 ```
+
+Сигнатуры — в [API](../reference/api.md).
