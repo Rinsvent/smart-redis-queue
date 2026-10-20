@@ -85,6 +85,7 @@ nav:
       - Сжатие и метрики: features/compression-stats.md
   - Сравнение очередей: comparison.md
   - Масштабирование: scaling.md
+  - Шардинг: sharding.md
   - Гарантии доставки: delivery.md
   - Приложения и сервер: apps.md
   - Бенчмарки: benchmarks.md

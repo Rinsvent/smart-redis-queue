@@ -15,6 +15,7 @@
 | Tags + Admin | Подсчёт и массовое удаление | [Backpressure / теги](backpressure-tags.md) |
 | zstd | Меньше памяти Redis на крупных payload | [Сжатие / метрики](compression-stats.md) |
 | Stats | get/ack/reject в Redis и в UI | [Сжатие / метрики](compression-stats.md) |
+| Шардинг | Несколько Redis, sticky ByGroup/ByManual | [Шардинг](../sharding.md) |
 
 ## Prefetch и пул
 

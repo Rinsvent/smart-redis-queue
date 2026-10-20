@@ -24,6 +24,23 @@ type publishConfig struct {
 	tagLimits        map[string]int64 // tag → max pending (SCARD+batch ≤ max)
 	compression      Compression
 	compressMinBytes int
+	shardKey         string // ShardedProducer: явный ключ (ByManual / override)
+	shardName        string // ShardedProducer: пин на имя шарда
+}
+
+// WithShardKey задаёт строку для выбора шарда (обязательно при ShardByManual;
+// также перекрывает авто-ключ для ByGroup/ByQueue/ByPartition на этом вызове).
+func WithShardKey(key string) PublishOption {
+	return func(c *publishConfig) {
+		c.shardKey = key
+	}
+}
+
+// WithShardName публикует весь батч на именованный шард (без hash).
+func WithShardName(name string) PublishOption {
+	return func(c *publishConfig) {
+		c.shardName = name
+	}
 }
 
 // WithCompression — сжатие payload для этого PublishWith (перекрывает Producer.SetCompression).

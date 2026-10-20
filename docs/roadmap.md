@@ -15,22 +15,21 @@
 
 ## В планах
 
-1. **Шардинг по Redis DB** — разнести очереди, снизить contention.
-2. **Доработка Desktop UI** — по реальным болям из использования.
-3. **Чеклист persistence** — что даёт Redis AOF/RDB и что даёт SRQ.
-4. **Журнал / replay** — не Kafka-log из коробки; варианты archive, side-stream, CDC.
-5. **Auto-ack** после успешного handler.
-6. **Selective groups** — consumer читает только выбранные группы.
-7. **Fan-out** — только если понадобится явный broadcast (это другая семантика).
-8. **Заметки по Cluster / multi-DB** — углубить ops-гайд.
-9. **Multi-tenant** — по запросу продукта; сейчас хватает queue / DB / ACL.
+1. **Доработка Desktop UI** — каталог/метрики по списку шардов, по болям из использования.
+2. **Чеклист persistence** — что даёт Redis AOF/RDB и что даёт SRQ.
+3. **Журнал / replay** — не Kafka-log из коробки; варианты archive, side-stream, CDC.
+4. **Auto-ack** после успешного handler.
+5. **Selective groups** — consumer читает только выбранные группы.
+6. **Fan-out** — только если понадобится явный broadcast (это другая семантика).
+7. **Consistent hashing / live migration** — меньше боли при expand без полного drain.
+8. **Multi-tenant** — по запросу продукта; сейчас хватает queue / DB / ACL.
 
 ## Порядок
 
 1. ~~Документация сайта~~  
-2. Auto-ack  
-3. Selective groups  
-4. Шардинг по DB и заметки по Cluster  
+2. ~~Шардинг (ByGroup / ByQueue / ByManual, ReadOnly drain)~~ — [sharding.md](sharding.md)  
+3. Auto-ack  
+4. Selective groups  
 5. Desktop и persistence checklist  
 6. Journal / archive — после выбора модели  
 

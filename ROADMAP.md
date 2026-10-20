@@ -28,9 +28,11 @@
 
 ## Бэклог
 
-### 1. Шардинг по Redis DB (0…N)
+### 1. Шардинг по Redis DB / инстансам — сделано (v1)
 
-Разнести очереди/нагрузку по нескольким logical DB одного инстанса (или явный shard map `queue → db`), чтобы снизить contention на одних ключах и задействовать квоты/CPU между DB. Связано с multi-tenant и horizontal scale внутри Redis.
+Публично: [`docs/sharding.md`](docs/sharding.md). Внутри: `internal/docs/sharding-design.md`.  
+API: `ShardConfig`, `ShardByGroup|Queue|Manual|Partition`, `Producer.SetShards` / `ConsumerPool.SetShards`, `ReadOnly` drain, `KeyMap`, `WithShardKey` / `PublishTo`.  
+Не в v1: Redis Cluster, авто-миграция ключей, consistent hashing.
 
 ### 2. Доработка Desktop UI (Wails)
 

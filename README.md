@@ -26,6 +26,7 @@
 - **Backpressure на Publish** — opt-in лимит глубины по тегу (`WithTagBackpressure` / `WithTagLimits`); при превышении весь батч не пишется
 - **Rate limit на Get** — opt-in слои group (токен/коннектор) + partition (чат); deny → block соответствующего scope без выдачи задачи
 - **Удаление без consumer** — `Admin.Remove` снимает ожидающую задачу по ID
+- **Шардинг** — несколько standalone Redis (`ShardByGroup` / `ByManual` / …); см. [docs](https://rinsvent.github.io/smart-redis-queue/sharding/)
 
 ## Требования
 

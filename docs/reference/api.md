@@ -13,12 +13,26 @@
 | Метод / опция | Назначение |
 |---------------|------------|
 | `NewProducer` | Создать |
+| `SetShards` / `Close` | Шардинг (тот же тип `Producer`) |
 | `Publish` / `PublishWith` | Публикация (батч атомарно) |
+| `PublishManual` / `PublishTo` | Явный ключ / имя шарда |
 | `SetCompression` / `WithCompression` | zstd |
 | `WithTagBackpressure` / `WithTagLimits` | глубина по тегу |
-| `Lock` | простой distributed lock |
+| `WithShardKey` / `WithShardName` | опции Publish при шардинге |
+| `Lock` / `LockTo` | distributed lock |
 
 Ошибки: `ErrTasksAlreadyExist`, `ErrBackpressure`.
+
+## Шардинг
+
+| Тип / метод | Назначение |
+|-------------|------------|
+| `ShardConfig` / `Shard` | Список `{Addr, DB}` или `Client`; `ReadOnly`, `Weight`, `KeyMap` |
+| `ShardByGroup` / `ByQueue` / `ByManual` / `ByPartition` | Стратегия ключа |
+| `Producer.SetShards` / `ConsumerPool.SetShards` | Включить на существующих типах |
+| `ConsumerPool.SetCount` | Сумма воркеров (делятся по шардам) |
+
+Подробности и процедура add/remove: [Шардинг](../sharding.md).
 
 ## Consumer / Pool
 

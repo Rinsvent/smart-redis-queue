@@ -152,9 +152,12 @@ type Producer struct {
 	queueName        string
 	compression      Compression
 	compressMinBytes int // 0 → defaultCompressMinBytes при Compression != None
+	router           *ShardRouter
+	ownRouter        bool
+	shardPubs        []*Producer // по одному на шард; без вложенного router
 }
 
-// NewProducer создает нового продюсера
+// NewProducer создает нового продюсера. Для нескольких Redis — SetShards.
 func NewProducer(redisClient *redis.Client, queueName string) *Producer {
 	return &Producer{
 		redis:     redisClient,
@@ -166,11 +169,17 @@ func NewProducer(redisClient *redis.Client, queueName string) *Producer {
 // Consumer/Admin декодируют по маркеру автоматически.
 func (p *Producer) SetCompression(c Compression) {
 	p.compression = c
+	for _, sp := range p.shardPubs {
+		sp.compression = c
+	}
 }
 
 // SetCompressMinBytes — сжимать только payload ≥ n байт (дефолт 1024). 0 = сбросить на дефолт.
 func (p *Producer) SetCompressMinBytes(n int) {
 	p.compressMinBytes = n
+	for _, sp := range p.shardPubs {
+		sp.compressMinBytes = n
+	}
 }
 
 // Publish добавляет одну или несколько задач в очередь атомарно, сохраняя порядок.
@@ -179,12 +188,18 @@ func (p *Producer) Publish(ctx context.Context, tasks ...*Task) error {
 	return p.PublishWith(ctx, nil, tasks...)
 }
 
-// PublishWith — как Publish, плюс opt-in опции (backpressure по тегам).
+// PublishWith — как Publish, плюс opt-in опции (backpressure по тегам; при шардинге — WithShardKey / WithShardName).
 func (p *Producer) PublishWith(ctx context.Context, opts []PublishOption, tasks ...*Task) error {
 	if len(tasks) == 0 {
 		return nil
 	}
+	if p.router != nil {
+		return p.publishSharded(ctx, opts, tasks)
+	}
+	return p.publishLocal(ctx, opts, tasks)
+}
 
+func (p *Producer) publishLocal(ctx context.Context, opts []PublishOption, tasks []*Task) error {
 	cfg := &publishConfig{compression: p.compression, compressMinBytes: p.compressMinBytes}
 	cfg.apply(opts)
 	if err := cfg.validate(); err != nil {
@@ -270,7 +285,13 @@ func (p *Producer) Lock(ctx context.Context, ids ...string) error {
 	if len(ids) == 0 {
 		return nil
 	}
+	if p.router != nil {
+		return p.lockSharded(ctx, ids)
+	}
+	return p.lockLocal(ctx, ids)
+}
 
+func (p *Producer) lockLocal(ctx context.Context, ids []string) error {
 	args := make([]interface{}, 0, 2+len(ids))
 	args = append(args, p.queueName, len(ids))
 	for _, id := range ids {
@@ -743,6 +764,11 @@ type ConsumerPool struct {
 	concurrencyTags             bool
 	middlewares                 []HandlerMiddleware
 	stats                       *StatsSink
+	router                      *ShardRouter
+	ownRouter                   bool
+	shardStats                  []*StatsSink
+	statsRetention              time.Duration
+	statsTags                   []string
 }
 
 func (p *ConsumerPool) ensureStats() *StatsSink {
@@ -754,15 +780,29 @@ func (p *ConsumerPool) ensureStats() *StatsSink {
 
 // SetStatsRetention — см. Consumer.SetStatsRetention. Loop стартует в Consume.
 func (p *ConsumerPool) SetStatsRetention(d time.Duration) {
+	p.statsRetention = d
+	if len(p.shardStats) > 0 {
+		for _, s := range p.shardStats {
+			s.setRetention(d)
+		}
+		return
+	}
 	p.ensureStats().setRetention(d)
 }
 
 // SetTagsStats — см. Consumer.SetTagsStats.
 func (p *ConsumerPool) SetTagsStats(tags ...string) {
+	p.statsTags = append([]string(nil), tags...)
+	if len(p.shardStats) > 0 {
+		for _, s := range p.shardStats {
+			s.setTags(p.statsTags)
+		}
+		return
+	}
 	p.ensureStats().setTags(tags)
 }
 
-// NewConsumerPool создает пул консьюмеров
+// NewConsumerPool создает пул консьюмеров. Для нескольких Redis — SetShards.
 func NewConsumerPool(redisClient *redis.Client, queueName string) *ConsumerPool {
 	return &ConsumerPool{
 		redis:                       redisClient,
@@ -775,7 +815,8 @@ func NewConsumerPool(redisClient *redis.Client, queueName string) *ConsumerPool 
 	}
 }
 
-// SetCount задает количество консьюмеров в пуле
+// SetCount задает количество консьюмеров в пуле.
+// При SetShards — суммарное число; воркеры делятся по шардам.
 func (p *ConsumerPool) SetCount(n int) {
 	if n < 1 {
 		n = 1
@@ -819,7 +860,13 @@ func (p *ConsumerPool) Use(mw ...HandlerMiddleware) {
 // число активных консьюмеров остаётся постоянным.
 // Паника в handler перехватывается (см. Consumer.Consume) — падает одна задача в Reject,
 // остальные консьюмеры пула продолжают работу.
+// При SetShards воркеры делятся по шардам (включая ReadOnly).
 func (p *ConsumerPool) Consume(ctx context.Context, handler func(*Task) error) {
+	if p.router != nil {
+		p.consumeSharded(ctx, handler)
+		return
+	}
+
 	if p.stats != nil && p.stats.enabled() {
 		p.stats.ensureLoop()
 		defer p.stats.Stop()
@@ -829,7 +876,7 @@ func (p *ConsumerPool) Consume(ctx context.Context, handler func(*Task) error) {
 
 	for i := 0; i < p.count; i++ {
 		wg.Add(1)
-		go p.runConsumer(ctx, &wg, handler)
+		go p.runConsumer(ctx, &wg, handler, p.redis, p.stats)
 	}
 
 	wg.Wait()
@@ -837,7 +884,7 @@ func (p *ConsumerPool) Consume(ctx context.Context, handler func(*Task) error) {
 
 // runConsumer запускает консьюмера; при ошибке Ack/Reject перезапускает нового (respawn),
 // пока контекст не отменён.
-func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, handler func(*Task) error) {
+func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, handler func(*Task) error, rdb *redis.Client, stats *StatsSink) {
 	defer wg.Done()
 	for {
 		select {
@@ -846,7 +893,7 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		default:
 		}
 
-		c := newConsumer(p.redis, p.queueName, "", true)
+		c := newConsumer(rdb, p.queueName, "", true)
 		c.pollInterval = p.pollInterval
 		c.prefetchCount = p.prefetchCount
 		c.checkDeadConsumerLocksOnGet = p.checkDeadConsumerLocksOnGet
@@ -854,7 +901,7 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c.rateLimit = p.rateLimit
 		c.concurrencyTags = p.concurrencyTags
 		c.middlewares = p.middlewares
-		c.stats = p.stats
+		c.stats = stats
 		c.statsOwn = false
 
 		err := c.Consume(ctx, handler)
