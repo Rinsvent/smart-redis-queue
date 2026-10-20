@@ -64,67 +64,63 @@ SRQ хранит очередь **только в Redis**. Протокол Get/
 | **no-persist** (`save ""`, `appendonly no`) | Только RAM | **Потеря** |
 | **rdb-default** | Редкие BGSAVE | **Обычно потеря**, если snapshot ещё не успел |
 | **aof-everysec** | AOF, fsync раз в секунду | При **kill процесса** часто ок (page cache хоста); при **power loss / падении ОС** — до ~**1s** записей по доке Redis |
-| **aof-always** | AOF, fsync на каждую запись до ответа клиенту | **Publish/Ack с OK переживают kill -9** процесса (проверено тестами). Не спасает от смерти диска / FS без реплики |
+| **aof-always** | AOF, fsync на каждую запись до ответа клиенту | **Publish/Ack с OK переживают kill -9** процесса. Не спасает от смерти диска / FS без реплики |
 
-Для «не терять уже опубликованное» на одном узле: **`appendonly yes` + `appendfsync always`** (и volume/диск, которому доверяете).
+Чтобы не терять уже опубликованные задачи на одном узле: **`appendonly yes` + `appendfsync always`** (и надёжный volume/диск).
 
-Типичный prod-компромисс: **`appendfsync everysec`** + реплика; смириться с окном ~1s при аварии мастера до failover.
+Типичный prod-компромисс: **`appendfsync everysec`** и реплика; при аварии мастера до failover допустимо окно потери ~1s.
 
-Реплика: `WAIT 1 0` (или политика приложения) после критичных записей усиливает «OK = есть на replica», но это уже отдельно от SRQ API.
+Реплика: после критичных записей приложение может вызывать `WAIT` (например `WAIT 1 0`), чтобы OK означал «есть на replica». Это вне API SRQ.
 
-### Сценарии (что бывает)
+### Типовые сбои
 
 | Сценарий | no-persist / RDB без свежего save | aof-everysec | aof-always |
 |----------|-----------------------------------|--------------|------------|
-| Publish OK → Redis убит → restore | Сообщение **пропало**; продюсер думал, что ок | Обычно живо при kill процесса; при power loss возможен **loss** последних ~1s | **Живо** |
-| Get, обработка, **ещё нет Ack** → Redis убит | При durable AOF payload на диске → после restore / expiry lock — **повторная выдача** (at-least-once) | то же | то же |
-| **Ack OK** → Redis убит → restore | Без AOF БД пустая | Ack обычно на диске; иначе возможен **повтор** (обработали дважды) | Ack на диске → **повторной выдачи нет** |
+| Publish OK → Redis убит → restore | Сообщение **потеряно**, хотя клиент получил OK | Обычно живо при kill процесса; при power loss возможен **loss** последних ~1s | **Сохранено** |
+| Get без Ack → Redis убит | При durable AOF payload на диске → после restore / expiry lock — **повторная выдача** | то же | то же |
+| Ack OK → Redis убит → restore | Без AOF БД пустая | Ack обычно на диске; иначе возможен **повтор** обработки | Ack на диске → **повторной выдачи нет** |
 | Воркер умер, Redis жив | reclaim по TTL lock — снова Get | — | — |
 
-Итого по вашим вопросам:
+Кратко по исходам:
 
-1. **Publish OK → Redis упал → потеряли сообщение?**  
-   Да, если нет durable AOF (или реплики, куда успело уйти). При **`appendfsync always`** в наших тестах (`kill -9` контейнера) сообщение **на месте**.
+- **Потеря после Publish OK** — возможна без durable AOF (или без реплики, куда запись успела уйти). При `appendfsync always` запись с успешным ответом клиенту остаётся после kill процесса Redis.
+- **Повтор после Ack OK** — возможен, если Ack не попал на диск (`everysec` + power loss, или нет AOF). При `always` повторной выдачи после успешного Ack нет.
+- **Get без Ack, затем падение Redis** — при AOF задача не исчезает; после восстановления её снова выдадут (после lock TTL). Side-effect handler мог уже выполниться — нужна идемпотентность.
 
-2. **Взяли задачу, Ack OK → Redis упал → снова обработали?**  
-   При **`always`** — нет (Ack уже в AOF). При слабом persist / окне everysec + power loss — **да, возможен дубль** (классический at-least-once / «Ack не на диске»).
+### Сравнение с MySQL
 
-3. **Взяли, не Ack → Redis упал** — сообщение не «исчезает» при AOF; после восстановления его снова заберут (после lock TTL или если lock тоже восстановился и истечёт). Side-effect мог уже случиться → нужна идемпотентность handler.
-
-### Сравнение с MySQL (уровень «как у БД»)
-
-Идеальной «никогда не потеряем и никогда не дублируем» нет ни у MySQL, ни у Redis.
+Ни MySQL, ни Redis не дают абсолютной гарантии «без потерь и без дублей» во всех авариях.
 
 | Риск | MySQL InnoDB | Redis + SRQ |
 |------|--------------|-------------|
-| Commit/Publish вернул OK, процесс убит | При `innodb_flush_log_at_trx_commit=1` — на диске | При `appendfsync always` — на диске (аналог) |
-| Commit OK, **машина** обесточилась | Зависит от flush + диск; =1 roughly durable | `always` ≈ то же; `everysec` ≈ потеря до ~1s (как `innodb_flush_log_at_trx_commit=2` по духу) |
-| Восстановление из **старого дампа**/RDB | Потеря всего после бэкапа | То же для RDB/бэкапа AOF |
-| Реплика отстаёт, мастер умер | Транзакции, не доехавшие в binlog на replica — **потеряны** (async) | Аналогично async replica; `WAIT` / sync replica — дороже |
-| Дубль после сбоя | Клиент ретраит commit / app-level | Ack не на диске или reclaim → **повтор Get**; лечится идемпотентностью |
+| Commit/Publish вернул OK, процесс убит | При `innodb_flush_log_at_trx_commit=1` — на диске | При `appendfsync always` — на диске |
+| Commit OK, **машина** обесточилась | Зависит от flush и диска; `=1` обычно durable | `always` — сопоставимо; `everysec` — до ~1s потери (близко к `innodb_flush_log_at_trx_commit=2`) |
+| Восстановление из **старого дампа**/RDB | Потеря всего после бэкапа | То же для RDB / старого AOF |
+| Реплика отстаёт, мастер умер | Не доехавшие в binlog на replica транзакции **потеряны** (async) | То же для async replica; `WAIT` / sync replica дороже |
+| Дубль после сбоя | Ретрай клиента / уровень приложения | Ack не на диске или reclaim → **повтор Get**; идемпотентный handler |
 
-**Вывод:** с **`appendfsync always`** (и нормальным диском) Redis даёт **сопоставимый с MySQL `innodb_flush_log_at_trx_commit=1` уровень** «OK → запись на локальном диске». Это не защищает от потери диска без реплики/бэкапа и не убирает at-least-once дубли на стороне consumer. «Как восстановление из вчерашнего mysqldump» — и там, и там будут дыры.
+С **`appendfsync always`** и исправным диском Redis даёт уровень «OK → запись на локальном диске», сопоставимый с MySQL при `innodb_flush_log_at_trx_commit=1`. Это не замена реплики/бэкапа при отказе диска и не отменяет at-least-once на стороне consumer. Восстановление из устаревшего дампа оставляет ту же дыру, что и у MySQL.
 
 ---
 
-## Результаты прогона (локально)
+## Измерения
 
-Среда: Ryzen 7 2700, Redis 6.2.6 в Docker, volume на хосте. Тесты: `TestPersist_*`, бенч: `BenchmarkPersistPublish` (`SRQ_PERSIST_DOCKER=1`).
+Среда: Linux amd64, Ryzen 7 2700, Redis 6.2.6 в Docker, volume на хосте. Интеграционные тесты `TestPersist_*`, бенч `BenchmarkPersistPublish` (флаг `SRQ_PERSIST_DOCKER=1`).
 
 ### Crash (`kill -9` процесса Redis)
 
-| Профиль | Publish пережил kill | Ack остался «съеденным» |
+| Профиль | Publish пережил kill | Ack остался применённым |
 |---------|----------------------|-------------------------|
 | no-persist | нет | — (БД пустая) |
 | rdb-default | нет | — |
 | aof-everysec | да* | да* |
 | aof-always | **да** | **да** |
 
-\*kill процесса ≠ power loss: байты AOF без fsync могут остаться в page cache хоста. Для everysec Redis официально допускает потерю ~1s при падении машины.
+\*Kill процесса не равен power loss: байты AOF без fsync могут остаться в page cache хоста. Документация Redis для `everysec` допускает потерю ~1s при падении машины.
 
-In-flight (Get без Ack) + aof-always: payload после рестарта **есть** → повторная обработка возможна после reclaim.
+Get без Ack при `aof-always`: после рестарта payload на месте — возможна повторная обработка после reclaim.
 
-### Throughput Publish (медиана, `benchtime=2s`, count=3)
+### Throughput Publish (медиана, `benchtime=2s`, `count=3`)
 
 | Профиль | ns/op | vs no-persist |
 |---------|------:|--------------:|
@@ -133,9 +129,7 @@ In-flight (Get без Ack) + aof-always: payload после рестарта **�
 | aof-everysec | ~222 000 | ~1.1× |
 | **aof-always** | **~7 120 000** | **~37× медленнее** |
 
-`everysec` почти не бьёт publish на этой машине; **`always` — сильный trade-off** (fsync на каждый EVAL). Имеет смысл на критичном контуре или выносить durable Redis отдельно.
-
-Сырые логи: `docs/bench-results/persistence-HEAD.txt` (не на Pages).
+`everysec` почти не снижает Publish относительно RAM-only; **`always`** — существенный trade-off (fsync на каждый EVAL). Для критичного контура либо принимают стоимость, либо выносят durable Redis отдельно.
 
 ```bash
 SRQ_PERSIST_DOCKER=1 go test -run='TestPersist_' -count=1 -timeout=15m -v .
