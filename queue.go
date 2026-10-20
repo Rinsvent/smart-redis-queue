@@ -111,6 +111,10 @@ type Task struct {
 	Tags        []string  `json:"tags,omitempty"`        // теги для индексации / массового удаления
 	Groups      []string  `json:"groups,omitempty"`      // rate-limit / обход Get (пустые → DefaultGroup)
 	RejectCount int       `json:"rejectCount,omitempty"` // кол-во reject для расчёта задержки
+
+	// bindRedis / bindQueue — клиент и очередь consumer’а после Get (для NewSteps; шард верный).
+	bindRedis *redis.Client
+	bindQueue string
 }
 
 // encodeTags сериализует теги в строку для Lua add-скрипта.
@@ -663,6 +667,8 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 			Payload:     decoded,
 			Scheduled:   time.Now(),
 			RejectCount: rejectCount,
+			bindRedis:   c.redis,
+			bindQueue:   c.queueName,
 		})
 	}
 

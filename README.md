@@ -27,6 +27,7 @@
 - **Rate limit на Get** — opt-in слои group (токен/коннектор) + partition (чат); deny → block соответствующего scope без выдачи задачи
 - **Удаление без consumer** — `Admin.Remove` снимает ожидающую задачу по ID
 - **Шардинг** — несколько standalone Redis (`ShardByGroup` / `ByManual` / …); см. [docs](https://rinsvent.github.io/smart-redis-queue/sharding/)
+- **Step recovery** — checkpoint шагов handler (`NewSteps` / `Do`); см. [docs](https://rinsvent.github.io/smart-redis-queue/features/step-recovery/)
 
 ## Требования
 

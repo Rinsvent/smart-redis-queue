@@ -83,6 +83,7 @@ nav:
       - Concurrency tags (race!): features/race.md
       - Backpressure и теги: features/backpressure-tags.md
       - Сжатие и метрики: features/compression-stats.md
+      - Step recovery: features/step-recovery.md
   - Сравнение очередей: comparison.md
   - Масштабирование: scaling.md
   - Шардинг: sharding.md

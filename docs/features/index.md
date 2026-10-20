@@ -16,6 +16,7 @@
 | zstd | Меньше памяти Redis на крупных payload | [Сжатие / метрики](compression-stats.md) |
 | Stats | get/ack/reject в Redis и в UI | [Сжатие / метрики](compression-stats.md) |
 | Шардинг | Несколько Redis, sticky ByGroup/ByManual | [Шардинг](../sharding.md) |
+| Step recovery | Checkpoint шагов handler (`NewSteps`) | [Step recovery](step-recovery.md) |
 
 ## Prefetch и пул
 

@@ -874,10 +874,10 @@ if idempotencyTtl > 0 then
 else
 	redis.call('DEL', payloadKey)
 end
-redis.call('DEL', partitionKey)
-redis.call('DEL', priorityKey)
-redis.call('DEL', "queue:" .. queueName .. ":reject_count:" .. taskId)
-redis.call('DEL', raceTagsKey)
+redis.call('DEL', partitionKey, priorityKey,
+	"queue:" .. queueName .. ":reject_count:" .. taskId,
+	"queue:" .. queueName .. ":step:" .. taskId,
+	raceTagsKey)
 
 -- Чистим индексы тегов (если были); пустой SET тега удаляем явно
 local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
@@ -1212,7 +1212,7 @@ if redis.call('ZREM', queueKey, taskId) == 0 then
 end
 
 local payload = redis.call('GET', payloadKey) or ''
-redis.call('DEL', payloadKey, partitionKey, priorityKey, "queue:" .. queueName .. ":reject_count:" .. taskId)
+redis.call('DEL', payloadKey, partitionKey, priorityKey, "queue:" .. queueName .. ":reject_count:" .. taskId, "queue:" .. queueName .. ":step:" .. taskId)
 cleanupTags()
 -- F5: waiting remove — race:tags + возможные locks (value=taskId)
 local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
@@ -1312,7 +1312,7 @@ local function removeOne(taskId)
 	end
 
 	local payload = redis.call('GET', payloadKey) or ''
-	redis.call('DEL', payloadKey, partitionKey, priorityKey, "queue:" .. queueName .. ":reject_count:" .. taskId)
+	redis.call('DEL', payloadKey, partitionKey, priorityKey, "queue:" .. queueName .. ":reject_count:" .. taskId, "queue:" .. queueName .. ":step:" .. taskId)
 	cleanupTags(taskId)
 
 	local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partition .. ":priorities"

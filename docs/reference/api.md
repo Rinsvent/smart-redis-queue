@@ -44,6 +44,7 @@
 | `SetIdempotencyTtl` | Окно после Ack |
 | `SetRateLimit` | Rate limit на Get |
 | `SetConcurrencyTags` | `race!` |
+| `NewSteps(ctx, task)` / `NewStepsRaw` / `Do` / `Commit` / `Last` / `Release` | Step recovery |
 | `SetStatsRetention` / `SetTagsStats` | Метрики |
 | `SetCheckDeadConsumerLocksOnGet` | Probe dead locks |
 | `Use` | Middleware |
