@@ -87,19 +87,26 @@ SRQ хранит очередь **только в Redis**. Протокол Get/
 - **Повтор после Ack OK** — возможен, если Ack не попал на диск (`everysec` + power loss, или нет AOF). При `always` повторной выдачи после успешного Ack нет.
 - **Get без Ack, затем падение Redis** — при AOF задача не исчезает; после восстановления её снова выдадут (после lock TTL). Side-effect handler мог уже выполниться — нужна идемпотентность.
 
-### Сравнение с MySQL
+### Сравнение с Kafka и RabbitMQ
 
-Ни MySQL, ни Redis не дают абсолютной гарантии «без потерь и без дублей» во всех авариях.
+У брокеров те же классы дыр, что у Redis: **OK продюсеру ≠ вечная сохранность**, и **consumer ack ≠ exactly-once**. Разница в том, *чем* закрывают окно потери — чаще **репликацией**, а не fsync на каждое сообщение (как `appendfsync always`).
 
-| Риск | MySQL InnoDB | Redis + SRQ |
-|------|--------------|-------------|
-| Commit/Publish вернул OK, процесс убит | При `innodb_flush_log_at_trx_commit=1` — на диске | При `appendfsync always` — на диске |
-| Commit OK, **машина** обесточилась | Зависит от flush и диска; `=1` обычно durable | `always` — сопоставимо; `everysec` — до ~1s потери (близко к `innodb_flush_log_at_trx_commit=2`) |
-| Восстановление из **старого дампа**/RDB | Потеря всего после бэкапа | То же для RDB / старого AOF |
-| Реплика отстаёт, мастер умер | Не доехавшие в binlog на replica транзакции **потеряны** (async) | То же для async replica; `WAIT` / sync replica дороже |
-| Дубль после сбоя | Ретрай клиента / уровень приложения | Ack не на диске или reclaim → **повтор Get**; идемпотентный handler |
+| Риск | Kafka | RabbitMQ | Redis + SRQ |
+|------|-------|----------|-------------|
+| Publish/produce вернул OK, брокер убит | `acks=0` — можно потерять; `acks=1` — лидер принял, при падении лидера до реплик возможен **loss**; `acks=all` + достаточный `min.insync.replicas` — OK значит запись в ISR | Confirm без persistent/durable — слабо; persistent + durable queue — на брокере; classic queue всё ещё может потерять при падении узла до sync; **quorum queues** — OK после большинства | Без AOF — loss; `everysec` — до ~1s при power loss; `always` — на локальном диске; async replica — как отстающий follower |
+| Машина / диск узла | Держатся на **репликах** (если ISR не сузили до одного); один брокер без реплик — потеря partition | Quorum / mirrored: нужна живая majority / зеркало; один узел — потеря | Нужны реплика Redis или бэкап AOF; один узел + смерть диска — потеря |
+| Consumer обработал, ack, затем сбой | Offset закоммичен → не перечитают (при at-least-once до commit — дубль); EOS — отдельный режим транзакций | Ack снял сообщение с очереди; confirm/ack на диске зависит от типа очереди; дубли при redelivery до ack | Ack в Redis; если Ack не на диске — **повтор Get**; иначе нет |
+| Дубль после сбоя | Стандартный at-least-once до commit offset; идемпотентный consumer / EOS | Redelivery до ack; идемпотентный handler | Reclaim / Ack не на диске; идемпотентный handler |
 
-С **`appendfsync always`** и исправным диском Redis даёт уровень «OK → запись на локальном диске», сопоставимый с MySQL при `innodb_flush_log_at_trx_commit=1`. Это не замена реплики/бэкапа при отказе диска и не отменяет at-least-once на стороне consumer. Восстановление из устаревшего дампа оставляет ту же дыру, что и у MySQL.
+Окна потери (типичный prod, не «всё выключено»):
+
+- **Kafka:** при `acks=all` и нормальном ISR окно на produce узкое; при `acks=1` или узком ISR — потеря последних записей лидера реальна. Fsync лога батчами — на durability обычно опираются на реплики, не на `always`-fsync каждой записи.
+- **RabbitMQ:** publisher confirms + quorum (или аналог) — узкое окно; classic persistent на одном узле ближе к «приняли в память/журнал» с риском при краше до flush/реплики.
+- **Redis + SRQ:** `appendfsync everysec` ≈ секундное окно при power loss (похоже по духу на «не ждать каждый fsync»); `always` — локально жёстче, чем дефолтный Kafka/Rabbit, но **дороже по throughput** (~37× в [измерениях](#измерения)); для отказоустойчивости узла всё равно нужна реплика (`WAIT` и т.п.), как ISR у Kafka.
+
+Ни один из трёх не обещает «без потерь и без дублей» при любом restore из старого бэкапа или при async-реплике, которая не успела догнать.
+
+*(Аналог «OK → fsync на локальный диск» из мира СУБД — MySQL `innodb_flush_log_at_trx_commit=1` ≈ Redis `appendfsync always`. У Kafka/Rabbit в проде чаще выбирают репликационную durability, а не такой flush на каждое сообщение.)*
 
 ---
 
