@@ -1,0 +1,26 @@
+# Shard benches — HEAD (local), 2026-10-20
+# env: Linux amd64, AMD Ryzen 7 2700, Redis 6.2.6 docker
+# go test -bench='BenchmarkShard…' -benchtime=2s -count=3
+# multi-process: SRQ_SHARD_ADDRS=6379,6380,6381,6382 (4× redis-server)
+#
+# Bottleneck: shared CPU on one host (N redis-server + Go bench).
+# ~1.5× / ~1.15× are same-host ceilings — expect higher gains on separate machines.
+
+BenchmarkShardPublish_SingleDB-16                 37930/43617/39020   68696/55994/55367 ns/op
+BenchmarkShardPublish_MultiDB/db_2-16             37636/35763/42106   70022/75342/61953 ns/op
+BenchmarkShardPublish_MultiDB/db_4-16             33574/41938/41295   71431/81727/59010 ns/op
+BenchmarkShardPublish_KeyFanout/single_db-16      36501/30697/38131   65668/69421/61889 ns/op
+BenchmarkShardPublish_KeyFanout/multi_db_4-16     33706/34872/34279   83324/73308/66770 ns/op
+BenchmarkShardPublish_MultiProcess/proc_4-16      74311/56966/66086   51780/36805/31528 ns/op
+BenchmarkShardConsume_Parallel/single_db-16       17631/18045/19156  134475/162446/126763 ns/op
+BenchmarkShardConsume_Parallel/multi_db_4-16      21490/20452/19675  112619/131798/117150 ns/op
+
+# medians (ns/op):
+# Publish SingleDB          55994
+# Publish MultiDB×2         70022
+# Publish MultiDB×4         71431
+# Publish KeyFanout 1DB     65668
+# Publish KeyFanout 4DB     73308
+# Publish MultiProcess×4    36805   (~1.5× vs SingleDB)
+# Consume Parallel 1DB     134475
+# Consume Parallel 4DB     117150   (~1.15× vs SingleDB)

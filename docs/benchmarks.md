@@ -35,6 +35,27 @@
 
 На ~1 KiB выигрыш по памяти есть, по latency — почти ноль.
 
+## Шардинг
+
+Параллельный Publish по группам / Consume пулом. Медиана, `benchtime=2s`. Все цифры — **один хост** (Redis + бенч на Ryzen 7 2700): упор в общий CPU, поэтому прирост скромный. На разных серверах ожидается больше. Подробности — [Шардинг](sharding.md#бенчмарки-локально).
+
+| Сценарий | ns/op | vs baseline |
+|----------|------:|------------:|
+| Publish 1 DB | 56 000 | — |
+| Publish 4 DB (один Redis) | 71 000 | без ×N Lua |
+| Publish 4× redis-server (same host) | 37 000 | **~1.5×** (ceiling на 1 CPU) |
+| Consume×8, 1 DB | 134 000 | — |
+| Consume×8, 4 DB | 117 000 | **~1.15×** (same host) |
+
+Multi-DB — меньше ключей на DB, небольшой выигрыш Consume. ×N Lua — отдельные процессы; на отдельных машинах — сильнее, чем ~1.5× с одной тачки.
+
+```bash
+go test -run='^$' -bench='BenchmarkShard' -benchtime=2s -count=3 -timeout=30m .
+
+SRQ_SHARD_ADDRS=127.0.0.1:6379,127.0.0.1:6380,127.0.0.1:6381,127.0.0.1:6382 \
+  go test -run='^$' -bench='BenchmarkShardPublish_MultiProcess' -benchtime=2s -count=3 .
+```
+
 ## Как прогнать у себя
 
 ```bash

@@ -22,10 +22,13 @@
 
 v1: процедура drain + ReadOnly, без dual-read/consistent hashing. Consistent hashing — возможный follow-up.
 
-## Бенчи (план)
+## Бенчи (снято 2026-10-20)
 
-- A: 1 Redis × N DB — ожидание ≈ без выигрыша Lua
-- B: N redis-server × ByGroup — ожидание порядка ×N до упора в CPU/сеть
+Сырые: `docs/bench-results/sharding-HEAD.txt`. Публично: `docs/sharding.md`, `docs/benchmarks.md`.
+
+- Publish 1 DB vs 4 DB same process: без выигрыша (чуть хуже из‑за router).
+- Publish 4× redis-server: ~1.5× (не линейно на этой машине).
+- Consume 4 DB same process: ~1.15× — меньше ключей/нагрузки на DB.
 
 ## Admin / UI
 
