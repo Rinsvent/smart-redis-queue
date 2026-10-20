@@ -1,0 +1,29 @@
+# Persistence crash + Publish throughput — HEAD, 2026-10-20
+# env: Linux amd64, Ryzen 7 2700, Redis 6.2.6 docker, volume on host /tmp
+# SRQ_PERSIST_DOCKER=1 go test -run='TestPersist_' -v .
+# SRQ_PERSIST_DOCKER=1 go test -run='^$' -bench='BenchmarkPersistPublish' -benchtime=2s -count=3
+
+## Crash: Publish OK → docker kill -s KILL → restart same volume
+
+no-persist:     survives=false
+rdb-default:    survives=false   (BGSAVE not yet)
+aof-everysec:   survives=true    (process kill; host page cache — see note)
+aof-always:     survives=true
+
+## Crash: Get+Ack OK → kill -9 → restart
+
+aof-everysec:   redelivered=false (this run)
+aof-always:     redelivered=false (ack stays gone)
+inflight Get no Ack + aof-always: payload survives (at-least-once / reclaim later)
+
+## Everysec window (5× Publish+immediate kill)
+
+lost 0/5 on process kill — NOT equivalent to power loss.
+Redis docs: appendfsync everysec may lose ~1 second on OS/power crash.
+
+## BenchmarkPersistPublish medians (ns/op)
+
+no-persist:    194433
+rdb-default:   259629
+aof-everysec:  221777   (~1.1× vs no-persist)
+aof-always:   7118573   (~37× vs no-persist)

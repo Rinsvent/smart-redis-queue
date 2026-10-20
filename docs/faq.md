@@ -16,6 +16,10 @@
 
 Да. Делайте handler идемпотентным и/или включите [idempotency TTL](features/debounce-idempotency.md).
 
+## Publish вернул OK — сообщение точно на диске?
+
+Только если Redis так настроен. Без AOF/`appendfsync always` (или надёжной реплики) `kill -9` / power loss может стереть уже «успешный» Publish. Подробности и цифры — [Гарантии доставки](delivery.md#персист-redis-что-гарантирует-srq-что--redis).
+
 ## Чем rate limit группы отличается от backpressure по тегу?
 
 | | Rate limit / BlockGroups | Tag backpressure |

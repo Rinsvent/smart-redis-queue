@@ -56,6 +56,21 @@ SRQ_SHARD_ADDRS=127.0.0.1:6379,127.0.0.1:6380,127.0.0.1:6381,127.0.0.1:6382 \
   go test -run='^$' -bench='BenchmarkShardPublish_MultiProcess' -benchtime=2s -count=3 .
 ```
 
+## Persistence (Publish throughput)
+
+Один хост, Redis 6.2.6 в Docker. Медиана ns/op. Подробности crash-сценариев — [Гарантии доставки](delivery.md#результаты-прогона-локально).
+
+| Профиль | ns/op | vs no-persist |
+|---------|------:|--------------:|
+| no-persist | ~194 000 | 1.0× |
+| aof-everysec | ~222 000 | ~1.1× |
+| aof-always | ~7 120 000 | **~37×** |
+
+```bash
+SRQ_PERSIST_DOCKER=1 go test -run='^$' -bench='BenchmarkPersistPublish' \
+  -benchtime=2s -count=3 -timeout=30m .
+```
+
 ## Как прогнать у себя
 
 ```bash

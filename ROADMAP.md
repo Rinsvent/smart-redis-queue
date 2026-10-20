@@ -38,9 +38,11 @@ API: `ShardConfig`, `ShardByGroup|Queue|Manual|Partition`, `Producer.SetShards` 
 
 Продолжение ops-поверхности: удобство по groups/tags/RL/blocked, payload, purge, профили хостов — по фактическим болям из использования.
 
-### 3. Сохранность при падениях
+### 3. Сохранность при падениях — сделано
 
-Проверка и документ: при AOF `appendfsync always` / правильном RDB+реплике потери после Ack/до Publish не должно быть «из воздуха». Чеклист: что гарантирует Redis, что гарантирует SRQ (at-least-once до Ack), сценарии kill -9 / failover. При необходимости — интеграционный тест на persistence.
+Публично: [`docs/delivery.md`](docs/delivery.md) (чеклист AOF/RDB, сценарии Publish/Ack/inflight, сравнение с MySQL flush, бенчи always vs everysec).  
+Тесты: `persistence_crash_test.go` (`SRQ_PERSIST_DOCKER=1`), конфиги `scripts/redis-persist/`.  
+Сырые: `docs/bench-results/persistence-HEAD.txt`.
 
 ### 4. Persist / replay по offset (журнал)
 

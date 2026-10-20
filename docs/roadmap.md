@@ -16,7 +16,7 @@
 ## В планах
 
 1. **Доработка Desktop UI** — каталог/метрики по списку шардов, по болям из использования.
-2. **Чеклист persistence** — что даёт Redis AOF/RDB и что даёт SRQ.
+2. ~~**Чеклист persistence**~~ — см. [Гарантии доставки](delivery.md#персист-redis-что-гарантирует-srq-что--redis).
 3. **Журнал / replay** — не Kafka-log из коробки; варианты archive, side-stream, CDC.
 4. **Auto-ack** после успешного handler.
 5. **Selective groups** — consumer читает только выбранные группы.
@@ -30,7 +30,7 @@
 2. ~~Шардинг (ByGroup / ByQueue / ByManual, ReadOnly drain)~~ — [sharding.md](sharding.md)  
 3. Auto-ack  
 4. Selective groups  
-5. Desktop и persistence checklist  
+5. Desktop UI 
 6. Journal / archive — после выбора модели  
 
 Актуальный список в репозитории: [`ROADMAP.md`](https://github.com/Rinsvent/smart-redis-queue/blob/main/ROADMAP.md).
