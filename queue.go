@@ -319,6 +319,8 @@ type Consumer struct {
 	idempotencyTtl              time.Duration
 	rateLimit                   *RateLimitConfig
 	concurrencyTags             bool // F5: проверка race! в Get / release в Ack·Reject
+	samePartitionBatch          bool
+	extendGroupBlocksOnly       bool
 	middlewares                 []HandlerMiddleware
 	stopPing                    chan struct{}
 	stats                       *StatsSink
@@ -413,6 +415,20 @@ func (c *Consumer) SetPrefetchCount(n int) {
 // SetCheckDeadConsumerLocksOnGet флаг проверки блокировок при get
 func (c *Consumer) SetCheckDeadConsumerLocksOnGet(cd bool) {
 	c.checkDeadConsumerLocksOnGet = cd
+}
+
+// SetSamePartitionBatch — Get набирает пачку из одной партиции: первая задача выбирается как обычно
+// (случайная свободная группа и партиция), остальные до prefetchCount — только из её партиции.
+// Готовых задач в партиции меньше — пачка меньше, без ожидания. По умолчанию выключено.
+func (c *Consumer) SetSamePartitionBatch(enabled bool) {
+	c.samePartitionBatch = enabled
+}
+
+// SetExtendGroupBlocksOnly — Reject с blockGroups и BlockGroups только продлевают паузу группы
+// (ZADD GT, Redis >= 6.2): параллельные отказы с коротким waitTime не сокращают уже стоящую
+// длинную паузу. По умолчанию выключено — каждый вызов перезаписывает unlockAt.
+func (c *Consumer) SetExtendGroupBlocksOnly(enabled bool) {
+	c.extendGroupBlocksOnly = enabled
 }
 
 // SetIdempotencyTtl — окно dedupe после успешного Ack: payload:{id} живёт TTL, повторный Publish с тем же ID отклоняется (NX).
@@ -596,7 +612,7 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 		bool01(c.checkDeadConsumerLocksOnGet),
 	}
 	args = appendGetRateLimitArgs(args, c.rateLimit)
-	args = append(args, bool01(c.concurrencyTags))
+	args = append(args, bool01(c.concurrencyTags), bool01(c.samePartitionBatch))
 
 	result, err := script.Run(ctx, c.redis, []string{}, args...).Result()
 
@@ -693,6 +709,7 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, 
 		waitTime,
 		groupsStr,
 		bool01(c.concurrencyTags),
+		bool01(c.extendGroupBlocksOnly),
 	).Result()
 
 	if err != nil {
@@ -712,10 +729,10 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, 
 // BlockGroups паркует группы на waitTime секунд (без задачи): ZADD group → unlockAt в groups.
 // Get не обходит ready этих групп, пока now < unlockAt.
 func (c *Consumer) BlockGroups(ctx context.Context, waitTime float64, groups ...string) error {
-	return blockGroups(ctx, c.redis, c.queueName, waitTime, groups...)
+	return blockGroups(ctx, c.redis, c.queueName, waitTime, c.extendGroupBlocksOnly, groups...)
 }
 
-func blockGroups(ctx context.Context, rdb *redis.Client, queueName string, waitTime float64, groups ...string) error {
+func blockGroups(ctx context.Context, rdb *redis.Client, queueName string, waitTime float64, extendOnly bool, groups ...string) error {
 	if waitTime <= 0 || len(groups) == 0 {
 		return nil
 	}
@@ -723,7 +740,7 @@ func blockGroups(ctx context.Context, rdb *redis.Client, queueName string, waitT
 	if err != nil {
 		return err
 	}
-	_, err = getBlockGroupsScript().Run(ctx, rdb, []string{}, queueName, waitTime, groupsStr).Result()
+	_, err = getBlockGroupsScript().Run(ctx, rdb, []string{}, queueName, waitTime, groupsStr, bool01(extendOnly)).Result()
 	if err != nil {
 		return fmt.Errorf("failed to block groups: %w", err)
 	}
@@ -741,6 +758,8 @@ type ConsumerPool struct {
 	idempotencyTtl              time.Duration
 	rateLimit                   *RateLimitConfig
 	concurrencyTags             bool
+	samePartitionBatch          bool
+	extendGroupBlocksOnly       bool
 	middlewares                 []HandlerMiddleware
 	stats                       *StatsSink
 }
@@ -808,6 +827,16 @@ func (p *ConsumerPool) SetIdempotencyTtl(n time.Duration) {
 	p.idempotencyTtl = n
 }
 
+// SetSamePartitionBatch — см. Consumer.SetSamePartitionBatch.
+func (p *ConsumerPool) SetSamePartitionBatch(enabled bool) {
+	p.samePartitionBatch = enabled
+}
+
+// SetExtendGroupBlocksOnly — см. Consumer.SetExtendGroupBlocksOnly.
+func (p *ConsumerPool) SetExtendGroupBlocksOnly(enabled bool) {
+	p.extendGroupBlocksOnly = enabled
+}
+
 // Use добавляет middleware вокруг handler (см. Consumer.Use).
 func (p *ConsumerPool) Use(mw ...HandlerMiddleware) {
 	p.middlewares = append(p.middlewares, mw...)
@@ -853,6 +882,8 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c.idempotencyTtl = p.idempotencyTtl
 		c.rateLimit = p.rateLimit
 		c.concurrencyTags = p.concurrencyTags
+		c.samePartitionBatch = p.samePartitionBatch
+		c.extendGroupBlocksOnly = p.extendGroupBlocksOnly
 		c.middlewares = p.middlewares
 		c.stats = p.stats
 		c.statsOwn = false
