@@ -226,6 +226,7 @@ return notAddedItems
 // ARGV[4] = checkDeadConsumerLocksOnGet ("1" / "0")
 // ARGV[5] = algorithm ("" = RL выкл); ARGV[6]=gRateN + пары; затем pRateN + пары
 // После rates: ARGV[argIdx] = concurrencyTags ("1" / "0")
+// ARGV[argIdx+1] = samePartition ("1" / "0") — добор prefetch из партиции первой задачи
 // Возвращает: {taskId1, partition1, payload1, rejectCount1, ...} или {}
 var getScript = redis.NewScript(`
 local queueName = ARGV[1]
@@ -267,6 +268,7 @@ end
 
 -- F5: concurrency tags (race!) — только при opt-in (хелперы после deferredPartitions)
 local concurrencyTags = (ARGV[argIdx] or "") == "1"
+local samePartition = (ARGV[argIdx + 1] or "") == "1"
 local raceLocksKey = "queue:" .. queueName .. ":race:locks"
 local raceLocks = nil
 local raceSkips = 0
@@ -654,6 +656,9 @@ local function tryCollectFromPartition(partition, group)
 	return getFromPartition(partition, group)
 end
 
+-- Группа, из которой взята последняя задача collectOne (нужна добору samePartition для RL group-слоя).
+local lastCollectedGroup = nil
+
 -- ready = ZSET (score=0). Random start index → ZRANGE батчами по кругу. Память O(batch).
 local function tryReadyGroup(g)
 	local readyKey = "queue:" .. queueName .. ":group:" .. g .. ":ready"
@@ -680,6 +685,7 @@ local function tryReadyGroup(g)
 		for pi = 1, #parts do
 			local taskData = tryCollectFromPartition(parts[pi], g)
 			if taskData then
+				lastCollectedGroup = g
 				return taskData
 			end
 		end
@@ -741,13 +747,25 @@ local function collectOne()
 end
 
 -- Основной цикл: набираем до prefetchCount задач (4 элемента на задачу: id, partition, payload, rejectCount)
+-- samePartition: первая задача — обычный честный выбор группы и партиции, остальные — только из её партиции.
+local stickyPartition = nil
+local stickyGroup = nil
 while #results / 4 < prefetchCount do
 	if raceBudgetExhausted then
 		break
 	end
-	local taskData = collectOne()
+	local taskData
+	if stickyPartition then
+		taskData = tryCollectFromPartition(stickyPartition, stickyGroup)
+	else
+		taskData = collectOne()
+	end
 	if not taskData then
 		break
+	end
+	if samePartition and not stickyPartition then
+		stickyPartition = taskData[2]
+		stickyGroup = lastCollectedGroup
 	end
 	results[#results + 1] = taskData[1]
 	results[#results + 1] = taskData[2]
@@ -905,6 +923,7 @@ return 1
 // ARGV[4] = waitTime в секундах (дробное OK; 0 = без блокировки)
 // ARGV[5] = blockGroups (g1#g2#..., опционально)
 // ARGV[6] = concurrencyTags ("1" / "0") — F5 release race locks
+// ARGV[7] = extendGroupBlocksOnly ("1" / "0") — пауза группы только продлевается (ZADD GT)
 var rejectScript = redis.NewScript(`
 local queueName = ARGV[1]
 local taskId = ARGV[2]
@@ -912,6 +931,7 @@ local consumerId = ARGV[3]
 local waitTime = tonumber(ARGV[4]) or 0
 local blockGroupsStr = ARGV[5] or ""
 local concurrencyTags = (ARGV[6] or "") == "1"
+local extendGroupBlocksOnly = (ARGV[7] or "") == "1"
 
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
 
@@ -990,7 +1010,11 @@ if waitTime > 0 then
 	if blockGroupsStr ~= "" then
 		for group in string.gmatch(blockGroupsStr, "[^#]+") do
 			if group ~= "" then
-				redis.call('ZADD', groupsKey, unlockAt, group)
+				if extendGroupBlocksOnly then
+					redis.call('ZADD', groupsKey, 'GT', unlockAt, group)
+				else
+					redis.call('ZADD', groupsKey, unlockAt, group)
+				end
 			end
 		end
 	end
@@ -1022,10 +1046,12 @@ return 1
 // ARGV[1] = queue name
 // ARGV[2] = waitTime секунды
 // ARGV[3] = groups (g1#g2#...)
+// ARGV[4] = extendOnly ("1" / "0") — пауза группы только продлевается (ZADD GT)
 var blockGroupsScript = redis.NewScript(`
 local queueName = ARGV[1]
 local waitTime = tonumber(ARGV[2]) or 0
 local groupsStr = ARGV[3] or ""
+local extendOnly = (ARGV[4] or "") == "1"
 if waitTime <= 0 or groupsStr == "" then
 	return 0
 end
@@ -1036,7 +1062,11 @@ local groupsKey = "queue:" .. queueName .. ":groups"
 local n = 0
 for group in string.gmatch(groupsStr, "[^#]+") do
 	if group ~= "" then
-		redis.call('ZADD', groupsKey, unlockAt, group)
+		if extendOnly then
+			redis.call('ZADD', groupsKey, 'GT', unlockAt, group)
+		else
+			redis.call('ZADD', groupsKey, unlockAt, group)
+		end
 		n = n + 1
 	end
 end

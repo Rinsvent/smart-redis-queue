@@ -41,6 +41,8 @@
 | `Get` / `GetChan` / `Consume` | Выдача и цикл |
 | `Ack` / `Reject` / `BlockGroups` | Завершение / парковка |
 | `SetPollInterval` / `SetPrefetchCount` | Поллинг |
+| `SetSamePartitionBatch` | Пачка `Get` из одной партиции |
+| `SetExtendGroupBlocksOnly` | Пауза группы только продлевается (`ZADD GT`) |
 | `SetIdempotencyTtl` | Окно после Ack |
 | `SetRateLimit` | Rate limit на Get |
 | `SetConcurrencyTags` | `race!` |
