@@ -46,7 +46,7 @@
 | `SetIdempotencyTtl` | Окно после Ack |
 | `SetRateLimit` | Rate limit на Get |
 | `SetConcurrencyTags` | `race!` |
-| `NewSteps(ctx, task)` / `NewStepsRaw` / `Do` / `Commit` / `Last` / `Release` | Step recovery |
+| `NewSteps(ctx, task)` / `NewStepsRaw` / `Do` / `Commit` / `Last` / `Release` | Step recovery (checkpoint; EOS эффекта — идемпотентный handler, см. [доку](../features/step-recovery.md)) |
 | `Task.Headers` / `SetHeader` / `SetHeaders` | Мета между попытками |
 | `SetStatsRetention` / `SetTagsStats` | Метрики |
 | `SetCheckDeadConsumerLocksOnGet` | Probe dead locks |

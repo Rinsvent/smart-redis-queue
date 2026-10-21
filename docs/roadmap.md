@@ -16,7 +16,7 @@
 ## В планах
 
 1. **Доработка Desktop UI** — каталог/метрики по списку шардов, по болям из использования.
-2. ~~**Чеклист persistence**~~ — см. [Гарантии доставки](delivery.md#персист-redis-что-гарантирует-srq-что--redis).
+2. ~~**Чеклист persistence**~~ — см. [Гарантии доставки](delivery.md#redis-persist).
 3. **Журнал / replay** — не Kafka-log из коробки; варианты archive, side-stream, CDC.
 4. **Auto-ack** после успешного handler.
 5. **Selective groups** — consumer читает только выбранные группы.

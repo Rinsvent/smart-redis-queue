@@ -78,7 +78,7 @@ pool.Consume(ctx, handler)
 - Явный пин: `PublishTo(ctx, "s1", tasks...)` / `PublishManual` / `WithShardKey`.
 - Rate limit и `BlockGroups` — **per-shard** (при sticky ByGroup один аккаунт всегда на одном шарде — этого достаточно).
 
-## Добавление и удаление шарда
+## Добавление и удаление шарда {#shard-lifecycle}
 
 Смена числа шардов при `hash % N` **переназначает** часть ключей. Живые задачи сами не переезжают. Без процедуры возможны «тихие» хвосты на старом шарде и дубли ID на новом.
 
@@ -108,7 +108,7 @@ pool.Consume(ctx, handler)
 - Менять `Strategy` или формулу hash при непустых шардах без drain.
 - Публиковать тем же `Task.ID` на другой шард, пока старый payload жив — это две независимые записи.
 
-## Бенчмарки (локально)
+## Бенчмарки (локально) {#local-benchmarks}
 
 Среда: **одна машина** — Linux amd64, Ryzen 7 2700, Redis 6.2.6 в docker на том же хосте, Go-бенч тоже здесь. `benchtime=2s`, `count=3`, медиана ns/op. Параллельный Publish по разным `Groups` (ByGroup). Код: `BenchmarkShard*`.
 
