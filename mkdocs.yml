@@ -84,6 +84,7 @@ nav:
       - Backpressure и теги: features/backpressure-tags.md
       - Сжатие и метрики: features/compression-stats.md
       - Step recovery: features/step-recovery.md
+      - Headers: features/headers.md
   - Сравнение очередей: comparison.md
   - Масштабирование: scaling.md
   - Шардинг: sharding.md

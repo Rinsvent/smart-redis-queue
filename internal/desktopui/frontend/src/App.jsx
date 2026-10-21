@@ -1606,7 +1606,7 @@ export default function App() {
             setPayloadOpen(true)
           }}
         >
-          Payload by ID
+          Task by ID
         </MenuItem>
         <MenuItem
           onClick={() => {
@@ -1706,7 +1706,7 @@ export default function App() {
       </Dialog>
 
       <Dialog open={payloadOpen} onClose={() => setPayloadOpen(false)} fullWidth maxWidth="md">
-        <DialogTitle>Payload by ID</DialogTitle>
+        <DialogTitle>Task by ID</DialogTitle>
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 1 }}>
             <Stack direction="row" spacing={1}>
@@ -1726,19 +1726,43 @@ export default function App() {
                   partition={payloadResult.partition} priority={payloadResult.priority} group=
                   {payloadResult.group || '—'}
                 </Typography>
-                <Box
-                  component="pre"
-                  sx={{
-                    mt: 1,
-                    p: 1.5,
-                    bgcolor: 'action.hover',
-                    borderRadius: 2,
-                    overflow: 'auto',
-                    maxHeight: 360,
-                    fontSize: 13,
-                  }}
-                >
-                  {payloadResult.payload}
+                {payloadResult.headers && Object.keys(payloadResult.headers).length > 0 && (
+                  <Box sx={{ mt: 1.5 }}>
+                    <Typography variant="subtitle2" gutterBottom>
+                      Headers
+                    </Typography>
+                    <Box
+                      component="pre"
+                      sx={{
+                        p: 1.5,
+                        bgcolor: 'action.hover',
+                        borderRadius: 2,
+                        overflow: 'auto',
+                        maxHeight: 200,
+                        fontSize: 13,
+                      }}
+                    >
+                      {JSON.stringify(payloadResult.headers, null, 2)}
+                    </Box>
+                  </Box>
+                )}
+                <Box sx={{ mt: 1.5 }}>
+                  <Typography variant="subtitle2" gutterBottom>
+                    Payload
+                  </Typography>
+                  <Box
+                    component="pre"
+                    sx={{
+                      p: 1.5,
+                      bgcolor: 'action.hover',
+                      borderRadius: 2,
+                      overflow: 'auto',
+                      maxHeight: 360,
+                      fontSize: 13,
+                    }}
+                  >
+                    {payloadResult.payload}
+                  </Box>
                 </Box>
               </Box>
             )}

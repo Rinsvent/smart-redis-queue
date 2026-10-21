@@ -28,6 +28,7 @@
 - **Удаление без consumer** — `Admin.Remove` снимает ожидающую задачу по ID
 - **Шардинг** — несколько standalone Redis (`ShardByGroup` / `ByManual` / …); см. [docs](https://rinsvent.github.io/smart-redis-queue/sharding/)
 - **Step recovery** — checkpoint шагов handler (`NewSteps` / `Do`); см. [docs](https://rinsvent.github.io/smart-redis-queue/features/step-recovery/)
+- **Headers** — мета между попытками (`SetHeader` / ошибки при Reject); см. [docs](https://rinsvent.github.io/smart-redis-queue/features/headers/)
 
 ## Требования
 

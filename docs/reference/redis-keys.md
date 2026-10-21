@@ -8,6 +8,7 @@
 | `partition:{p}` | ZSET | Ожидающие задачи |
 | `payload:{id}` | STRING | Тело задачи / маркер идемпотентности |
 | `step:{id}` | STRING | Checkpoint step recovery; чистится на Ack/Remove |
+| `headers:{id}` | HASH | Мета между попытками; чистится на Ack/Remove |
 | `consumers` | HASH | Heartbeat consumer’ов |
 | `consumer:{cid}:tasks` | SET | In-progress у consumer |
 | `groups` | ZSET | Группы; score ≤ now — свободна |

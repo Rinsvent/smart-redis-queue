@@ -93,14 +93,15 @@ type TagListResult struct {
 	Truncated bool      `json:"truncated"` // true если набрали полный limit — возможно есть ещё
 }
 
-// TaskView — payload и мета по id.
+// TaskView — payload, headers и мета по id.
 type TaskView struct {
-	TaskID    string `json:"taskId"`
-	Payload   string `json:"payload"`
-	Partition string `json:"partition"`
-	Priority  string `json:"priority"`
-	Group     string `json:"group"`
-	Exists    bool   `json:"exists"`
+	TaskID    string            `json:"taskId"`
+	Payload   string            `json:"payload"`
+	Headers   map[string]string `json:"headers,omitempty"`
+	Partition string            `json:"partition"`
+	Priority  string            `json:"priority"`
+	Group     string            `json:"group"`
+	Exists    bool              `json:"exists"`
 }
 
 // TagRemoveResult — агрегат RemoveByTag для UI.
@@ -983,9 +984,14 @@ func (a *App) GetTaskPayload(queue, taskID string, db int) (TaskView, error) {
 	}
 	part, _ := rdb.Get(ctx, "queue:"+queue+":partition:"+taskID).Result()
 	prio, _ := rdb.Get(ctx, "queue:"+queue+":priority:"+taskID).Result()
+	headers, _ := rdb.HGetAll(ctx, "queue:"+queue+":headers:"+taskID).Result()
+	if len(headers) == 0 {
+		headers = nil
+	}
 	return TaskView{
 		TaskID:    taskID,
 		Payload:   payload,
+		Headers:   headers,
 		Partition: part,
 		Priority:  prio,
 		Exists:    true,

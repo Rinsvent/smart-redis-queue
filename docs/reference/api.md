@@ -45,6 +45,7 @@
 | `SetRateLimit` | Rate limit на Get |
 | `SetConcurrencyTags` | `race!` |
 | `NewSteps(ctx, task)` / `NewStepsRaw` / `Do` / `Commit` / `Last` / `Release` | Step recovery |
+| `Task.Headers` / `SetHeader` / `SetHeaders` | Мета между попытками |
 | `SetStatsRetention` / `SetTagsStats` | Метрики |
 | `SetCheckDeadConsumerLocksOnGet` | Probe dead locks |
 | `Use` | Middleware |
