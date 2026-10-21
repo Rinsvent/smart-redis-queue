@@ -71,10 +71,13 @@ extra:
     - icon: fontawesome/brands/github
       link: https://github.com/Rinsvent/smart-redis-queue
 
+# Верхний уровень = вкладки (navigation.tabs). Держим мало пунктов —
+# иначе хвост (FAQ и т.п.) обрезается без нормального скролла.
 nav:
   - Главная: index.md
-  - Зачем SRQ: why.md
-  - Быстрый старт: getting-started.md
+  - Начать:
+      - Зачем SRQ: why.md
+      - Быстрый старт: getting-started.md
   - Фичи:
       - Обзор: features/index.md
       - Партиции и порядок: features/partitions.md
@@ -85,15 +88,18 @@ nav:
       - Сжатие и метрики: features/compression-stats.md
       - Step recovery: features/step-recovery.md
       - Headers: features/headers.md
-  - Сравнение очередей: comparison.md
-  - Масштабирование: scaling.md
-  - Шардинг: sharding.md
-  - Гарантии доставки: delivery.md
-  - Приложения и сервер: apps.md
-  - Бенчмарки: benchmarks.md
-  - Roadmap: roadmap.md
-  - FAQ: faq.md
-  - Contributing: contributing.md
+  - Архитектура:
+      - Сравнение очередей: comparison.md
+      - Масштабирование: scaling.md
+      - Шардинг: sharding.md
+      - Гарантии доставки: delivery.md
+  - Практика:
+      - Приложения и сервер: apps.md
+      - Бенчмарки: benchmarks.md
+  - Проект:
+      - Roadmap: roadmap.md
+      - FAQ: faq.md
+      - Contributing: contributing.md
   - Справка:
       - API: reference/api.md
       - Ключи Redis: reference/redis-keys.md
