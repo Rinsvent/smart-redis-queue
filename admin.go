@@ -408,7 +408,7 @@ func (a *Admin) isPartitionBlocked(ctx context.Context, queueName, partition str
 
 // BlockGroups паркует группы на waitTime секунд (см. Consumer.BlockGroups).
 func (a *Admin) BlockGroups(ctx context.Context, queueName string, waitTime float64, groups ...string) error {
-	return blockGroups(ctx, a.redis, queueName, waitTime, groups...)
+	return blockGroups(ctx, a.redis, queueName, waitTime, false, groups...)
 }
 
 // TagStats — индекс тега (SCARD queue:…:tag:…).

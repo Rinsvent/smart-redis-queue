@@ -183,6 +183,12 @@ consumer.BlockGroups(ctx, 0.3, "acct:9f3a")
 admin.BlockGroups(ctx, "my-queue", 0.3, "acct:9f3a")
 ```
 
+Пауза без сокращения (opt-in, Redis ≥ 6.2): параллельные отказы одной группы с разным `waitTime` не перезаписывают длинную паузу короткой — `Reject(..., blockGroups)` и `Consumer.BlockGroups` делают `ZADD GT`.
+
+```go
+pool.SetExtendGroupBlocksOnly(true) // или consumer.SetExtendGroupBlocksOnly(true)
+```
+
 #### Транспортный rate limit на Get (opt-in)
 
 Чтобы не делать Get → внешний Allow → Reject, лимиты вшиваются в Get (алгоритмы как в [rate-limiter](https://github.com/Rinsvent/rate-limiter)). Два слоя AND:
@@ -266,6 +272,16 @@ for task := range ch {
 ```
 
 То же для `Consume` / пула: `consumer.SetIdempotencyTtl(2 * time.Second)`.
+
+#### Пачка из одной партиции (opt-in)
+
+Для потребителя, который склеивает задачи одной партиции в один внешний запрос (например, профили пользователей одного аккаунта пачкой): первая задача `Get` выбирается как обычно — случайная свободная группа и партиция, остальные до `prefetchCount` — только из её партиции, по приоритету и `scheduled <= now`. Готовых меньше — пачка меньше, без ожидания.
+
+```go
+consumer.SetPrefetchCount(100)
+consumer.SetSamePartitionBatch(true)
+tasks, _ := consumer.Get(ctx) // все задачи из одной партиции
+```
 
 ### Idempotency TTL после Ack (не rate limit)
 

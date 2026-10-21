@@ -7,6 +7,8 @@
 | Ordered-партиции (`!`) | Строгий порядок, один consumer | [Партиции](partitions.md) |
 | Priority / Scheduled | Важное раньше; отложенный запуск | [Партиции](partitions.md) |
 | Groups + BlockGroups | Парковка scope (аккаунт, ключ API) | [Rate limit](rate-limit.md) |
+| Пауза без сокращения | Короткий 429 не сокращает длинную паузу группы | [Rate limit](rate-limit.md) |
+| Пачка из одной партиции | Склеить задачи одного ресурса в один внешний запрос | [Партиции](partitions.md) |
 | Rate limit на Get | Два слоя лимитов до выдачи задачи | [Rate limit](rate-limit.md) |
 | Idempotency TTL | Не принимать тот же ID после успешного Ack | [Debounce / идемпотентность](debounce-idempotency.md) |
 | Debounce (`deb!`) | В очереди всегда последний payload | [Debounce / идемпотентность](debounce-idempotency.md) |
