@@ -257,8 +257,12 @@ export default function App() {
   const [detail, setDetail] = useState(null)
 
   const [viewMode, setViewMode] = useState('partitions')
-  const [listScope, setListScope] = useState('all') // all | blocked
+  const [listScope, setListScope] = useState('all') // all | blocked | locked
   const [rows, setRows] = useState([])
+  const [poisonRows, setPoisonRows] = useState([])
+  const [raceLocks, setRaceLocks] = useState([])
+  const [obsMode, setObsMode] = useState('list') // list | poison
+  const [scanBusy, setScanBusy] = useState(false)
   const [listTotal, setListTotal] = useState(0)
   const [listTruncated, setListTruncated] = useState(false)
   const [listFilter, setListFilter] = useState('')
@@ -485,16 +489,25 @@ export default function App() {
         nextRows = r?.tags || []
         nextTotal = 0
         nextTrunc = !!r?.truncated
+      } else if (listScope === 'blocked') {
+        const r = await api.listBlockedPartitions(q, db)
+        nextRows = r?.partitions || []
+        nextTotal = r?.total || 0
+        nextTrunc = !!r?.truncated
+      } else if (listScope === 'locked') {
+        const r = await api.listLockedPartitions(q, db)
+        nextRows = r?.partitions || []
+        nextTotal = r?.total || 0
+        nextTrunc = !!r?.truncated
       } else {
-        const r =
-          listScope === 'blocked'
-            ? await api.listBlockedPartitions(q, db)
-            : await api.listPartitions(q, db, filter)
+        const r = await api.listPartitions(q, db, filter)
         nextRows = r?.partitions || []
         nextTotal = r?.total || 0
         nextTrunc = !!r?.truncated
       }
       if (isStale(gen, q, db, mode)) return
+      setObsMode('list')
+      setPoisonRows([])
       setRows(nextRows)
       setListTotal(nextTotal)
       setListTruncated(nextTrunc)
@@ -509,10 +522,61 @@ export default function App() {
     }
   }, [selectedQueue, activeDb, listFilter, viewMode, listScope])
 
+  const loadRaceLocks = useCallback(async () => {
+    if (!selectedQueue) {
+      setRaceLocks([])
+      return
+    }
+    try {
+      const list = await api.listRaceLocks(selectedQueue, activeDb)
+      setRaceLocks(list || [])
+    } catch {
+      setRaceLocks([])
+    }
+  }, [selectedQueue, activeDb])
+
+  const runScanTopPending = useCallback(async () => {
+    if (!selectedQueue || scanBusy) return
+    setScanBusy(true)
+    setViewMode('partitions')
+    setListScope('all')
+    try {
+      const r = await api.scanTopPending(selectedQueue, activeDb, 20)
+      setObsMode('list')
+      setPoisonRows([])
+      setRows(r?.partitions || [])
+      setListTotal(r?.total || 0)
+      setListTruncated(!!r?.truncated)
+      notify(`Top pending: ${(r?.partitions || []).length} of ${r?.total || 0}`, 'success')
+    } catch (e) {
+      if (!isCanceled(e)) notify(String(e), 'error')
+    } finally {
+      setScanBusy(false)
+    }
+  }, [selectedQueue, activeDb, scanBusy])
+
+  const runScanHighReject = useCallback(async () => {
+    if (!selectedQueue || scanBusy) return
+    setScanBusy(true)
+    try {
+      const list = await api.scanHighReject(selectedQueue, activeDb, 3, 50)
+      setObsMode('poison')
+      setPoisonRows(list || [])
+      setListTotal((list || []).length)
+      setListTruncated(false)
+      notify(`High reject (≥3): ${(list || []).length}`, 'success')
+    } catch (e) {
+      if (!isCanceled(e)) notify(String(e), 'error')
+    } finally {
+      setScanBusy(false)
+    }
+  }, [selectedQueue, activeDb, scanBusy])
+
   const refreshSelected = useCallback(() => {
     loadDetail()
     loadList()
-  }, [loadDetail, loadList])
+    loadRaceLocks()
+  }, [loadDetail, loadList, loadRaceLocks])
 
   useEffect(() => {
     loadConnections()
@@ -542,17 +606,19 @@ export default function App() {
     if (!item?.dbs?.includes(activeDb)) return undefined
     loadDetail()
     loadList()
+    loadRaceLocks()
     if (pollRef.current) clearInterval(pollRef.current)
     if (pollMs > 0) {
       pollRef.current = setInterval(() => {
         loadDetail()
         loadList()
+        loadRaceLocks()
       }, pollMs)
     }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current)
     }
-  }, [queues, selectedQueue, activeDb, loadDetail, loadList, pollMs])
+  }, [queues, selectedQueue, activeDb, loadDetail, loadList, loadRaceLocks, pollMs])
 
   useEffect(() => {
     localStorage.setItem('srq-theme', themeMode)
@@ -1300,6 +1366,17 @@ export default function App() {
                           label="Consumers"
                           value={snapField(detail, 'consumers', 'Consumers')}
                         />
+                        {raceLocks.length > 0 && (
+                          <Tooltip
+                            title={raceLocks
+                              .map((r) => `${r.tag || r.Tag} → ${r.taskId || r.TaskID}`)
+                              .join('\n')}
+                          >
+                            <Typography variant="body2" color="warning.main" sx={{ fontWeight: 600 }}>
+                              Race locks: {raceLocks.length}
+                            </Typography>
+                          </Tooltip>
+                        )}
                       </Stack>
 
                       <Stack
@@ -1441,6 +1518,8 @@ export default function App() {
                             }
                             setViewMode(e.target.value)
                             setListScope('all')
+                            setObsMode('list')
+                            setPoisonRows([])
                             setListFilterDraft('')
                             setListFilter('')
                             setRows([])
@@ -1463,11 +1542,15 @@ export default function App() {
                             onChange={(e) => {
                               bumpQueryGen()
                               setListScope(e.target.value)
+                              setObsMode('list')
                               setRows([])
                             }}
                           >
                             <MenuItem value="all">All</MenuItem>
                             <MenuItem value="blocked">Blocked</MenuItem>
+                            {viewMode === 'partitions' && (
+                              <MenuItem value="locked">Locked</MenuItem>
+                            )}
                           </Select>
                         </FormControl>
                       )}
@@ -1476,9 +1559,39 @@ export default function App() {
                         fullWidth
                         placeholder={filterPlaceholder}
                         value={listFilterDraft}
-                        disabled={listScope === 'blocked'}
+                        disabled={listScope === 'blocked' || listScope === 'locked'}
                         onChange={(e) => setListFilterDraft(e.target.value)}
                       />
+                      {viewMode === 'partitions' && (
+                        <>
+                          <Tooltip title="Scan all partitions, show top 20 by pending">
+                            <span>
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                disabled={!selectedQueue || scanBusy}
+                                onClick={runScanTopPending}
+                                sx={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+                              >
+                                {scanBusy ? '…' : 'Top pending'}
+                              </Button>
+                            </span>
+                          </Tooltip>
+                          <Tooltip title="Scan reject_count ≥ 3">
+                            <span>
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                disabled={!selectedQueue || scanBusy}
+                                onClick={runScanHighReject}
+                                sx={{ flexShrink: 0, whiteSpace: 'nowrap' }}
+                              >
+                                Poison
+                              </Button>
+                            </span>
+                          </Tooltip>
+                        </>
+                      )}
                       {viewMode === 'tags' ? (
                         <Stack direction="row" alignItems="center" spacing={0.5} flexShrink={0}>
                           <Typography
@@ -1545,7 +1658,59 @@ export default function App() {
                       bgcolor: 'background.paper',
                     }}
                   >
-                    {viewMode === 'partitions' && (
+                    {obsMode === 'poison' && (
+                      <Table size="small" stickyHeader>
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Task ID</TableCell>
+                            <TableCell>Partition</TableCell>
+                            <TableCell align="right">Rejects</TableCell>
+                            <TableCell align="right">Actions</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {poisonRows.length === 0 ? (
+                            <TableRow>
+                              <TableCell colSpan={4}>
+                                <Typography variant="body2" color="text.secondary">
+                                  No high-reject tasks
+                                </Typography>
+                              </TableCell>
+                            </TableRow>
+                          ) : (
+                            poisonRows.map((t) => {
+                              const id = t.id || t.ID
+                              const part = t.partition || t.Partition || '—'
+                              const rc = t.rejectCount ?? t.RejectCount ?? 0
+                              return (
+                                <TableRow key={id}>
+                                  <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                                    {id}
+                                  </TableCell>
+                                  <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                                    {part}
+                                  </TableCell>
+                                  <TableCell align="right">{rc}</TableCell>
+                                  <TableCell align="right">
+                                    <Button
+                                      size="small"
+                                      onClick={() => {
+                                        setPayloadId(id)
+                                        setPayloadResult(null)
+                                        setPayloadOpen(true)
+                                      }}
+                                    >
+                                      Open
+                                    </Button>
+                                  </TableCell>
+                                </TableRow>
+                              )
+                            })
+                          )}
+                        </TableBody>
+                      </Table>
+                    )}
+                    {obsMode === 'list' && viewMode === 'partitions' && (
                       <Table size="small" stickyHeader>
                         <TableHead>
                           <TableRow>
@@ -1613,7 +1778,7 @@ export default function App() {
                       </Table>
                     )}
 
-                    {viewMode === 'groups' && (
+                    {obsMode === 'list' && viewMode === 'groups' && (
                       <Table size="small" stickyHeader>
                         <TableHead>
                           <TableRow>
@@ -1650,7 +1815,7 @@ export default function App() {
                       </Table>
                     )}
 
-                    {viewMode === 'tags' && (
+                    {obsMode === 'list' && viewMode === 'tags' && (
                       <Table size="small" stickyHeader>
                         <TableHead>
                           <TableRow>

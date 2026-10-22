@@ -634,6 +634,127 @@ func (a *App) ListBlockedPartitions(name string, db int) (PartitionListResult, e
 	}, nil
 }
 
+// ListLockedPartitions — ordered-партиции с :lock.
+func (a *App) ListLockedPartitions(name string, db int) (PartitionListResult, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return PartitionListResult{}, err
+	}
+	ctx, cancel := a.beginList(30 * time.Second)
+	defer cancel()
+	parts, err := admin.ListLockedPartitions(ctx, name)
+	if err != nil {
+		return PartitionListResult{}, err
+	}
+	out := make([]PartitionView, 0, len(parts))
+	for _, p := range parts {
+		groups := p.Groups
+		if groups == nil {
+			groups = []string{}
+		}
+		out = append(out, PartitionView{
+			ID:         p.Partition,
+			Pending:    p.Pending,
+			InProgress: p.InProgress,
+			Locked:     true,
+			Blocked:    p.Blocked,
+			Groups:     groups,
+		})
+	}
+	return PartitionListResult{
+		Partitions: out,
+		Total:      len(out),
+		Limit:      len(out),
+		Truncated:  false,
+	}, nil
+}
+
+// RaceLockView — для UI.
+type RaceLockView struct {
+	Tag    string `json:"tag"`
+	TaskID string `json:"taskId"`
+}
+
+// ListRaceLocks — активные race! locks.
+func (a *App) ListRaceLocks(name string, db int) ([]RaceLockView, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := a.beginList(10 * time.Second)
+	defer cancel()
+	items, err := admin.ListRaceLocks(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]RaceLockView, 0, len(items))
+	for _, e := range items {
+		out = append(out, RaceLockView{Tag: e.Tag, TaskID: e.TaskID})
+	}
+	return out, nil
+}
+
+// ScanTopPending — топ партиций по pending (медленный SCAN, кнопка в UI).
+func (a *App) ScanTopPending(name string, db int, topN int) (PartitionListResult, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return PartitionListResult{}, err
+	}
+	ctx, cancel := a.beginList(120 * time.Second)
+	defer cancel()
+	parts, total, err := admin.ScanTopPending(ctx, name, topN)
+	if err != nil {
+		return PartitionListResult{}, err
+	}
+	out := make([]PartitionView, 0, len(parts))
+	for _, p := range parts {
+		groups := p.Groups
+		if groups == nil {
+			groups = []string{}
+		}
+		out = append(out, PartitionView{
+			ID:         p.Partition,
+			Pending:    p.Pending,
+			InProgress: p.InProgress,
+			Locked:     p.Locked,
+			Blocked:    p.Blocked,
+			Groups:     groups,
+		})
+	}
+	return PartitionListResult{
+		Partitions: out,
+		Total:      total,
+		Limit:      len(out),
+		Truncated:  total > len(out),
+	}, nil
+}
+
+// PoisonTaskView — задача с высоким reject_count.
+type PoisonTaskView struct {
+	ID          string `json:"id"`
+	Partition   string `json:"partition"`
+	RejectCount int    `json:"rejectCount"`
+}
+
+// ScanHighReject — топ poison-задач (SCAN reject_count).
+func (a *App) ScanHighReject(name string, db int, minReject, topN int) ([]PoisonTaskView, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := a.beginList(120 * time.Second)
+	defer cancel()
+	items, err := admin.ScanHighReject(ctx, name, minReject, topN)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]PoisonTaskView, 0, len(items))
+	for _, t := range items {
+		out = append(out, PoisonTaskView{ID: t.ID, Partition: t.Partition, RejectCount: t.RejectCount})
+	}
+	return out, nil
+}
+
 // ListBlockedGroups — только группы на паузе (score > now).
 func (a *App) ListBlockedGroups(name string, db int) (GroupListResult, error) {
 	admin, err := a.adminForDB(db)

@@ -21,8 +21,13 @@ export const api = {
   cancelQueries: () => call('CancelQueries'),
   listPartitions: (name, db, filter) => call('ListPartitions', name, db, filter || ''),
   listBlockedPartitions: (name, db) => call('ListBlockedPartitions', name, db),
+  listLockedPartitions: (name, db) => call('ListLockedPartitions', name, db),
   listGroups: (name, db, filter) => call('ListGroups', name, db, filter || ''),
   listBlockedGroups: (name, db) => call('ListBlockedGroups', name, db),
+  listRaceLocks: (name, db) => call('ListRaceLocks', name, db),
+  scanTopPending: (name, db, topN) => call('ScanTopPending', name, db, topN ?? 20),
+  scanHighReject: (name, db, minReject, topN) =>
+    call('ScanHighReject', name, db, minReject ?? 3, topN ?? 50),
   listTags: (name, db, filter) => call('ListTags', name, db, filter || ''),
   blockGroups: (queue, waitTimeSec, groups, db) => call('BlockGroups', queue, waitTimeSec, groups, db),
   countTags: (name, db) => call('CountTags', name, db),
