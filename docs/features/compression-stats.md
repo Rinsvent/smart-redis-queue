@@ -22,6 +22,10 @@ consumer.SetStatsRetention(time.Hour)          // get/ack/reject раз в се�
 consumer.SetTagsStats("all", "campaign:spring") // SCARD выбранных тегов ~раз в секунду
 ```
 
-Несколько хостов пишут в одни и те же секундные ключи — счётчики суммируются. Чтобы видеть «всего в очереди», тегируйте задачи (например `all`) и добавьте этот тег в `SetTagsStats`.
+Несколько хостов пишут в одни и те же секундные ключи — счётчики суммируются.
 
-В Desktop UI есть график get/ack/reject и локальный watch тегов (poll на машине, в Redis ничего не пишет).
+**Total очереди** (ready + in-progress) ведётся в `srq:queues` автоматически (Publish/Ack). В Desktop UI линия **total** на графике Queue rates — live-семпл этого score; если реестра ещё нет (старый Redis без producer/consumer после обновления) — линия не рисуется. Тег `all` для размера очереди больше не нужен.
+
+Для срезов по бизнесу по-прежнему удобны теги + `SetTagsStats` / watch в UI.
+
+В Desktop UI: get/ack/reject (нужен `SetStatsRetention` на воркере), **total** из `srq:queues`, локальный watch тегов (poll на машине, в Redis не пишет).

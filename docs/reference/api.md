@@ -57,8 +57,8 @@
 
 ## Admin
 
-`ListQueues`, `ListQueueIndex`, `QueueDepth`, `RebuildQueueDepth`, `Inspect`, `QueueOverview`, `ListPartitions`, `ListBlockedPartitions`, `ListLockedPartitions`, `ListGroups`, `ListBlockedGroups`, `ListRaceLocks`, `ScanTopPending`, `ScanHighReject`, `ListTags`, `CountTags`, `BlockGroups`, `BlockPartition`, `UnblockPartition`, `Remove`, `RemoveByTag`, `CountByTag`, `Purge`, `Retry`, `QueueStatsBounds`, `ListQueueStats`.
+`ListQueues`, `ListQueueIndex`, `QueueDepth`, `QueueDepthIfIndexed`, `RebuildQueueDepth`, `Inspect`, `QueueOverview`, `ListPartitions`, `ListBlockedPartitions`, `ListLockedPartitions`, `ListGroups`, `ListBlockedGroups`, `ListRaceLocks`, `ScanTopPending`, `ScanHighReject`, `ListTags`, `CountTags`, `BlockGroups`, `BlockPartition`, `UnblockPartition`, `Remove`, `RemoveByTag`, `CountByTag`, `Purge`, `Retry`, `QueueStatsBounds`, `ListQueueStats`.
 
-`srq:queues` — total очереди без SCAN партиций; UI сортирует alpha или по total. Top pending / poison / locked — фоновые SCAN в Admin/UI, не hot path.
+`srq:queues` — total очереди без SCAN партиций; UI сортирует alpha или по total. `QueueDepthIfIndexed` — ok=false если реестра/члена ещё нет (график total пропускает). Top pending / poison / locked — фоновые SCAN в Admin/UI, не hot path.
 
 Полные сигнатуры — в GoDoc и исходниках. Примеры — в [фичах](../features/index.md).

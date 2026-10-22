@@ -283,6 +283,7 @@ export default function App() {
   const [hostMetrics, setHostMetrics] = useState([]) // Redis INFO/SLOWLOG samples
   const [watchMap, setWatchMap] = useState(loadWatchMap)
   const [watchSeries, setWatchSeries] = useState({}) // tag → [{sec,n}]
+  const [totalSeries, setTotalSeries] = useState([]) // [{sec,n}] из srq:queues
   const [loading, setLoading] = useState(false)
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [listLoading, setListLoading] = useState(false)
@@ -352,6 +353,7 @@ export default function App() {
     setListLoading(false)
     setRedisStats([])
     setWatchSeries({})
+    setTotalSeries([])
     try {
       api.cancelQueries()
     } catch {
@@ -705,13 +707,19 @@ export default function App() {
       tag,
       points: watchSeries[tag] || [],
     }))
-    return buildChartSeries(redisStats, from, to, watches)
+    const hasData =
+      (redisStats && redisStats.length > 0) ||
+      (totalSeries && totalSeries.length > 0) ||
+      watches.some((w) => (w.points || []).length > 0)
+    if (!hasData) return []
+    return buildChartSeries(redisStats, from, to, watches, totalSeries)
   }, [
     chartDash,
     hostMetrics,
     redisStats,
     watchSeries,
     watchedTags,
+    totalSeries,
     chartWindowSec,
     statsBounds,
   ])
@@ -726,10 +734,34 @@ export default function App() {
     })
   }
 
+  const sampleQueueTotal = useCallback(async () => {
+    if (!selectedQueue) return
+    const gen = queryGen.current
+    const q = selectedQueue
+    const db = activeDb
+    try {
+      const d = await api.queueDepth(q, db)
+      if (isStale(gen, q, db)) return
+      const ok = !!(d?.ok ?? d?.Ok)
+      if (!ok) return // нет srq:queues / очереди в индексе — не рисуем total
+      const n = Number(d?.total ?? d?.Total) || 0
+      const sec = Math.floor(Date.now() / 1000)
+      const keepSec = chartWindowSec > 0 ? chartWindowSec : 86400
+      setTotalSeries((prev) => {
+        const arr = [...prev, { sec, n }]
+        const cutoff = sec - keepSec
+        return arr.filter((p) => p.sec >= cutoff)
+      })
+    } catch {
+      /* skip */
+    }
+  }, [selectedQueue, activeDb, chartWindowSec])
+
   const loadRedisStats = useCallback(async () => {
     if (!selectedQueue) {
       setRedisStats([])
       setStatsBounds({ from: 0, to: 0 })
+      setTotalSeries([])
       return
     }
     const gen = queryGen.current
@@ -747,10 +779,11 @@ export default function App() {
         from: Number(bounds?.from ?? bounds?.From) || 0,
         to: Number(bounds?.to ?? bounds?.To) || 0,
       })
+      await sampleQueueTotal()
     } catch (e) {
       if (isStale(gen, q, db) || isCanceled(e)) return
     }
-  }, [selectedQueue, activeDb, chartWindowSec])
+  }, [selectedQueue, activeDb, chartWindowSec, sampleQueueTotal])
 
   const pollWatchedTags = useCallback(async () => {
     if (!selectedQueue || watchedTags.length === 0) return
@@ -1395,7 +1428,14 @@ export default function App() {
                           return (
                             <ButtonBase
                               key={db}
-                              onClick={() => setActiveDb(db)}
+                              onClick={() => {
+                                if (db === activeDb) return
+                                bumpQueryGen()
+                                setTotalSeries([])
+                                setRedisStats([])
+                                setWatchSeries({})
+                                setActiveDb(db)
+                              }}
                               sx={{
                                 px: 1.25,
                                 py: 0.35,
@@ -1499,7 +1539,7 @@ export default function App() {
                               ? hostMetrics.length === 0
                                 ? 'No Redis metrics yet (rebuild desktop / check connection)'
                                 : 'Collecting Redis INFO / SLOWLOG…'
-                              : undefined
+                              : 'No rates yet — SetStatsRetention on the worker for get/ack/reject; total from srq:queues after producer/consumer; watch tags below for live counts'
                           }
                         />
                       </Box>

@@ -121,6 +121,12 @@ type StatPointView struct {
 	Tags   map[string]int64 `json:"tags,omitempty"`
 }
 
+// QueueDepthView — live total из srq:queues (Ok=false если реестра/очереди ещё нет).
+type QueueDepthView struct {
+	Total int64 `json:"total"`
+	Ok    bool  `json:"ok"`
+}
+
 // App — биндинги Wails / логика desktop manager.
 type App struct {
 	ctx   context.Context
@@ -871,6 +877,21 @@ func (a *App) ListQueueStats(name string, db int, lastSec int) ([]StatPointView,
 		})
 	}
 	return out, nil
+}
+
+// QueueDepth — live total из srq:queues; Ok=false → на графике пропускаем.
+func (a *App) QueueDepth(name string, db int) (QueueDepthView, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return QueueDepthView{}, err
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), 3*time.Second)
+	defer cancel()
+	total, ok, err := admin.QueueDepthIfIndexed(ctx, name)
+	if err != nil {
+		return QueueDepthView{}, err
+	}
+	return QueueDepthView{Total: total, Ok: ok}, nil
 }
 
 // QueueStatsBounds — min/max sec в stats:index.

@@ -49,6 +49,22 @@ func TestQueueIndex_PublishAckUpdatesDepth(t *testing.T) {
 	assert.Equal(t, int64(2), depth, "Reject не меняет total")
 }
 
+func TestQueueDepthIfIndexed_Missing(t *testing.T) {
+	_, _, rdb := setupTestQueue(t)
+	ctx := context.Background()
+	admin := NewAdmin(rdb)
+
+	total, ok, err := admin.QueueDepthIfIndexed(ctx, "no-such-queue")
+	require.NoError(t, err)
+	assert.False(t, ok)
+	assert.Equal(t, int64(0), total)
+
+	total, ok, err = admin.QueueDepthIfIndexed(ctx, "test-queue")
+	require.NoError(t, err)
+	assert.True(t, ok)
+	assert.Equal(t, int64(0), total)
+}
+
 func TestQueueIndex_ListByDepthAndRebuild(t *testing.T) {
 	_, _, rdb := setupTestQueue(t)
 	ctx := context.Background()

@@ -4,6 +4,7 @@ export const QUEUE_SERIES = [
   { key: 'get', label: 'get', color: '#1F6AA5' },
   { key: 'ack', label: 'ack', color: '#2E7D32' },
   { key: 'reject', label: 'reject', color: '#C62828' },
+  { key: 'total', label: 'total', color: '#6A1B9A' }, // gauge из srq:queues
 ]
 
 export const REDIS_SERIES = [
@@ -32,16 +33,23 @@ function normPoint(p) {
     get: Number(p.get ?? p.Get) || 0,
     ack: Number(p.ack ?? p.Ack) || 0,
     reject: Number(p.reject ?? p.Reject) || 0,
+    total: p.total != null || p.Total != null ? Number(p.total ?? p.Total) : null,
     tags,
   }
 }
 
-/** Build continuous series with gap fill: rates→0, gauges→forward-fill. */
-export function buildChartSeries(points, fromSec, toSec, watchSeries) {
+/** Build continuous series with gap fill: rates→0, gauges (tags/total)→forward-fill. */
+export function buildChartSeries(points, fromSec, toSec, watchSeries, totalPoints) {
   const bySec = new Map()
   for (const raw of points || []) {
     const p = normPoint(raw)
     if (p) bySec.set(p.sec, p)
+  }
+  const totalBySec = new Map()
+  for (const pt of totalPoints || []) {
+    const sec = Number(pt.sec)
+    if (!Number.isFinite(sec)) continue
+    totalBySec.set(sec, Number(pt.n) || 0)
   }
   const out = []
   let lastTags = {}
@@ -56,6 +64,14 @@ export function buildChartSeries(points, fromSec, toSec, watchSeries) {
   }
 
   let ffTags = { ...lastTags }
+  let ffTotal = null
+  // seed forward-fill from earliest sample before window
+  for (const pt of totalPoints || []) {
+    const sec = Number(pt.sec)
+    if (Number.isFinite(sec) && sec <= Math.floor(fromSec) && pt.n != null) {
+      ffTotal = Number(pt.n) || 0
+    }
+  }
   const from = Math.floor(fromSec)
   const to = Math.floor(toSec)
   for (let sec = from; sec <= to; sec++) {
@@ -65,6 +81,7 @@ export function buildChartSeries(points, fromSec, toSec, watchSeries) {
       get: p?.get || 0,
       ack: p?.ack || 0,
       reject: p?.reject || 0,
+      total: null, // null → линия total не рисуется (нет srq:queues)
       tags: {},
     }
     if (p?.tags) {
@@ -83,6 +100,12 @@ export function buildChartSeries(points, fromSec, toSec, watchSeries) {
         row.tags[tag] = ffTags[tag]
       }
     }
+    if (totalBySec.has(sec)) {
+      ffTotal = totalBySec.get(sec)
+    } else if (p?.total != null) {
+      ffTotal = p.total
+    }
+    if (ffTotal != null) row.total = ffTotal
     out.push(row)
   }
   return out
@@ -126,8 +149,22 @@ export default function RatesChart({ series, height = 160, lines = QUEUE_SERIES,
   }, [series, showTags])
 
   const legends = useMemo(() => {
+    const base = (lines || SERIES)
+      .map((s) => ({
+        ...s,
+        vals: series.map((r) => {
+          const v = r[s.key]
+          return v == null ? null : Number(v) || 0
+        }),
+      }))
+      // total без семплов srq:queues — пропускаем (не рисуем нулевую линию)
+      .filter((s) => s.key !== 'total' || s.vals.some((v) => v != null))
+      .map((s) => ({
+        ...s,
+        vals: s.vals.map((v) => (v == null ? 0 : v)),
+      }))
     return [
-      ...(lines || SERIES).map((s) => ({ ...s, vals: series.map((r) => r[s.key] || 0) })),
+      ...base,
       ...tagKeys.map((t, i) => ({
         key: `t:${t}`,
         label: t,

@@ -185,6 +185,18 @@ func (a *Admin) QueueDepth(ctx context.Context, queueName string) (int64, error)
 	return int64(score), nil
 }
 
+// QueueDepthIfIndexed — total и ok=true только если очередь есть в srq:queues.
+func (a *Admin) QueueDepthIfIndexed(ctx context.Context, queueName string) (total int64, ok bool, err error) {
+	score, err := a.redis.ZScore(ctx, QueuesIndexKey, queueName).Result()
+	if err == redis.Nil {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return int64(score), true, nil
+}
+
 // RebuildQueueDepth пересчитывает total = pending + in-progress и пишет в srq:queues.
 // Медленно на больших очередях — по кнопке / после ручного DEL.
 func (a *Admin) RebuildQueueDepth(ctx context.Context, queueName string) (int64, error) {
