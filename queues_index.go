@@ -9,7 +9,7 @@ import (
 
 // QueuesIndexKey — глобальный ZSET на инстансе Redis: member = имя очереди, score = total
 // (ready + in-progress). Publish/Ack/Remove обновляют score в том же Lua.
-// Каталог имён без SCAN queue:*:partitions; задел под future exchange.
+// Каталог имён без SCAN queue:*:partitions; dest для Exchange (см. internal/docs/exchange-design.md).
 const QueuesIndexKey = "srq:queues"
 
 // QueueIndexEntry — очередь в глобальном индексе.

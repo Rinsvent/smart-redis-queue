@@ -24,30 +24,35 @@ const (
 	RemovalStatusRemoved    = "removed"
 )
 
-// getAddScript возвращает Lua скрипт для добавления задач (батч)
-// ARGV[1] = queue name
-// ARGV[2] = количество задач
-// ARGV[3] = bpCount (число лимитов backpressure; 0 = выкл)
-// ARGV[4 .. 3+2*bpCount] = пары tag, limit
-// Далее группы по 7 аргументов на задачу (сдвиг taskBase = 4 + 2*bpCount):
+// getAddScript — добавление задач (батч). Один скрипт: single-queue и exchange multi-dest.
 //
-//	ARGV[taskBase + i*7] = task ID
-//	… partition, priority, scheduled, payload, tags, groups
+// Single (Producer.Publish):
 //
-// Возвращает:
+//	ARGV[1] = queue name
+//	ARGV[2] = taskCount
+//	ARGV[3] = bpCount
+//	ARGV[4 .. 3+2*bpCount] = пары tag, limit
+//	далее по 7 на задачу: id, partition, priority, scheduled, payload, tags, groups
 //
-//	— список индексов не добавленных (дубликаты NX);
-//	— {'!', 'backpressure', tag, count, limit} если SCARD+taskCount > limit (ничего не добавлено).
+// Exchange (Exchange.Publish atomic):
+//
+//	ARGV[1] = "ex"
+//	ARGV[2] = exchange name
+//	ARGV[3] = version (пусто = без GET ver; иначе check → ERR_EXCHANGE_VERSION)
+//	ARGV[4] = destCount
+//	ARGV[5 .. 4+destCount] = dest queue names
+//	далее как single с ARGV[1]=queue: taskCount, bpCount, bp pairs, tasks
+//
+// Возвращает: индексы NX-дубликатов; или {'!', 'backpressure', ...}; exchange при успехе {}.
 var addScript = redis.NewScript(`
-local queueName = ARGV[1]
-local taskCount = tonumber(ARGV[2])
-local bpCount = tonumber(ARGV[3]) or 0
-
--- F3: backpressure по тегам — до любых SET; fail → весь батч не пишется
-if bpCount > 0 then
+-- bpBase: индекс первого tag; taskBase: индекс первого task id (1-based ARGV).
+local function check_backpressure(queueName, taskCount, bpCount, bpBase)
+	if bpCount <= 0 then
+		return nil
+	end
 	for bi = 0, bpCount - 1 do
-		local tag = ARGV[4 + bi * 2]
-		local limit = tonumber(ARGV[5 + bi * 2]) or 0
+		local tag = ARGV[bpBase + bi * 2]
+		local limit = tonumber(ARGV[bpBase + 1 + bi * 2]) or 0
 		if tag ~= "" and limit > 0 then
 			local n = redis.call('SCARD', "queue:" .. queueName .. ":tag:" .. tag)
 			if n + taskCount > limit then
@@ -55,149 +60,193 @@ if bpCount > 0 then
 			end
 		end
 	end
+	return nil
 end
 
-local taskBase = 4 + bpCount * 2
-local partitionsKey = "queue:" .. queueName .. ":partitions"
--- groups: ZSET score=0|past (свободна) | unlockAt>now (блок). Единственный источник правды для групп.
-local groupsKey = "queue:" .. queueName .. ":groups"
+local function add_tasks_to_queue(queueName, taskCount, taskBase)
+	local partitionsKey = "queue:" .. queueName .. ":partitions"
+	local groupsKey = "queue:" .. queueName .. ":groups"
 
-local function ensureGroup(group)
-	if not redis.call('ZSCORE', groupsKey, group) then
-		redis.call('ZADD', groupsKey, 0, group)
-	end
-end
-
--- Поднять partition в ready всех её групп (после ZADD задачи).
-local function ensurePartitionReady(partitionCode)
-	local partGroupsKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups"
-	local pgroups = redis.call('SMEMBERS', partGroupsKey)
-	if #pgroups == 0 then
-		pgroups = {"_default"}
-		redis.call('SADD', partGroupsKey, "_default")
-	end
-	for gi = 1, #pgroups do
-		local g = pgroups[gi]
-		ensureGroup(g)
-		redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, partitionCode)
-	end
-end
-
-local debPrefix = "deb!"
-local notAddedItems = {}
-local addedCount = 0
-
-for i = 0, taskCount - 1 do
-    local base = taskBase + i * 7
-    local taskId = ARGV[base]
-    local partitionCode = ARGV[base + 1]
-	if partitionCode == "" then
-        partitionCode = "base"
-	end
-    local priority = ARGV[base + 2]
-    local scheduled = tonumber(ARGV[base + 3])
-    local payload = ARGV[base + 4]
-    local tagsStr = ARGV[base + 5] or ""
-    local groupsStr = ARGV[base + 6] or ""
-
-    local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
-    local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
-    local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
-	local isDebounce = taskId:sub(1, #debPrefix) == debPrefix
-
-    local ok = redis.call('SET', payloadKey, payload, 'NX')
-    if ok then
-		redis.call('SET', partitionKey, partitionCode)
-		redis.call('SET', priorityKey, priority)
-
-		local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. priority
-		redis.call('ZADD', partitionQueueKey, scheduled, taskId)
-		redis.call('SADD', partitionsKey, partitionCode)
-
-		local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
-		redis.call('ZADD', prioritiesKey, priority, priority)
-
-		if tagsStr ~= "" then
-			local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
-			local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
-			local racePrefix = "race!"
-			for tag in string.gmatch(tagsStr, "[^#]+") do
-				if tag ~= "" then
-					redis.call('SADD', "queue:" .. queueName .. ":tag:" .. tag, taskId)
-					redis.call('SADD', tagsKey, tag)
-					-- F5: race! → отдельный SET для Get (без опций на Publish)
-					if tag:sub(1, #racePrefix) == racePrefix then
-						redis.call('SADD', raceTagsKey, tag)
-					end
-				end
-			end
+	local function ensureGroup(group)
+		if not redis.call('ZSCORE', groupsKey, group) then
+			redis.call('ZADD', groupsKey, 0, group)
 		end
+	end
 
+	local function ensurePartitionReady(partitionCode)
 		local partGroupsKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups"
-		local hasGroup = false
-		if groupsStr ~= "" then
-			for group in string.gmatch(groupsStr, "[^#]+") do
-				if group ~= "" then
-					hasGroup = true
-					ensureGroup(group)
-					redis.call('ZADD', "queue:" .. queueName .. ":group:" .. group .. ":ready", 0, partitionCode)
-					redis.call('SADD', partGroupsKey, group)
-				end
-			end
-		end
-		if not hasGroup then
-			ensureGroup("_default")
-			redis.call('ZADD', "queue:" .. queueName .. ":group:_default:ready", 0, partitionCode)
+		local pgroups = redis.call('SMEMBERS', partGroupsKey)
+		if #pgroups == 0 then
+			pgroups = {"_default"}
 			redis.call('SADD', partGroupsKey, "_default")
 		end
-		addedCount = addedCount + 1
-    elseif isDebounce then
-		-- F2: payload уже есть — waiting (в ZSET) или in-flight (нет в ZSET)
-		local debounceKey = "queue:" .. queueName .. ":debounce:" .. taskId
-		local existingPart = redis.call('GET', partitionKey)
-		if existingPart == false then
-			existingPart = "base"
+		for gi = 1, #pgroups do
+			local g = pgroups[gi]
+			ensureGroup(g)
+			redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, partitionCode)
 		end
-		local existingPrio = redis.call('GET', priorityKey)
-		if existingPrio == false then
-			existingPrio = "0"
+	end
+
+	local debPrefix = "deb!"
+	local notAddedItems = {}
+	local addedCount = 0
+
+	for i = 0, taskCount - 1 do
+		local base = taskBase + i * 7
+		local taskId = ARGV[base]
+		local partitionCode = ARGV[base + 1]
+		if partitionCode == "" then
+			partitionCode = "base"
 		end
-		local oldQueueKey = "queue:" .. queueName .. ":partition:" .. existingPart .. ":" .. existingPrio
-		local inQueue = redis.call('ZSCORE', oldQueueKey, taskId)
+		local priority = ARGV[base + 2]
+		local scheduled = tonumber(ARGV[base + 3])
+		local payload = ARGV[base + 4]
+		local tagsStr = ARGV[base + 5] or ""
+		local groupsStr = ARGV[base + 6] or ""
 
-		redis.call('SET', payloadKey, payload)
+		local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
+		local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
+		local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
+		local isDebounce = taskId:sub(1, #debPrefix) == debPrefix
 
-		if inQueue ~= false then
-			-- waiting: сдвинуть score; при смене part/prio — перенести member
-			if existingPart ~= partitionCode or tostring(existingPrio) ~= tostring(priority) then
-				redis.call('ZREM', oldQueueKey, taskId)
-				redis.call('SET', partitionKey, partitionCode)
-				redis.call('SET', priorityKey, priority)
-			end
+		local ok = redis.call('SET', payloadKey, payload, 'NX')
+		if ok then
+			redis.call('SET', partitionKey, partitionCode)
+			redis.call('SET', priorityKey, priority)
+
 			local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. priority
 			redis.call('ZADD', partitionQueueKey, scheduled, taskId)
 			redis.call('SADD', partitionsKey, partitionCode)
+
 			local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
 			redis.call('ZADD', prioritiesKey, priority, priority)
-			ensurePartitionReady(partitionCode)
-			redis.call('DEL', debounceKey)
+
+			if tagsStr ~= "" then
+				local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
+				local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
+				local racePrefix = "race!"
+				for tag in string.gmatch(tagsStr, "[^#]+") do
+					if tag ~= "" then
+						redis.call('SADD', "queue:" .. queueName .. ":tag:" .. tag, taskId)
+						redis.call('SADD', tagsKey, tag)
+						if tag:sub(1, #racePrefix) == racePrefix then
+							redis.call('SADD', raceTagsKey, tag)
+						end
+					end
+				end
+			end
+
+			local partGroupsKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups"
+			local hasGroup = false
+			if groupsStr ~= "" then
+				for group in string.gmatch(groupsStr, "[^#]+") do
+					if group ~= "" then
+						hasGroup = true
+						ensureGroup(group)
+						redis.call('ZADD', "queue:" .. queueName .. ":group:" .. group .. ":ready", 0, partitionCode)
+						redis.call('SADD', partGroupsKey, group)
+					end
+				end
+			end
+			if not hasGroup then
+				ensureGroup("_default")
+				redis.call('ZADD', "queue:" .. queueName .. ":group:_default:ready", 0, partitionCode)
+				redis.call('SADD', partGroupsKey, "_default")
+			end
+			addedCount = addedCount + 1
+		elseif isDebounce then
+			local debounceKey = "queue:" .. queueName .. ":debounce:" .. taskId
+			local existingPart = redis.call('GET', partitionKey)
+			if existingPart == false then
+				existingPart = "base"
+			end
+			local existingPrio = redis.call('GET', priorityKey)
+			if existingPrio == false then
+				existingPrio = "0"
+			end
+			local oldQueueKey = "queue:" .. queueName .. ":partition:" .. existingPart .. ":" .. existingPrio
+			local inQueue = redis.call('ZSCORE', oldQueueKey, taskId)
+
+			redis.call('SET', payloadKey, payload)
+
+			if inQueue ~= false then
+				if existingPart ~= partitionCode or tostring(existingPrio) ~= tostring(priority) then
+					redis.call('ZREM', oldQueueKey, taskId)
+					redis.call('SET', partitionKey, partitionCode)
+					redis.call('SET', priorityKey, priority)
+				end
+				local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. priority
+				redis.call('ZADD', partitionQueueKey, scheduled, taskId)
+				redis.call('SADD', partitionsKey, partitionCode)
+				local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
+				redis.call('ZADD', prioritiesKey, priority, priority)
+				ensurePartitionReady(partitionCode)
+				redis.call('DEL', debounceKey)
+			else
+				redis.call('SET', debounceKey, tostring(scheduled))
+			end
 		else
-			-- in-flight: только payload + флаг until (без ZADD)
-			redis.call('SET', debounceKey, tostring(scheduled))
+			notAddedItems[#notAddedItems + 1] = i
 		end
-    else
-		notAddedItems[#notAddedItems + 1] = i
-    end
-end
-
-if addedCount > 0 then
-	local _qd = tonumber(redis.call('ZINCRBY', 'srq:queues', addedCount, queueName))
-	if _qd < 0 then
-		redis.call('ZADD', 'srq:queues', 0, queueName)
 	end
+
+	if addedCount > 0 then
+		local _qd = tonumber(redis.call('ZINCRBY', 'srq:queues', addedCount, queueName))
+		if _qd < 0 then
+			redis.call('ZADD', 'srq:queues', 0, queueName)
+		end
+	end
+
+	return notAddedItems
 end
 
-return notAddedItems
+if ARGV[1] == "ex" then
+	local exchangeName = ARGV[2]
+	local wantVer = ARGV[3] or ""
+	if wantVer ~= "" then
+		local cur = redis.call("GET", "srq:exchange:" .. exchangeName .. ":ver")
+		if cur == false or cur == nil then
+			cur = "0"
+		end
+		if tostring(cur) ~= wantVer then
+			return redis.error_reply("ERR_EXCHANGE_VERSION")
+		end
+	end
+
+	local destCount = tonumber(ARGV[4]) or 0
+	local destBase = 5
+	local afterDests = destBase + destCount
+	local taskCount = tonumber(ARGV[afterDests]) or 0
+	local bpCount = tonumber(ARGV[afterDests + 1]) or 0
+	local bpBase = afterDests + 2
+	local taskBase = bpBase + bpCount * 2
+
+	if destCount < 1 or taskCount < 1 then
+		return {}
+	end
+
+	for di = 0, destCount - 1 do
+		local bp = check_backpressure(ARGV[destBase + di], taskCount, bpCount, bpBase)
+		if bp then
+			return bp
+		end
+	end
+	for di = 0, destCount - 1 do
+		add_tasks_to_queue(ARGV[destBase + di], taskCount, taskBase)
+	end
+	return {}
+end
+
+local queueName = ARGV[1]
+local taskCount = tonumber(ARGV[2])
+local bpCount = tonumber(ARGV[3]) or 0
+local bpBase = 4
+local taskBase = 4 + bpCount * 2
+local bp = check_backpressure(queueName, taskCount, bpCount, bpBase)
+if bp then
+	return bp
+end
+return add_tasks_to_queue(queueName, taskCount, taskBase)
 `)
 
 // geLockScript возвращает Lua скрипт для блокировки ключей (батч)
