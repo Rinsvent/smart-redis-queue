@@ -60,10 +60,19 @@ type QueueStats struct {
 	PartitionTotal  int // сколько партиций найдено до limit (для ListPartitions)
 }
 
-// ListQueues возвращает имена очередей (union SCAN queue:*:partitions и queue:*:consumers).
-// Так видны и «осиротевшие» очереди, у которых остались только consumers.
+// ListQueues возвращает имена очередей: индекс srq:queues ∪ SCAN partitions/consumers (legacy).
+// Сортировка по имени. Depth — ListQueueIndex / QueueDepth.
 func (a *Admin) ListQueues(ctx context.Context) ([]string, error) {
 	seen := make(map[string]struct{})
+	if zs, err := a.redis.ZRange(ctx, QueuesIndexKey, 0, -1).Result(); err == nil {
+		for _, name := range zs {
+			if name != "" {
+				seen[name] = struct{}{}
+			}
+		}
+	} else if err != redis.Nil {
+		return nil, err
+	}
 	for _, pattern := range []string{"queue:*:partitions", "queue:*:consumers"} {
 		suffix := ":partitions"
 		if strings.HasSuffix(pattern, ":consumers") {
@@ -90,6 +99,73 @@ func (a *Admin) ListQueues(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(queues)
 	return queues, nil
+}
+
+// ListQueueIndex — очереди из srq:queues с total (score). byDepth=true → ZREVRANGE (толстые сверху).
+func (a *Admin) ListQueueIndex(ctx context.Context, byDepth bool) ([]QueueIndexEntry, error) {
+	var zs []redis.Z
+	var err error
+	if byDepth {
+		zs, err = a.redis.ZRevRangeWithScores(ctx, QueuesIndexKey, 0, -1).Result()
+	} else {
+		zs, err = a.redis.ZRangeWithScores(ctx, QueuesIndexKey, 0, -1).Result()
+	}
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]QueueIndexEntry, 0, len(zs))
+	for _, z := range zs {
+		name, _ := z.Member.(string)
+		if name == "" {
+			continue
+		}
+		out = append(out, QueueIndexEntry{Name: name, Total: int64(z.Score)})
+	}
+	if !byDepth {
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	}
+	return out, nil
+}
+
+// QueueDepth — score очереди в srq:queues (0 если нет).
+func (a *Admin) QueueDepth(ctx context.Context, queueName string) (int64, error) {
+	score, err := a.redis.ZScore(ctx, QueuesIndexKey, queueName).Result()
+	if err == redis.Nil {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return int64(score), nil
+}
+
+// RebuildQueueDepth пересчитывает total = pending + in-progress и пишет в srq:queues.
+// Медленно на больших очередях — по кнопке / после ручного DEL.
+func (a *Admin) RebuildQueueDepth(ctx context.Context, queueName string) (int64, error) {
+	if queueName == "" {
+		return 0, fmt.Errorf("queue name required")
+	}
+	pending, err := a.queuePendingTotal(ctx, queueName)
+	if err != nil {
+		return 0, err
+	}
+	var inProg int64
+	consumers, _ := a.redis.SMembers(ctx, "queue:"+queueName+":consumers").Result()
+	for _, cid := range consumers {
+		n, _ := a.redis.HLen(ctx, "queue:"+queueName+":consumer:"+cid+":tasks").Result()
+		inProg += n
+	}
+	total := pending + inProg
+	if total < 0 {
+		total = 0
+	}
+	if err := a.redis.ZAdd(ctx, QueuesIndexKey, redis.Z{Score: float64(total), Member: queueName}).Err(); err != nil {
+		return 0, err
+	}
+	return total, nil
 }
 
 // Inspect возвращает статистику по очередям с фильтрами.
@@ -409,6 +485,59 @@ func (a *Admin) isPartitionBlocked(ctx context.Context, queueName, partition str
 // BlockGroups паркует группы на waitTime секунд (см. Consumer.BlockGroups).
 func (a *Admin) BlockGroups(ctx context.Context, queueName string, waitTime float64, groups ...string) error {
 	return blockGroups(ctx, a.redis, queueName, waitTime, false, groups...)
+}
+
+// ListBlockedPartitions — партиции с unlockAt > now из ZSET blocked (без обхода всех партиций).
+func (a *Admin) ListBlockedPartitions(ctx context.Context, queueName string) ([]PartitionStats, error) {
+	nowMs := a.nowMs(ctx)
+	zs, err := a.redis.ZRangeByScoreWithScores(ctx, "queue:"+queueName+":blocked", &redis.ZRangeBy{
+		Min: "(" + strconv.FormatFloat(nowMs, 'f', -1, 64),
+		Max: "+inf",
+	}).Result()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	consumers, _ := a.redis.SMembers(ctx, "queue:"+queueName+":consumers").Result()
+	out := make([]PartitionStats, 0, len(zs))
+	for _, z := range zs {
+		name, _ := z.Member.(string)
+		if name == "" {
+			continue
+		}
+		ps := a.partitionStats(ctx, queueName, name, consumers)
+		ps.Blocked = true
+		out = append(out, ps)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Partition < out[j].Partition })
+	return out, nil
+}
+
+// ListBlockedGroups — группы с score > now (на паузе).
+func (a *Admin) ListBlockedGroups(ctx context.Context, queueName string) ([]GroupStats, error) {
+	nowMs := a.nowMs(ctx)
+	zs, err := a.redis.ZRangeByScoreWithScores(ctx, "queue:"+queueName+":groups", &redis.ZRangeBy{
+		Min: "(" + strconv.FormatFloat(nowMs, 'f', -1, 64),
+		Max: "+inf",
+	}).Result()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	out := make([]GroupStats, 0, len(zs))
+	for _, z := range zs {
+		gs := a.groupStatsFromZ(ctx, queueName, z, nowMs)
+		if gs.Name == "" {
+			continue
+		}
+		out = append(out, gs)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }
 
 // TagStats — индекс тега (SCARD queue:…:tag:…).
@@ -739,16 +868,20 @@ func (a *Admin) purgeQueue(ctx context.Context, queueName string) (int, error) {
 		return 0, err
 	}
 	if len(keys) == 0 {
+		_ = a.redis.ZRem(ctx, QueuesIndexKey, queueName).Err()
 		return 0, nil
 	}
 	if err := a.redis.Del(ctx, keys...).Err(); err != nil {
 		return 0, err
 	}
+	// Полный Purge — очередь исчезает из каталога (как раньше при SCAN-only).
+	_ = a.redis.ZRem(ctx, QueuesIndexKey, queueName).Err()
 	return len(keys), nil
 }
 
 func (a *Admin) purgePartition(ctx context.Context, queueName, partition string) (int, error) {
 	var keysToDel []string
+	var removedTasks int64
 	prioritiesKey := "queue:" + queueName + ":partition:" + partition + ":priorities"
 	priorities, err := a.redis.ZRevRange(ctx, prioritiesKey, 0, -1).Result()
 	if err != nil && err != redis.Nil {
@@ -759,6 +892,7 @@ func (a *Admin) purgePartition(ctx context.Context, queueName, partition string)
 		queueKey := "queue:" + queueName + ":partition:" + partition + ":" + prio
 		taskIds, _ := a.redis.ZRange(ctx, queueKey, 0, -1).Result()
 		for _, tid := range taskIds {
+			removedTasks++
 			tagsKey := "queue:" + queueName + ":tags:" + tid
 			tags, _ := a.redis.SMembers(ctx, tagsKey).Result()
 			for _, tag := range tags {
@@ -787,6 +921,12 @@ func (a *Admin) purgePartition(ctx context.Context, queueName, partition string)
 	if len(keysToDel) > 0 {
 		if err := a.redis.Del(ctx, keysToDel...).Err(); err != nil {
 			return 0, err
+		}
+	}
+	if removedTasks > 0 {
+		score, err := a.redis.ZIncrBy(ctx, QueuesIndexKey, float64(-removedTasks), queueName).Result()
+		if err == nil && score < 0 {
+			_ = a.redis.ZAdd(ctx, QueuesIndexKey, redis.Z{Score: 0, Member: queueName}).Err()
 		}
 	}
 	return len(keysToDel), nil

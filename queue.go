@@ -163,10 +163,12 @@ type Producer struct {
 
 // NewProducer создает нового продюсера. Для нескольких Redis — SetShards.
 func NewProducer(redisClient *redis.Client, queueName string) *Producer {
-	return &Producer{
+	p := &Producer{
 		redis:     redisClient,
 		queueName: queueName,
 	}
+	_ = EnsureQueue(context.Background(), redisClient, queueName)
+	return p
 }
 
 // SetCompression — сжатие payload на всех Publish (F6). CompressionNone (дефолт) — без оверхеда.
@@ -373,6 +375,7 @@ func newConsumer(redisClient *redis.Client, queueName string, consumerID string,
 		idempotencyTtl:              0,
 		stopPing:                    make(chan struct{}),
 	}
+	_ = EnsureQueue(context.Background(), redisClient, queueName)
 
 	if startPing {
 		ctx := context.Background()
@@ -829,7 +832,7 @@ func (p *ConsumerPool) SetTagsStats(tags ...string) {
 
 // NewConsumerPool создает пул консьюмеров. Для нескольких Redis — SetShards.
 func NewConsumerPool(redisClient *redis.Client, queueName string) *ConsumerPool {
-	return &ConsumerPool{
+	p := &ConsumerPool{
 		redis:                       redisClient,
 		queueName:                   queueName,
 		count:                       5,
@@ -838,6 +841,8 @@ func NewConsumerPool(redisClient *redis.Client, queueName string) *ConsumerPool 
 		checkDeadConsumerLocksOnGet: false,
 		idempotencyTtl:              0,
 	}
+	_ = EnsureQueue(context.Background(), redisClient, queueName)
+	return p
 }
 
 // SetCount задает количество консьюмеров в пуле.

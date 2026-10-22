@@ -51,6 +51,8 @@ import LightModeOutlinedIcon from '@mui/icons-material/LightModeOutlined'
 import LockOpenIcon from '@mui/icons-material/LockOpen'
 import MoreVertIcon from '@mui/icons-material/MoreVert'
 import RefreshIcon from '@mui/icons-material/Refresh'
+import SortByAlphaIcon from '@mui/icons-material/SortByAlpha'
+import SwapVertIcon from '@mui/icons-material/SwapVert'
 import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined'
 import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined'
 import { api } from './api'
@@ -60,6 +62,7 @@ const WATCH_KEY = 'srq-watch-tags'
 const CHART_OPEN_KEY = 'srq-chart-open'
 const CHART_RANGE_KEY = 'srq-chart-range'
 const CHART_DASH_KEY = 'srq-chart-dash'
+const QUEUE_SORT_KEY = 'srq-queue-sort'
 const WATCH_POLL_MS = 5000
 const REDIS_POLL_MS = 1000
 
@@ -238,11 +241,16 @@ export default function App() {
   const [activeId, setActiveId] = useState('')
   const [queues, setQueues] = useState([])
   const [queueFilter, setQueueFilter] = useState('')
+  const [queueSort, setQueueSort] = useState(() => {
+    const v = localStorage.getItem(QUEUE_SORT_KEY)
+    return v === 'total' ? 'total' : 'alpha'
+  })
   const [selectedQueue, setSelectedQueue] = useState('')
   const [activeDb, setActiveDb] = useState(0)
   const [detail, setDetail] = useState(null)
 
   const [viewMode, setViewMode] = useState('partitions')
+  const [listScope, setListScope] = useState('all') // all | blocked
   const [rows, setRows] = useState([])
   const [listTotal, setListTotal] = useState(0)
   const [listTruncated, setListTruncated] = useState(false)
@@ -338,9 +346,25 @@ export default function App() {
 
   const filteredQueues = useMemo(() => {
     const q = queueFilter.trim().toLowerCase()
-    if (!q) return queues
-    return queues.filter((item) => item.name.toLowerCase().includes(q))
-  }, [queues, queueFilter])
+    let list = queues
+    if (q) list = list.filter((item) => item.name.toLowerCase().includes(q))
+    if (queueSort === 'total') {
+      list = [...list].sort((a, b) => {
+        const dt = (b.total || 0) - (a.total || 0)
+        if (dt !== 0) return dt
+        return a.name.localeCompare(b.name)
+      })
+    }
+    return list
+  }, [queues, queueFilter, queueSort])
+
+  const toggleQueueSort = () => {
+    setQueueSort((prev) => {
+      const next = prev === 'total' ? 'alpha' : 'total'
+      localStorage.setItem(QUEUE_SORT_KEY, next)
+      return next
+    })
+  }
 
   const pollLabel = POLL_PRESETS.find((p) => p.ms === pollMs)?.label || 'Off'
 
@@ -433,7 +457,10 @@ export default function App() {
       let nextTotal = 0
       let nextTrunc = false
       if (mode === 'groups') {
-        const r = await api.listGroups(q, db, filter)
+        const r =
+          listScope === 'blocked'
+            ? await api.listBlockedGroups(q, db)
+            : await api.listGroups(q, db, filter)
         nextRows = r?.groups || []
         nextTotal = r?.total || 0
         nextTrunc = !!r?.truncated
@@ -443,7 +470,10 @@ export default function App() {
         nextTotal = 0
         nextTrunc = !!r?.truncated
       } else {
-        const r = await api.listPartitions(q, db, filter)
+        const r =
+          listScope === 'blocked'
+            ? await api.listBlockedPartitions(q, db)
+            : await api.listPartitions(q, db, filter)
         nextRows = r?.partitions || []
         nextTotal = r?.total || 0
         nextTrunc = !!r?.truncated
@@ -461,7 +491,7 @@ export default function App() {
     } finally {
       if (!isStale(gen, q, db, mode)) setListLoading(false)
     }
-  }, [selectedQueue, activeDb, listFilter, viewMode])
+  }, [selectedQueue, activeDb, listFilter, viewMode, listScope])
 
   const refreshSelected = useCallback(() => {
     loadDetail()
@@ -1060,7 +1090,7 @@ export default function App() {
                 bgcolor: 'background.paper',
               }}
             >
-              <Stack direction="row" alignItems="center" spacing={1} mb={1}>
+              <Stack direction="row" alignItems="center" spacing={0.5} mb={1}>
                 <TextField
                   size="small"
                   fullWidth
@@ -1068,6 +1098,21 @@ export default function App() {
                   value={queueFilter}
                   onChange={(e) => setQueueFilter(e.target.value)}
                 />
+                <Tooltip
+                  title={
+                    queueSort === 'total'
+                      ? 'Sorted by total (click for A–Z)'
+                      : 'Sorted A–Z (click for total)'
+                  }
+                >
+                  <IconButton size="small" onClick={toggleQueueSort} aria-label="Sort queues">
+                    {queueSort === 'total' ? (
+                      <SwapVertIcon fontSize="small" color="primary" />
+                    ) : (
+                      <SortByAlphaIcon fontSize="small" />
+                    )}
+                  </IconButton>
+                </Tooltip>
                 {loading && <CircularProgress size={16} />}
               </Stack>
               <Box sx={{ flex: 1, minHeight: 0, overflow: 'auto' }}>
@@ -1092,17 +1137,29 @@ export default function App() {
                             '&:hover': { bgcolor: 'action.hover' },
                           }}
                         >
-                          <Typography
-                            noWrap
-                            title={q.name}
-                            sx={{
-                              fontSize: 13.5,
-                              fontWeight: active ? 700 : 500,
-                              color: active ? 'primary.main' : 'text.primary',
-                            }}
-                          >
-                            {q.name}
-                          </Typography>
+                          <Stack direction="row" alignItems="baseline" justifyContent="space-between" gap={1}>
+                            <Typography
+                              noWrap
+                              title={q.name}
+                              sx={{
+                                fontSize: 13.5,
+                                fontWeight: active ? 700 : 500,
+                                color: active ? 'primary.main' : 'text.primary',
+                                minWidth: 0,
+                              }}
+                            >
+                              {q.name}
+                            </Typography>
+                            {(q.total > 0 || queueSort === 'total') && (
+                              <Typography
+                                variant="caption"
+                                color="text.secondary"
+                                sx={{ flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}
+                              >
+                                {q.total || 0}
+                              </Typography>
+                            )}
+                          </Stack>
                         </Box>
                       )
                     })}
@@ -1330,6 +1387,7 @@ export default function App() {
                               /* ignore */
                             }
                             setViewMode(e.target.value)
+                            setListScope('all')
                             setListFilterDraft('')
                             setListFilter('')
                             setRows([])
@@ -1345,11 +1403,27 @@ export default function App() {
                           ))}
                         </Select>
                       </FormControl>
+                      {(viewMode === 'partitions' || viewMode === 'groups') && (
+                        <FormControl size="small" sx={{ minWidth: 110, flexShrink: 0 }}>
+                          <Select
+                            value={listScope}
+                            onChange={(e) => {
+                              bumpQueryGen()
+                              setListScope(e.target.value)
+                              setRows([])
+                            }}
+                          >
+                            <MenuItem value="all">All</MenuItem>
+                            <MenuItem value="blocked">Blocked</MenuItem>
+                          </Select>
+                        </FormControl>
+                      )}
                       <TextField
                         size="small"
                         fullWidth
                         placeholder={filterPlaceholder}
                         value={listFilterDraft}
+                        disabled={listScope === 'blocked'}
                         onChange={(e) => setListFilterDraft(e.target.value)}
                       />
                       {viewMode === 'tags' ? (

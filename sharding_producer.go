@@ -25,6 +25,7 @@ func (p *Producer) SetShards(cfg *ShardConfig) error {
 			compression:      p.compression,
 			compressMinBytes: p.compressMinBytes,
 		}
+		_ = EnsureQueue(context.Background(), c, p.queueName)
 	}
 	p.router = router
 	p.ownRouter = true
@@ -52,6 +53,7 @@ func (p *Producer) SetShardRouter(router *ShardRouter) {
 			compression:      p.compression,
 			compressMinBytes: p.compressMinBytes,
 		}
+		_ = EnsureQueue(context.Background(), c, p.queueName)
 	}
 	p.shardPubs = pubs
 }

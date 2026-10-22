@@ -85,6 +85,7 @@ end
 
 local debPrefix = "deb!"
 local notAddedItems = {}
+local addedCount = 0
 
 for i = 0, taskCount - 1 do
     local base = taskBase + i * 7
@@ -149,6 +150,7 @@ for i = 0, taskCount - 1 do
 			redis.call('ZADD', "queue:" .. queueName .. ":group:_default:ready", 0, partitionCode)
 			redis.call('SADD', partGroupsKey, "_default")
 		end
+		addedCount = addedCount + 1
     elseif isDebounce then
 		-- F2: payload уже есть — waiting (в ZSET) или in-flight (нет в ZSET)
 		local debounceKey = "queue:" .. queueName .. ":debounce:" .. taskId
@@ -186,6 +188,13 @@ for i = 0, taskCount - 1 do
     else
 		notAddedItems[#notAddedItems + 1] = i
     end
+end
+
+if addedCount > 0 then
+	local _qd = tonumber(redis.call('ZINCRBY', 'srq:queues', addedCount, queueName))
+	if _qd < 0 then
+		redis.call('ZADD', 'srq:queues', 0, queueName)
+	end
 end
 
 return notAddedItems
@@ -880,7 +889,7 @@ if isDebounce then
 			redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, partitionCode)
 		end
 		redis.call('DEL', debounceKey)
-		-- race:tags оставляем — задача снова в очереди
+		-- race:tags оставляем — задача снова в очереди (total не меняется)
 		return 1
 	end
 end
@@ -909,6 +918,13 @@ for t = 1, #tags do
 	end
 end
 redis.call('DEL', tagsKey)
+
+do
+	local _qd = tonumber(redis.call('ZINCRBY', 'srq:queues', -1, queueName))
+	if _qd < 0 then
+		redis.call('ZADD', 'srq:queues', 0, queueName)
+	end
+end
 
 return 1
 `)
@@ -1284,6 +1300,13 @@ if redis.call('ZCARD', queueKey) == 0 then
 	end
 end
 
+do
+	local _qd = tonumber(redis.call('ZINCRBY', 'srq:queues', -1, queueName))
+	if _qd < 0 then
+		redis.call('ZADD', 'srq:queues', 0, queueName)
+	end
+end
+
 return {'removed', payload}
 `)
 
@@ -1432,6 +1455,13 @@ for i = 1, #other do
 		out[#out + 1] = other[i][3]
 	else
 		out[#out + 1] = ''
+	end
+end
+
+if #removed > 0 then
+	local _qd = tonumber(redis.call('ZINCRBY', 'srq:queues', -#removed, queueName))
+	if _qd < 0 then
+		redis.call('ZADD', 'srq:queues', 0, queueName)
 	end
 end
 

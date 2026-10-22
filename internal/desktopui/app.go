@@ -46,10 +46,11 @@ type RateView struct {
 	BacklogDeltaPerSec float64 `json:"backlogDeltaPerSec"`
 }
 
-// QueueListItem — схлопнутая очередь (только имя + DB для сайдбара).
+// QueueListItem — схлопнутая очередь (имя + DB + total из srq:queues).
 type QueueListItem struct {
-	Name string `json:"name"`
-	DBs  []int  `json:"dbs"`
+	Name  string `json:"name"`
+	DBs   []int  `json:"dbs"`
+	Total int64  `json:"total"` // сумма depth по DB
 }
 
 // QueueSnapshot — сводка очереди на DB (без полного списка партиций).
@@ -130,8 +131,9 @@ type App struct {
 	connID   string
 	clients  map[int]*redis.Client
 
-	catalogMu sync.RWMutex
-	catalog   map[string][]int // queue name → DBs
+	catalogMu     sync.RWMutex
+	catalog       map[string][]int // queue name → DBs
+	catalogTotals map[string]int64 // queue name → sum depth across DBs
 
 	loopMu     sync.Mutex
 	loopCancel context.CancelFunc
@@ -327,6 +329,7 @@ func (a *App) disconnect() {
 
 	a.catalogMu.Lock()
 	a.catalog = map[string][]int{}
+	a.catalogTotals = map[string]int64{}
 	a.catalogMu.Unlock()
 }
 
@@ -475,8 +478,9 @@ func (a *App) RefreshCatalog() error {
 
 	n := a.databaseCount(ctx)
 	type hit struct {
-		name string
-		db   int
+		name  string
+		db    int
+		total int64
 	}
 	hits := make(chan hit, n*4)
 	var wg sync.WaitGroup
@@ -492,13 +496,23 @@ func (a *App) RefreshCatalog() error {
 			if err != nil {
 				return
 			}
+			idx, err := admin.ListQueueIndex(dbCtx, false)
+			if err != nil {
+				return
+			}
+			seen := map[string]int64{}
+			for _, e := range idx {
+				seen[e.Name] = e.Total
+			}
+			// Legacy / осиротевшие: SCAN, depth 0 если нет в индексе
 			names, err := admin.ListQueues(dbCtx)
 			if err != nil {
 				return
 			}
 			for _, name := range names {
+				total := seen[name]
 				select {
-				case hits <- hit{name: name, db: db}:
+				case hits <- hit{name: name, db: db, total: total}:
 				case <-dbCtx.Done():
 					return
 				}
@@ -512,17 +526,19 @@ func (a *App) RefreshCatalog() error {
 	}()
 
 	next := map[string][]int{}
+	totals := map[string]int64{}
 	for h := range hits {
 		next[h.name] = append(next[h.name], h.db)
+		totals[h.name] += h.total
 	}
 	for name := range next {
 		sort.Ints(next[name])
-		// dedupe if any
 		next[name] = uniqueInts(next[name])
 	}
 
 	a.catalogMu.Lock()
 	a.catalog = next
+	a.catalogTotals = totals
 	a.catalogMu.Unlock()
 	return nil
 }
@@ -554,7 +570,7 @@ func (a *App) catalogSnapshot() map[string][]int {
 
 // --- Queues ---
 
-// ListQueues возвращает схлопнутый каталог (только имена + DB).
+// ListQueues возвращает схлопнутый каталог (имя + DB + total). Сортировку alpha/total делает UI.
 func (a *App) ListQueues() ([]QueueListItem, error) {
 	if err := a.ensureConnected(); err != nil {
 		return nil, err
@@ -564,6 +580,12 @@ func (a *App) ListQueues() ([]QueueListItem, error) {
 		_ = a.RefreshCatalog()
 		cat = a.catalogSnapshot()
 	}
+	a.catalogMu.RLock()
+	totals := a.catalogTotals
+	if totals == nil {
+		totals = map[string]int64{}
+	}
+	a.catalogMu.RUnlock()
 
 	names := make([]string, 0, len(cat))
 	for name := range cat {
@@ -573,7 +595,7 @@ func (a *App) ListQueues() ([]QueueListItem, error) {
 
 	out := make([]QueueListItem, 0, len(names))
 	for _, name := range names {
-		out = append(out, QueueListItem{Name: name, DBs: cat[name]})
+		out = append(out, QueueListItem{Name: name, DBs: cat[name], Total: totals[name]})
 	}
 	return out, nil
 }
@@ -647,6 +669,70 @@ func (a *App) ListGroups(name string, db int, filter string) (GroupListResult, e
 		Total:     total,
 		Limit:     redisqueue.MaxListPartitions,
 		Truncated: total > len(out),
+	}, nil
+}
+
+// ListBlockedPartitions — только партиции из ZSET blocked (unlockAt > now).
+func (a *App) ListBlockedPartitions(name string, db int) (PartitionListResult, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return PartitionListResult{}, err
+	}
+	ctx, cancel := a.beginList(15 * time.Second)
+	defer cancel()
+	parts, err := admin.ListBlockedPartitions(ctx, name)
+	if err != nil {
+		return PartitionListResult{}, err
+	}
+	out := make([]PartitionView, 0, len(parts))
+	for _, p := range parts {
+		groups := p.Groups
+		if groups == nil {
+			groups = []string{}
+		}
+		out = append(out, PartitionView{
+			ID:         p.Partition,
+			Pending:    p.Pending,
+			InProgress: p.InProgress,
+			Locked:     p.Locked,
+			Blocked:    true,
+			Groups:     groups,
+		})
+	}
+	return PartitionListResult{
+		Partitions: out,
+		Total:      len(out),
+		Limit:      len(out),
+		Truncated:  false,
+	}, nil
+}
+
+// ListBlockedGroups — только группы на паузе (score > now).
+func (a *App) ListBlockedGroups(name string, db int) (GroupListResult, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return GroupListResult{}, err
+	}
+	ctx, cancel := a.beginList(15 * time.Second)
+	defer cancel()
+	items, err := admin.ListBlockedGroups(ctx, name)
+	if err != nil {
+		return GroupListResult{}, err
+	}
+	out := make([]GroupView, 0, len(items))
+	for _, g := range items {
+		out = append(out, GroupView{
+			Name:    g.Name,
+			Ready:   g.Ready,
+			Blocked: true,
+			Score:   g.Score,
+		})
+	}
+	return GroupListResult{
+		Groups:    out,
+		Total:     len(out),
+		Limit:     len(out),
+		Truncated: false,
 	}, nil
 }
 
@@ -884,6 +970,15 @@ func (a *App) UnblockPartition(queue, partition string, db int) error {
 		return err
 	}
 	return admin.UnblockPartition(a.ctxOrBackground(), queue, partition)
+}
+
+// BlockGroups — парковка групп на waitTimeSec (Admin: перезаписывает unlockAt).
+func (a *App) BlockGroups(queue string, waitTimeSec float64, groups []string, db int) error {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return err
+	}
+	return admin.BlockGroups(a.ctxOrBackground(), queue, waitTimeSec, groups...)
 }
 
 func (a *App) inspectOne(name string, db int) (QueueSnapshot, error) {

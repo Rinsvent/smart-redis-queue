@@ -1,5 +1,11 @@
 # Ключи Redis
 
+Глобально на инстансе (не под `queue:`):
+
+| Ключ | Тип | Назначение |
+|------|-----|------------|
+| `srq:queues` | ZSET | Каталог очередей; score = **total** (ready + in-progress). Publish `+N`, Ack/Remove `−N`. Ensure при NewProducer/Consumer. |
+
 Префикс очереди: `queue:{name}:…`
 
 | Ключ | Тип | Назначение |
