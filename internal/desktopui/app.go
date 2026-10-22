@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	redisqueue "github.com/Rinsvent/smart-redis-queue"
@@ -131,9 +132,10 @@ type App struct {
 	connID   string
 	clients  map[int]*redis.Client
 
-	catalogMu     sync.RWMutex
-	catalog       map[string][]int // queue name → DBs
-	catalogTotals map[string]int64 // queue name → sum depth across DBs
+	catalogMu         sync.RWMutex
+	catalog           map[string][]int // queue name → DBs
+	catalogTotals     map[string]int64 // queue name → sum depth across DBs
+	catalogRefreshing atomic.Bool      // single-flight RefreshCatalog
 
 	loopMu     sync.Mutex
 	loopCancel context.CancelFunc
@@ -466,81 +468,6 @@ func (a *App) databaseCount(ctx context.Context) int {
 		return maxDBCount
 	}
 	return n
-}
-
-// RefreshCatalog сканирует Redis DB (partitions + consumers) с таймаутами.
-func (a *App) RefreshCatalog() error {
-	if err := a.ensureConnected(); err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), catalogMaxTimeout)
-	defer cancel()
-
-	n := a.databaseCount(ctx)
-	type hit struct {
-		name  string
-		db    int
-		total int64
-	}
-	hits := make(chan hit, n*4)
-	var wg sync.WaitGroup
-
-	for db := 0; db < n; db++ {
-		wg.Add(1)
-		go func(db int) {
-			defer wg.Done()
-			dbCtx, dbCancel := context.WithTimeout(ctx, dbScanTimeout)
-			defer dbCancel()
-
-			admin, err := a.adminForDB(db)
-			if err != nil {
-				return
-			}
-			idx, err := admin.ListQueueIndex(dbCtx, false)
-			if err != nil {
-				return
-			}
-			seen := map[string]int64{}
-			for _, e := range idx {
-				seen[e.Name] = e.Total
-			}
-			// Legacy / осиротевшие: SCAN, depth 0 если нет в индексе
-			names, err := admin.ListQueues(dbCtx)
-			if err != nil {
-				return
-			}
-			for _, name := range names {
-				total := seen[name]
-				select {
-				case hits <- hit{name: name, db: db, total: total}:
-				case <-dbCtx.Done():
-					return
-				}
-			}
-		}(db)
-	}
-
-	go func() {
-		wg.Wait()
-		close(hits)
-	}()
-
-	next := map[string][]int{}
-	totals := map[string]int64{}
-	for h := range hits {
-		next[h.name] = append(next[h.name], h.db)
-		totals[h.name] += h.total
-	}
-	for name := range next {
-		sort.Ints(next[name])
-		next[name] = uniqueInts(next[name])
-	}
-
-	a.catalogMu.Lock()
-	a.catalog = next
-	a.catalogTotals = totals
-	a.catalogMu.Unlock()
-	return nil
 }
 
 func uniqueInts(in []int) []int {

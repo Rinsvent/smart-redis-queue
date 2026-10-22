@@ -63,6 +63,7 @@ const CHART_OPEN_KEY = 'srq-chart-open'
 const CHART_RANGE_KEY = 'srq-chart-range'
 const CHART_DASH_KEY = 'srq-chart-dash'
 const QUEUE_SORT_KEY = 'srq-queue-sort'
+const CATALOG_POLL_KEY = 'srq-catalog-poll-ms'
 const WATCH_POLL_MS = 5000
 const REDIS_POLL_MS = 1000
 
@@ -231,6 +232,12 @@ function readPollMs() {
   return 5000
 }
 
+function readCatalogPollMs() {
+  const n = Number(localStorage.getItem(CATALOG_POLL_KEY))
+  if (Number.isFinite(n) && POLL_PRESETS.some((p) => p.ms === n)) return n
+  return 5000
+}
+
 export default function App() {
   const [themeMode, setThemeMode] = useState(() => localStorage.getItem('srq-theme') || 'light')
   const theme = useMemo(() => buildTheme(themeMode), [themeMode])
@@ -276,6 +283,7 @@ export default function App() {
   const [catalogLoading, setCatalogLoading] = useState(false)
   const [listLoading, setListLoading] = useState(false)
   const [pollMs, setPollMs] = useState(readPollMs)
+  const [catalogPollMs, setCatalogPollMs] = useState(readCatalogPollMs)
   const [snack, setSnack] = useState({ open: false, msg: '', severity: 'info' })
 
   const [addOpen, setAddOpen] = useState(false)
@@ -300,7 +308,10 @@ export default function App() {
   const [confirm, setConfirm] = useState(null)
   const [actionsAnchor, setActionsAnchor] = useState(null)
   const [pollAnchor, setPollAnchor] = useState(null)
+  const [catalogPollAnchor, setCatalogPollAnchor] = useState(null)
   const pollRef = useRef(null)
+  const catalogPollRef = useRef(null)
+  const catalogBusyRef = useRef(false)
   const filterTimer = useRef(null)
   // Инкремент при смене очереди/DB/режима — игнор ответов от устаревших запросов.
   const queryGen = useRef(0)
@@ -367,6 +378,7 @@ export default function App() {
   }
 
   const pollLabel = POLL_PRESETS.find((p) => p.ms === pollMs)?.label || 'Off'
+  const catalogPollLabel = POLL_PRESETS.find((p) => p.ms === catalogPollMs)?.label || 'Off'
 
   const filterPlaceholder =
     viewMode === 'groups'
@@ -404,18 +416,22 @@ export default function App() {
     }
   }, [activeId])
 
-  const refreshCatalog = useCallback(async () => {
+  const refreshCatalog = useCallback(async (opts = {}) => {
     if (!activeId) return
+    if (catalogBusyRef.current) return
+    catalogBusyRef.current = true
+    const silent = !!opts.silent
     setCatalogLoading(true)
     try {
       await api.ensureActive()
       await api.refreshCatalog()
       const list = await api.listQueues()
       setQueues(list || [])
-      notify('Catalog refreshed', 'success')
+      if (!silent) notify('Catalog refreshed', 'success')
     } catch (e) {
-      notify(String(e), 'error')
+      if (!silent) notify(String(e), 'error')
     } finally {
+      catalogBusyRef.current = false
       setCatalogLoading(false)
     }
   }, [activeId])
@@ -545,6 +561,24 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem('srq-poll-ms', String(pollMs))
   }, [pollMs])
+
+  useEffect(() => {
+    localStorage.setItem(CATALOG_POLL_KEY, String(catalogPollMs))
+  }, [catalogPollMs])
+
+  // Авто-обновление каталога очередей (total / список). Не стартует, пока идёт предыдущий.
+  useEffect(() => {
+    if (!activeId) return undefined
+    if (catalogPollRef.current) clearInterval(catalogPollRef.current)
+    if (catalogPollMs > 0) {
+      catalogPollRef.current = setInterval(() => {
+        refreshCatalog({ silent: true })
+      }, catalogPollMs)
+    }
+    return () => {
+      if (catalogPollRef.current) clearInterval(catalogPollRef.current)
+    }
+  }, [activeId, catalogPollMs, refreshCatalog])
 
   useEffect(() => {
     localStorage.setItem(CHART_OPEN_KEY, chartOpen ? '1' : '0')
@@ -1016,14 +1050,6 @@ export default function App() {
                 <IconButton size="small" onClick={onDeleteConn} disabled={!activeId} title="Remove">
                   <DeleteOutlineIcon fontSize="small" />
                 </IconButton>
-                <IconButton
-                  size="small"
-                  onClick={refreshCatalog}
-                  disabled={!activeId || catalogLoading}
-                  title="Refresh catalog (all DBs)"
-                >
-                  {catalogLoading ? <CircularProgress size={16} /> : <RefreshIcon fontSize="small" />}
-                </IconButton>
               </>
             )}
             <Box sx={{ flexGrow: { xs: 0, sm: 1 }, minWidth: { xs: 0, sm: 8 } }} />
@@ -1090,7 +1116,7 @@ export default function App() {
                 bgcolor: 'background.paper',
               }}
             >
-              <Stack direction="row" alignItems="center" spacing={0.5} mb={1}>
+              <Stack direction="row" alignItems="center" spacing={0.25} mb={1}>
                 <TextField
                   size="small"
                   fullWidth
@@ -1111,6 +1137,33 @@ export default function App() {
                     ) : (
                       <SortByAlphaIcon fontSize="small" />
                     )}
+                  </IconButton>
+                </Tooltip>
+                <Tooltip title="Refresh catalog (all DBs)">
+                  <span>
+                    <IconButton
+                      size="small"
+                      onClick={() => refreshCatalog()}
+                      disabled={!activeId || catalogLoading}
+                      aria-label="Refresh catalog"
+                    >
+                      {catalogLoading ? (
+                        <CircularProgress size={16} />
+                      ) : (
+                        <RefreshIcon fontSize="small" />
+                      )}
+                    </IconButton>
+                  </span>
+                </Tooltip>
+                <Tooltip title={`Catalog auto-refresh: ${catalogPollLabel}`}>
+                  <IconButton
+                    size="small"
+                    onClick={(e) => setCatalogPollAnchor(e.currentTarget)}
+                    disabled={!activeId}
+                    aria-label="Catalog poll interval"
+                    sx={{ ml: -0.5 }}
+                  >
+                    <KeyboardArrowDownIcon fontSize="small" />
                   </IconButton>
                 </Tooltip>
                 {loading && <CircularProgress size={16} />}
@@ -1717,6 +1770,27 @@ export default function App() {
           >
             <ListItemIcon sx={{ minWidth: 32 }}>
               {pollMs === p.ms ? <CheckIcon fontSize="small" /> : null}
+            </ListItemIcon>
+            <ListItemText>{p.label}</ListItemText>
+          </MenuItem>
+        ))}
+      </Menu>
+
+      <Menu
+        anchorEl={catalogPollAnchor}
+        open={!!catalogPollAnchor}
+        onClose={() => setCatalogPollAnchor(null)}
+      >
+        {POLL_PRESETS.map((p) => (
+          <MenuItem
+            key={`cat-${p.label}`}
+            onClick={() => {
+              setCatalogPollMs(p.ms)
+              setCatalogPollAnchor(null)
+            }}
+          >
+            <ListItemIcon sx={{ minWidth: 32 }}>
+              {catalogPollMs === p.ms ? <CheckIcon fontSize="small" /> : null}
             </ListItemIcon>
             <ListItemText>{p.label}</ListItemText>
           </MenuItem>

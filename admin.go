@@ -101,6 +101,49 @@ func (a *Admin) ListQueues(ctx context.Context) ([]string, error) {
 	return queues, nil
 }
 
+// HasQueueIndex — в srq:queues есть хотя бы одна очередь (реестр уже создавали).
+func (a *Admin) HasQueueIndex(ctx context.Context) (bool, error) {
+	n, err := a.redis.ZCard(ctx, QueuesIndexKey).Result()
+	if err == redis.Nil {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ListQueuesScan — только SCAN partitions/consumers (без srq:queues). Legacy fallback.
+func (a *Admin) ListQueuesScan(ctx context.Context) ([]string, error) {
+	seen := make(map[string]struct{})
+	for _, pattern := range []string{"queue:*:partitions", "queue:*:consumers"} {
+		suffix := ":partitions"
+		if strings.HasSuffix(pattern, ":consumers") {
+			suffix = ":consumers"
+		}
+		iter := a.redis.Scan(ctx, 0, pattern, 200).Iterator()
+		for iter.Next(ctx) {
+			key := iter.Val()
+			if !strings.HasPrefix(key, "queue:") || !strings.HasSuffix(key, suffix) {
+				continue
+			}
+			name := strings.TrimPrefix(strings.TrimSuffix(key, suffix), "queue:")
+			if name != "" {
+				seen[name] = struct{}{}
+			}
+		}
+		if err := iter.Err(); err != nil {
+			return nil, err
+		}
+	}
+	queues := make([]string, 0, len(seen))
+	for name := range seen {
+		queues = append(queues, name)
+	}
+	sort.Strings(queues)
+	return queues, nil
+}
+
 // ListQueueIndex — очереди из srq:queues с total (score). byDepth=true → ZREVRANGE (толстые сверху).
 func (a *Admin) ListQueueIndex(ctx context.Context, byDepth bool) ([]QueueIndexEntry, error) {
 	var zs []redis.Z
