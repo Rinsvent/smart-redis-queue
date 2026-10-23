@@ -6,7 +6,7 @@
 
 `Task` — `ID`, `Partition`, `Priority`, `Payload`, `Scheduled`, `Tags`, `Groups`, `RejectCount`.
 
-Основные объекты: `Producer`, `Consumer`, `ConsumerPool`, `Admin`.
+Основные объекты: `Producer`, `Consumer`, `ConsumerPool`, `Exchange`, `Admin`.
 
 ## Producer
 
@@ -22,6 +22,25 @@
 | `Lock` / `LockTo` | distributed lock |
 
 Ошибки: `ErrTasksAlreadyExist`, `ErrBackpressure`.
+
+## Exchange
+
+| Метод / опция | Назначение |
+|---------------|------------|
+| `NewExchange` | Имя + Redis; конфиг сам не пишет |
+| `Bind` / `Unbind` / `SetBindings` / `Bindings` | Локальные bindings |
+| `Persist` / `Load` / `Version` | Явная запись / чтение bindings+ver |
+| `Publish` / `PublishWith` | kind + routingKey → matched queues |
+| `ExchangeDirect` / `Fanout` / `Topic` | Алгоритм матчинга (не в Redis) |
+| `WithDeliveryAtomic` | Один EVAL на все dest (default) |
+| `WithDeliveryBestEffort` | N× Publish |
+| `WithCheckVersion` | Opt-in GET ver + reload при mismatch |
+| `SetCompression` / `WithExchangeCompression` | zstd |
+| `WithExchangeTagBackpressure` | backpressure на dest до записи |
+
+Ошибки: `ErrNoRoute`, `ErrExchangeVersionConflict`, `ErrBackpressure`.
+
+Подробности: [Exchange](../features/exchange.md).
 
 ## Шардинг
 

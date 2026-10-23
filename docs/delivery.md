@@ -60,7 +60,7 @@ Get в один момент отдаёт задачу одному consumer —
 | Exactly-once без идемпотентности handler | Нет |
 | Кворум реплик / продолжение при падении единственного Redis | Нет (нужны Sentinel/Cluster снаружи) |
 | Транзакции publish+consume как у Kafka EOS | Нет |
-| Fan-out каждому подписчику | Нет |
+| Fan-out как Kafka CG / общий лог | Нет — для копий в N очередей см. [Exchange](features/exchange.md) |
 
 ## Как получить «ровно один раз» по бизнесу
 

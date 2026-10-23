@@ -20,6 +20,7 @@
 | Шардинг | Несколько Redis, sticky ByGroup/ByManual | [Шардинг](../sharding.md) |
 | Step recovery | Checkpoint шагов handler (`NewSteps`) | [Step recovery](step-recovery.md) |
 | Headers | Мета между попытками (ошибки и т.п.) | [Headers](headers.md) |
+| Exchange | direct / fanout / topic → копии в N очередей | [Exchange](exchange.md) |
 
 ## Prefetch и пул
 

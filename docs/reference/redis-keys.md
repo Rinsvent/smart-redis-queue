@@ -5,6 +5,10 @@
 | Ключ | Тип | Назначение |
 |------|-----|------------|
 | `srq:queues` | ZSET | Каталог очередей; score = **total** (ready + in-progress). Publish `+N`, Ack/Remove `−N`. Ensure при NewProducer/Consumer. |
+| `srq:exchange:{name}:bindings` | HASH | Bindings Exchange: field = pattern + sep + queue. Явный `Persist`. |
+| `srq:exchange:{name}:ver` | STRING | Версия bindings (`INCR` на Persist). Читается только при `WithCheckVersion`. |
+
+Тип exchange (direct/fanout/topic) в Redis **не** хранится — алгоритм на продюсере. См. [Exchange](../features/exchange.md).
 
 Префикс очереди: `queue:{name}:…`
 

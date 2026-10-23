@@ -37,6 +37,6 @@ return redisqueue.NewRejectWithDelay(err, 2.0, "acct:9f3a")
 ## Чего ждать не стоит
 
 - Масштаба «как у Kafka, но без общего Redis».
-- Fan-out как способа размазать одно событие по многим воркерам.
+- Fan-out «размазать одну очередь по многим воркерам без копий» — внутри очереди competing consumers. Несколько независимых обработчиков одного события — [Exchange](features/exchange.md) (копия в N очередей).
 
 Для роста throughput смотрите topology Redis и правильную парковку групп.

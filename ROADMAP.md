@@ -72,13 +72,9 @@ API: `ShardConfig`, `ShardByGroup|Queue|Manual|Partition`, `Producer.SetShards` 
 
 Воркеры читают **не все** группы, а allowlist/subscription (`SetGroups("conn:a", "conn:b")` или pattern). Реализация на текущей модели ready-per-group: Get обходит только выбранные свободные группы. Близко к «consumer подписан на subset routing keys».
 
-### 8. Fan-out / pub-sub (уточнение)
+### 8. Fan-out / pub-sub — ~~сделано~~ (`Exchange`)
 
-**Что это:** одно сообщение получают *несколько независимых* подписчиков (каждый свой copy / свой offset). Это не «постоянный коннект к Redis» и не журналирование.
-
-**Почему сейчас «—»:** SRQ — **work queue** (конкурирующие consumer’ы, одну задачу берёт один). Fan-out = другая семантика (broadcast).
-
-**Если понадобится:** явный режим copy-on-publish в N очередей/групп, или отдельный pub-канал + воркеры-подписчики. Не смешивать с audit-log (§4).
+Copy-on-publish в N bound очередей: `Exchange` (direct / fanout / topic), явный `Persist`, atomic EVAL. Документация: `docs/features/exchange.md`. Не Kafka CG / journal (§4).
 
 ### 9. Horizontal scale / Redis Cluster / multi-DB (уточнение)
 

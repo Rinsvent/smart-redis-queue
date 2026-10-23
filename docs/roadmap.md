@@ -11,7 +11,8 @@
 - backpressure по тегам;
 - rate limit на Get (несколько алгоритмов, группа и партиция);
 - concurrency tags (`race!`);
-- сжатие payload (zstd).
+- сжатие payload (zstd);
+- Exchange (direct / fanout / topic) — [Exchange](features/exchange.md).
 
 ## В планах
 
@@ -20,17 +21,17 @@
 3. **Журнал / replay** — не Kafka-log из коробки; варианты archive, side-stream, CDC.
 4. **Auto-ack** после успешного handler.
 5. **Selective groups** — consumer читает только выбранные группы.
-6. **Fan-out** — только если понадобится явный broadcast (это другая семантика).
-7. **Consistent hashing / live migration** — меньше боли при expand без полного drain.
-8. **Multi-tenant** — по запросу продукта; сейчас хватает queue / DB / ACL.
+6. **Consistent hashing / live migration** — меньше боли при expand без полного drain.
+7. **Multi-tenant** — по запросу продукта; сейчас хватает queue / DB / ACL.
 
 ## Порядок
 
 1. ~~Документация сайта~~  
 2. ~~Шардинг (ByGroup / ByQueue / ByManual, ReadOnly drain)~~ — [sharding.md](sharding.md)  
-3. Auto-ack  
-4. Selective groups  
-5. Desktop UI 
-6. Journal / archive — после выбора модели  
+3. ~~Exchange (copy-on-publish)~~ — [exchange.md](features/exchange.md)  
+4. Auto-ack  
+5. Selective groups  
+6. Desktop UI 
+7. Journal / archive — после выбора модели  
 
 Актуальный список в репозитории: [`ROADMAP.md`](https://github.com/Rinsvent/smart-redis-queue/blob/main/ROADMAP.md).

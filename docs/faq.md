@@ -2,7 +2,11 @@
 
 ## SRQ заменяет Kafka?
 
-Нет. Kafka — лог событий, replay и fan-out. SRQ — очередь задач на Redis с порядком и rate limit. См. [Зачем SRQ](why.md) и [Сравнение](comparison.md).
+Нет. Kafka — лог событий, replay и offset fan-out. SRQ — очередь задач на Redis с порядком и rate limit. Копии в несколько очередей — [Exchange](features/exchange.md), не Kafka consumer groups. См. [Зачем SRQ](why.md) и [Сравнение](comparison.md).
+
+## Как сделать fan-out как в Rabbit?
+
+`Exchange` + `Bind` + явный `Persist`, затем `Publish` с `ExchangeFanout` / `Topic` / `Direct`. Consumer читает свою стабильную очередь. Подробности: [Exchange](features/exchange.md).
 
 ## Нужен ли отдельный Redis только под очередь?
 

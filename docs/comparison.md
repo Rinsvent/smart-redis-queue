@@ -15,8 +15,8 @@ SRQ — очередь задач на Redis. Не пытается замени
 | Delayed / scheduled | P | Y | — | Y | **Y** |
 | Competing consumers | Y | Y | Y | Y | **Y** |
 | Prefetch / batch get | Y | Y | — | Y | **Y** |
-| Topic/exchange routing | Y | Y | Y | Y | P (groups / partitions) |
-| Fan-out / pub-sub | Y | Y | Y | Y | — |
+| Topic/exchange routing | Y | Y | Y | Y | **Y** ([Exchange](features/exchange.md); groups — внутри очереди) |
+| Fan-out / pub-sub | Y | Y | Y | Y | **P** (copy-on-publish в N очередей; не Kafka CG / лог) |
 | Retry delay / dead-letter | Y | Y | — | Y | **Y** |
 | Backpressure по глубине | P | Y | — | Y | **Y** (теги) |
 | Token / sliding / leaky RL в брокере | — | P | — | P | **Y** (группа + партиция) |
@@ -95,13 +95,15 @@ Ordered-партиция (`!key`) — логический ключ в Redis, а
 
 ## Fan-out
 
-Fan-out — это broadcast: одно сообщение получают несколько независимых подписчиков. SRQ так не работает: задачу забирает один воркер.
+Внутри **одной** очереди SRQ — work queue: задачу забирает один воркер.
+
+Broadcast «одно событие → несколько независимых обработчиков» — через [Exchange](features/exchange.md): copy-on-publish в N bound очередей (как Rabbit fanout/topic). Это не Kafka consumer groups и не общий лог с offset/replay.
 
 ## Что выбрать
 
 | Нужно | Обычно берут |
 |-------|----------------|
-| Event log, replay, fan-out | Kafka / JetStream |
-| Классический AMQP и сложный routing | RabbitMQ |
+| Event log, replay, offset fan-out | Kafka / JetStream |
+| AMQP routing + durable queues | RabbitMQ или **SRQ Exchange** + Redis |
 | Уже есть Redis + порядок + лимиты API | **SRQ** |
 | Лёгкий pub/sub без ack | NATS core / Redis PubSub |
