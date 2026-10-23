@@ -1,6 +1,6 @@
 # Exchange / topic routing — внутренний дизайн
 
-Публичную доку не трогаем, пока API не стабилен. ROADMAP §8 (fan-out), не §7 (selective groups).
+Публично: [`docs/features/exchange.md`](../../docs/features/exchange.md). Здесь — краткие решения для разработки. ROADMAP §8 (fan-out), не §7 (selective groups).
 
 ## Решения
 
