@@ -18,7 +18,7 @@
 
 1. **Доработка Desktop UI** — каталог/метрики по списку шардов, по болям из использования.
 2. ~~**Чеклист persistence**~~ — см. [Гарантии доставки](delivery.md#redis-persist).
-3. **Журнал / replay** — не Kafka-log из коробки; варианты archive, side-stream, CDC.
+3. ~~**Журнал / replay**~~ — дизайн: [Journal](features/journal.md) (драйверы kafka/pg/mongo, курсор в Redis, recovery); код — в работе.
 4. **Auto-ack** после успешного handler.
 5. **Selective groups** — consumer читает только выбранные группы.
 6. **Consistent hashing / live migration** — меньше боли при expand без полного drain.
@@ -32,6 +32,6 @@
 4. Auto-ack  
 5. Selective groups  
 6. Desktop UI 
-7. Journal / archive — после выбора модели  
+7. Journal drivers + bridge + emergency — [journal.md](features/journal.md)  
 
 Актуальный список в репозитории: [`ROADMAP.md`](https://github.com/Rinsvent/smart-redis-queue/blob/main/ROADMAP.md).

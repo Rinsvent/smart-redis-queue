@@ -6,7 +6,7 @@ SRQ — очередь задач на Redis. Не пытается замени
 
 | Фича | Kafka | RabbitMQ | NATS core | NATS JetStream | **SRQ** |
 |------|:-----:|:--------:|:---------:|:--------------:|:-------:|
-| Persist / replay по offset | Y | P | — | Y | P (живёт до Ack; журнал — в планах) |
+| Persist / replay по offset | Y | P | — | Y | **P** ([Journal](features/journal.md): внешний SoT + Redis scheduler) |
 | At-least-once + ack | Y | Y | — | Y | Y |
 | Exactly-once end-to-end | P | — | — | P | **P** (см. ниже) |
 | Порядок в partition/key | Y | P | — | Y | **Y** (`!`) |

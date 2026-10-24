@@ -61,6 +61,7 @@ Get в один момент отдаёт задачу одному consumer —
 | Кворум реплик / продолжение при падении единственного Redis | Нет (нужны Sentinel/Cluster снаружи) |
 | Транзакции publish+consume как у Kafka EOS | Нет |
 | Fan-out как Kafka CG / общий лог | Нет — для копий в N очередей см. [Exchange](features/exchange.md) |
+| Журнал / replay после потери Redis | Да, паттерн [Journal](features/journal.md) (внешний SoT + cursor + ack store) |
 
 ## Как получить «ровно один раз» по бизнесу
 

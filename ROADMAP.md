@@ -44,15 +44,13 @@ API: `ShardConfig`, `ShardByGroup|Queue|Manual|Partition`, `Producer.SetShards` 
 Тесты: `persistence_crash_test.go` (`SRQ_PERSIST_DOCKER=1`), конфиги `scripts/redis-persist/`.  
 Сырые: `docs/bench-results/persistence-HEAD.txt`.
 
-### 4. Persist / replay по offset (журнал)
+### 4. Persist / replay (журнал) — дизайн зафиксирован
 
-Не Kafka-log из коробки. Варианты на оценку:
+Публично: [`docs/features/journal.md`](docs/features/journal.md). Внутри: [`internal/docs/journal-design.md`](internal/docs/journal-design.md).
 
-- **A.** Opt-in: вместо DEL после Ack — перекладка в `log`/`archive` очередь (или ZSET) с монотонным seq → можно «перечитать хвост».
-- **B.** Side-stream: publish копии в отдельный consumer → Postgres/S3 (кто хочет audit).
-- **C.** Внешний CDC/Redis stream mirror.
+Кратко: durable SoT снаружи (kafka/pg/mongo, opt-in subpackages); Redis cursor + batch Publish; ack отдельно (ack topic / `acked_at`); recovery = Lock из ack + Replay с cursor; emergency `resume_after`; rescheduler для far schedule (pg/mongo; kafka — dual store или limitation). Connect — backlog (нативный output, не HTTP).
 
-Нужен выбор модели (стоимость Redis RAM vs отдельное хранилище) и API replay.
+Код драйверов / bridge — в работе.
 
 ### 5. Exactly-once (уточнение + возможные доработки)
 

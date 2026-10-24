@@ -42,6 +42,10 @@
 
 Подробности: [Exchange](../features/exchange.md).
 
+## Journal (дизайн)
+
+Opt-in пакеты `journal/kafka`, `journal/pg`, `journal/mongo`: batch ingress + cursor в Redis, ack в источнике, recovery Lock+Replay, emergency `resume_after`. Сигнатуры появятся в GoDoc по мере реализации. Паттерн: [Journal](../features/journal.md).
+
 ## Шардинг
 
 | Тип / метод | Назначение |

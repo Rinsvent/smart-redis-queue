@@ -8,6 +8,10 @@
 
 `Exchange` + `Bind` + явный `Persist`, затем `Publish` с `ExchangeFanout` / `Topic` / `Direct`. Consumer читает свою стабильную очередь. Подробности: [Exchange](features/exchange.md).
 
+## Как не потерять работу при падении Redis?
+
+Внешний journal (Kafka / Postgres / Mongo) как SoT, курсор «уже в очереди» в Redis, ack отдельно, recovery = lock done id + replay с курсора. См. [Journal](features/journal.md).
+
 ## Нужен ли отдельный Redis только под очередь?
 
 Не обязательно. Часто используют тот же инстанс, что и для кэша. При высокой нагрузке — отдельный Redis или [шардинг](sharding.md). Несколько DB на одном процессе не дают параллельный Lua, но уменьшают число ключей в одной DB (возможен небольшой прирост). Кратное ускорение Lua — от нескольких процессов Redis.

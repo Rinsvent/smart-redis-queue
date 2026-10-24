@@ -21,6 +21,7 @@
 | Step recovery | Checkpoint шагов handler (`NewSteps`) | [Step recovery](step-recovery.md) |
 | Headers | Мета между попытками (ошибки и т.п.) | [Headers](headers.md) |
 | Exchange | direct / fanout / topic → копии в N очередей | [Exchange](exchange.md) |
+| Journal | Durable ingress (kafka/pg/mongo) + recovery | [Journal](journal.md) |
 
 ## Prefetch и пул
 
