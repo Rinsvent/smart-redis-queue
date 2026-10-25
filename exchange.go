@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	exchangeARGVMarker     = "ex"
+	exchangeARGVMarker     = "__srq_ex"
 	errExchangeVersionLua  = "ERR_EXCHANGE_VERSION"
 	exchangeVersionRetries = 3
 )

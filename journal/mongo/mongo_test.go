@@ -2,12 +2,14 @@ package mongo
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
 
 	redisqueue "github.com/Rinsvent/smart-redis-queue"
 	"github.com/Rinsvent/smart-redis-queue/journal"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
 
@@ -74,4 +76,62 @@ func TestMongo_ScheduledPromoteNoCursorHole(t *testing.T) {
 	require.Len(t, recs, 1)
 	require.Equal(t, "far", recs[0].Task.ID)
 	require.Equal(t, int64(2), recs[0].Cursor.Offset) // новый offset, не дыра
+}
+
+func TestMongo_RecoverAfterRedisNoAckedDup(t *testing.T) {
+	src, ctx := testMongo(t)
+	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379", DB: 15})
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		t.Skipf("redis: %v", err)
+	}
+	defer rdb.Close()
+	require.NoError(t, rdb.FlushDB(ctx).Err())
+
+	const n = 10
+	now := time.Now()
+	tasks := make([]*redisqueue.Task, n)
+	for i := 0; i < n; i++ {
+		tasks[i] = &redisqueue.Task{ID: fmt.Sprintf("mo-r-%02d", i), Payload: []byte("x"), Scheduled: now}
+	}
+	require.NoError(t, src.Insert(ctx, tasks...))
+
+	const queue = "mongo-recover-q"
+	br := journal.NewBridge(rdb, "mo-rec", queue, src)
+	for {
+		k, err := br.Pump(ctx, 32)
+		require.NoError(t, err)
+		if k == 0 {
+			break
+		}
+	}
+	c := redisqueue.NewConsumer(rdb, queue, "c1")
+	defer c.Close()
+	c.SetPrefetchCount(100)
+	got, err := c.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, n)
+
+	acked := 4
+	for i := 0; i < acked; i++ {
+		require.NoError(t, src.Ack(ctx, got[i].ID, nil))
+		require.NoError(t, c.Ack(ctx, got[i].ID, 0))
+	}
+
+	require.NoError(t, rdb.FlushDB(ctx).Err())
+	require.NoError(t, br.RecoverAfterRedis(ctx, nil))
+
+	c2 := redisqueue.NewConsumer(rdb, queue, "c2")
+	defer c2.Close()
+	c2.SetPrefetchCount(100)
+	again, err := c2.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, again, n-acked)
+	seen := map[string]struct{}{}
+	for _, task := range again {
+		seen[task.ID] = struct{}{}
+	}
+	for i := 0; i < acked; i++ {
+		_, dup := seen[got[i].ID]
+		require.False(t, dup, "acked %s must not replay", got[i].ID)
+	}
 }

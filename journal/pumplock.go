@@ -3,6 +3,7 @@ package journal
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -17,7 +18,7 @@ func pumpLockKey(name string) string {
 	return "srq:journal:" + name + ":pump"
 }
 
-// acquirePumpLock берёт NX-лок; refresh в фоне пока жив ctx. unlock отменяет refresh и DEL.
+// acquirePumpLock берёт NX-лок; refresh в фоне пока жив ctx. unlock отменяет refresh и DEL (идемпотентно).
 func acquirePumpLock(ctx context.Context, rdb *redis.Client, name, holder string) (unlock func(), err error) {
 	key := pumpLockKey(name)
 	ok, err := rdb.SetNX(ctx, key, holder, pumpLockTTL).Result()
@@ -28,6 +29,7 @@ func acquirePumpLock(ctx context.Context, rdb *redis.Client, name, holder string
 		return nil, fmt.Errorf("journal: pump lock busy for %q", name)
 	}
 	stop := make(chan struct{})
+	var once sync.Once
 	go func() {
 		t := time.NewTicker(pumpLockRefresh)
 		defer t.Stop()
@@ -47,10 +49,12 @@ func acquirePumpLock(ctx context.Context, rdb *redis.Client, name, holder string
 		}
 	}()
 	return func() {
-		close(stop)
-		cur, err := rdb.Get(context.Background(), key).Result()
-		if err == nil && cur == holder {
-			_ = rdb.Del(context.Background(), key).Err()
-		}
+		once.Do(func() {
+			close(stop)
+			cur, err := rdb.Get(context.Background(), key).Result()
+			if err == nil && cur == holder {
+				_ = rdb.Del(context.Background(), key).Err()
+			}
+		})
 	}, nil
 }

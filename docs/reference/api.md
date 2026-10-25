@@ -49,7 +49,8 @@
 | API | Назначение |
 |-----|------------|
 | `journal.Bridge` / `Pump` / `Loop` / `RecoverAfterRedis` | journal→Redis; recovery Lock из `ReadAcks` + pump |
-| `Bridge.SetPublishOptions` / `SetProducer` | compression, `WithShardName`, свой Producer |
+| `Bridge.SetShards` / `SetProducer` / `SetPublishOptions` | шардинг (cursor на meta rdb); compression / backpressure |
+| `Producer.LockOnAllShards` | recovery Lock id на каждом шарде |
 | `DuePromoter` / `PromoteDue` | scheduled→ready (pg/mongo in-place; kafka ScheduleTopic→InTopic) |
 | `journal.DueSkew` / `IsDue` | окно due (10s) |
 | `WithJournal(name, cursor)` | PublishOption: задачи + cursor (иначе `ErrJournalCursorRewind`) |

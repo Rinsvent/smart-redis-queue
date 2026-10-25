@@ -11,7 +11,7 @@ import (
 
 const (
 	errJournalCursorRewindLua = "ERR_JOURNAL_CURSOR_REWIND"
-	journalARGVMarker         = "jn"
+	journalARGVMarker         = "__srq_jn"
 )
 
 // ResumeAfterKey — stamp воркеров после recovery (unix ms).

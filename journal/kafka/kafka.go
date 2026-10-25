@@ -48,6 +48,7 @@ func New(cfg Config) (*Source, error) {
 	sc := sarama.NewConfig()
 	sc.Version = sarama.V2_6_0_0
 	sc.Producer.Return.Successes = true
+	sc.Producer.Partitioner = sarama.NewManualPartitioner // Publish всегда в partition 0
 	cl, err := sarama.NewClient(cfg.Brokers, sc)
 	if err != nil {
 		return nil, err
@@ -97,10 +98,12 @@ func (s *Source) Publish(ctx context.Context, tasks ...*redisqueue.Task) error {
 		if s.cfg.ScheduleTopic != "" && !journal.IsDue(sch, now) {
 			topic = s.cfg.ScheduleTopic
 		}
+		// Контракт v1: одна партиция (0). Иначе ReadBatch/PromoteDue читают только partition 0.
 		_, _, err = s.producer.SendMessage(&sarama.ProducerMessage{
-			Topic: topic,
-			Key:   sarama.StringEncoder(t.ID),
-			Value: sarama.ByteEncoder(body),
+			Topic:     topic,
+			Partition: 0,
+			Key:       sarama.StringEncoder(t.ID),
+			Value:     sarama.ByteEncoder(body),
 		})
 		if err != nil {
 			return err
@@ -212,9 +215,10 @@ func recordFromMsg(topic string, msg *sarama.ConsumerMessage) (journal.Record, e
 
 func (s *Source) Ack(_ context.Context, taskID string, _ map[string]string) error {
 	_, _, err := s.producer.SendMessage(&sarama.ProducerMessage{
-		Topic: s.cfg.AckTopic,
-		Key:   sarama.StringEncoder(taskID),
-		Value: sarama.StringEncoder(taskID),
+		Topic:     s.cfg.AckTopic,
+		Partition: 0,
+		Key:       sarama.StringEncoder(taskID),
+		Value:     sarama.StringEncoder(taskID),
 	})
 	return err
 }
@@ -320,9 +324,10 @@ func (s *Source) PromoteDue(ctx context.Context, limit int) (int, error) {
 				Scheduled: rec.Task.Scheduled.UnixMilli(),
 			})
 			_, _, err = s.producer.SendMessage(&sarama.ProducerMessage{
-				Topic: s.cfg.InTopic,
-				Key:   sarama.StringEncoder(rec.Task.ID),
-				Value: sarama.ByteEncoder(body),
+				Topic:     s.cfg.InTopic,
+				Partition: 0,
+				Key:       sarama.StringEncoder(rec.Task.ID),
+				Value:     sarama.ByteEncoder(body),
 			})
 			if err != nil {
 				return moved, err

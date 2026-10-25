@@ -200,7 +200,8 @@ local function add_tasks_to_queue(queueName, taskCount, taskBase)
 	return notAddedItems
 end
 
-if ARGV[1] == "ex" then
+-- маркеры режима вне namespace имён очередей
+if ARGV[1] == "__srq_ex" then
 	local exchangeName = ARGV[2]
 	local wantVer = ARGV[3] or ""
 	if wantVer ~= "" then
@@ -237,8 +238,8 @@ if ARGV[1] == "ex" then
 	return {}
 end
 
--- journal: ARGV = "jn", cursorKey, newCursor, queueName, taskCount, bpCount, ...
-if ARGV[1] == "jn" then
+-- journal: ARGV = "__srq_jn", cursorKey, newCursor, queueName, taskCount, bpCount, ...
+if ARGV[1] == "__srq_jn" then
 	local cursorKey = ARGV[2]
 	local newCursor = ARGV[3] or ""
 	if cursorKey ~= "" and newCursor ~= "" then

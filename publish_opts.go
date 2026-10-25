@@ -100,6 +100,26 @@ func WithJournal(name, cursor string) PublishOption {
 	}
 }
 
+// StripJournalPublishOptions убирает WithJournal из списка (sharded Bridge пишет cursor на meta).
+func StripJournalPublishOptions(opts []PublishOption) []PublishOption {
+	if len(opts) == 0 {
+		return nil
+	}
+	out := make([]PublishOption, 0, len(opts))
+	for _, opt := range opts {
+		if opt == nil {
+			continue
+		}
+		probe := &publishConfig{}
+		opt(probe)
+		if probe.journalName != "" {
+			continue
+		}
+		out = append(out, opt)
+	}
+	return out
+}
+
 func (c *publishConfig) apply(opts []PublishOption) {
 	for _, opt := range opts {
 		if opt != nil {

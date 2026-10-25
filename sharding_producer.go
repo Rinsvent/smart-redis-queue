@@ -2,6 +2,7 @@ package redisqueue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 )
@@ -165,11 +166,31 @@ func validateManualKeyIfSet(key string) error {
 func (p *Producer) lockSharded(ctx context.Context, ids []string) error {
 	key, err := p.router.ShardKeyForTask(p.queueName, nil, "")
 	if err != nil {
-		return fmt.Errorf("Lock: %w (use LockTo for explicit shard)", err)
+		return fmt.Errorf("Lock: %w (use LockTo / LockOnAllShards for explicit shard)", err)
 	}
 	_, _, idx, err := p.router.ResolveWrite(key)
 	if err != nil {
 		return err
 	}
 	return p.shardPubs[idx].lockLocal(ctx, ids)
+}
+
+// LockOnAllShards — NX payload на каждом шарде (journal recovery: ack id без привязки к shard key).
+func (p *Producer) LockOnAllShards(ctx context.Context, ids ...string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if p.router == nil {
+		return p.Lock(ctx, ids...)
+	}
+	var first error
+	for _, sp := range p.shardPubs {
+		if err := sp.lockLocal(ctx, ids); err != nil {
+			var exists *ErrTasksAlreadyExist
+			if !errors.As(err, &exists) && first == nil {
+				first = err
+			}
+		}
+	}
+	return first
 }

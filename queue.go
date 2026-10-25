@@ -654,6 +654,16 @@ func (c *Consumer) SetEmergencyResume(on bool) {
 	c.emergencyResume = on
 }
 
+// SetJournalAck — как у Consumer; копируется на воркеры пула при respawn.
+func (p *ConsumerPool) SetJournalAck(fn func(ctx context.Context, taskID string) error) {
+	p.journalAck = fn
+}
+
+// SetEmergencyResume — как у Consumer; копируется на воркеры пула.
+func (p *ConsumerPool) SetEmergencyResume(on bool) {
+	p.emergencyResume = on
+}
+
 func (c *Consumer) waitEmergency(ctx context.Context) error {
 	if !c.emergencyResume || c.faultAt.IsZero() {
 		return nil
@@ -867,6 +877,8 @@ type ConsumerPool struct {
 	shardStats                  []*StatsSink
 	statsRetention              time.Duration
 	statsTags                   []string
+	journalAck                  func(ctx context.Context, taskID string) error
+	emergencyResume             bool
 }
 
 func (p *ConsumerPool) ensureStats() *StatsSink {
@@ -1015,6 +1027,8 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c.middlewares = p.middlewares
 		c.stats = stats
 		c.statsOwn = false
+		c.journalAck = p.journalAck
+		c.emergencyResume = p.emergencyResume
 
 		err := c.Consume(ctx, handler)
 		c.Close()

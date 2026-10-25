@@ -10,10 +10,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Bridge качает journal → одна Redis-очередь.
-// rdb — и pump-lock/cursor, и цель Publish: должен быть тот же инстанс, куда пишутся задачи.
-// При шардинге очереди передайте клиент нужного шарда (или SetPublishOptions(WithShardName) на sharded Producer —
-// тогда rdb всё равно обязан быть этим шардом, иначе cursor и очередь разъедутся).
+// Bridge качает journal → Redis-очередь (одна или sharded).
+//
+// rdb — meta: pump-lock + journal cursor (всегда здесь).
+// Producer по умолчанию пишет в rdb; после SetShards задачи раскладываются по шардам,
+// а cursor по-прежнему на rdb (двухфазно: Publish на шарды → SET cursor). Crash между
+// фазами безопасен: replay NX-skip уже лежащих id.
 type Bridge struct {
 	rdb      *redis.Client
 	prod     *redisqueue.Producer
@@ -37,23 +39,29 @@ func NewBridge(rdb *redis.Client, journalName, queueName string, src Source) *Br
 
 func (b *Bridge) SetResumeMode(m ResumeMode) { b.resume = m }
 
-// SetPublishOptions — доп. опции к каждому Pump (compression, backpressure, WithShardName…).
-// WithJournal добавляется самим Bridge; передавать его сюда не нужно.
+// SetPublishOptions — compression, backpressure, WithShardName… WithJournal добавляет Bridge сам
+// (только single-Redis); при шардинге cursor пишется на meta rdb отдельно.
 func (b *Bridge) SetPublishOptions(opts ...redisqueue.PublishOption) {
 	b.pubOpts = append([]redisqueue.PublishOption(nil), opts...)
 }
 
-// SetProducer подменяет publisher (например после SetShards). Cursor/lock по-прежнему на rdb из NewBridge.
+// SetProducer подменяет publisher. Cursor/lock остаются на rdb из NewBridge.
 func (b *Bridge) SetProducer(p *redisqueue.Producer) {
 	if p != nil {
 		b.prod = p
 	}
 }
 
+// SetShards — тот же ShardConfig, что у ConsumerPool. Курсор journal не переезжает на шарды.
+func (b *Bridge) SetShards(cfg *redisqueue.ShardConfig) error {
+	return b.prod.SetShards(cfg)
+}
+
+func (b *Bridge) Producer() *redisqueue.Producer { return b.prod }
+
 func (b *Bridge) Cursor(ctx context.Context) (Cursor, error) {
 	s, err := b.rdb.Get(ctx, redisqueue.JournalCursorKey(b.name)).Result()
 	if err == redis.Nil {
-		// ещё не ставили cursor — читать с начала (offset -1 → драйвер стартует с oldest / 0)
 		return Cursor{Offset: -1}, nil
 	}
 	if err != nil {
@@ -69,6 +77,10 @@ func (b *Bridge) promoteDue(ctx context.Context, n int) error {
 	}
 	_, err := p.PromoteDue(ctx, n)
 	return err
+}
+
+func (b *Bridge) commitCursor(ctx context.Context, encoded string) error {
+	return b.rdb.Set(ctx, redisqueue.JournalCursorKey(b.name), encoded, 0).Err()
 }
 
 func (b *Bridge) Pump(ctx context.Context, n int) (int, error) {
@@ -97,21 +109,30 @@ func (b *Bridge) Pump(ctx context.Context, n int) (int, error) {
 	for i := range recs {
 		tasks[i] = recs[i].Task
 	}
-	opts := make([]redisqueue.PublishOption, 0, len(b.pubOpts)+1)
-	opts = append(opts, b.pubOpts...)
-	opts = append(opts, redisqueue.WithJournal(b.name, last.Encode()))
+
+	sharded := b.prod.ShardRouter() != nil
+	var opts []redisqueue.PublishOption
+	if sharded {
+		opts = redisqueue.StripJournalPublishOptions(b.pubOpts)
+	} else {
+		opts = append(opts, b.pubOpts...)
+		opts = append(opts, redisqueue.WithJournal(b.name, last.Encode()))
+	}
 	if err := b.prod.PublishWith(ctx, opts, tasks...); err != nil {
-		// NX skip уже Locked/существующих id — норма для recovery replay
 		var exists *redisqueue.ErrTasksAlreadyExist
 		if !errors.As(err, &exists) {
+			return 0, err
+		}
+	}
+	if sharded {
+		// cursor на meta после успешного (или NX-partial) publish по шардам
+		if err := b.commitCursor(ctx, last.Encode()); err != nil {
 			return 0, err
 		}
 	}
 	return len(recs), nil
 }
 
-// lockDoneAcks — Kafka recovery: Lock task id из ack-топика, чтобы replay не создал дубли.
-// pg/mongo ReadAcks пустой — no-op (фильтр acked_at в ReadBatch).
 func (b *Bridge) lockDoneAcks(ctx context.Context) error {
 	from := Cursor{Offset: -1}
 	for {
@@ -129,7 +150,7 @@ func (b *Bridge) lockDoneAcks(ctx context.Context) error {
 			}
 		}
 		if len(ids) > 0 {
-			if err := b.prod.Lock(ctx, ids...); err != nil {
+			if err := b.prod.LockOnAllShards(ctx, ids...); err != nil {
 				var exists *redisqueue.ErrTasksAlreadyExist
 				if !errors.As(err, &exists) {
 					return err

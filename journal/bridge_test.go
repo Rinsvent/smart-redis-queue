@@ -138,3 +138,47 @@ func TestPumpLock_Exclusive(t *testing.T) {
 	_, err = acquirePumpLock(ctx, rdb, "lockj", "h2")
 	require.Error(t, err)
 }
+
+func TestBridge_SetShardsMultiGroup(t *testing.T) {
+	meta := testRedis(t)
+	ctx := context.Background()
+	s0 := redis.NewClient(&redis.Options{Addr: "localhost:6379", DB: 10})
+	s1 := redis.NewClient(&redis.Options{Addr: "localhost:6379", DB: 11})
+	if err := s0.Ping(ctx).Err(); err != nil {
+		t.Skip(err)
+	}
+	require.NoError(t, s0.FlushDB(ctx).Err())
+	require.NoError(t, s1.FlushDB(ctx).Err())
+	t.Cleanup(func() { _ = s0.Close(); _ = s1.Close() })
+
+	src := NewMemSource()
+	src.Insert(
+		&redisqueue.Task{ID: "t-g1", Groups: []string{"g1"}, Payload: []byte("1"), Scheduled: time.Now()},
+		&redisqueue.Task{ID: "t-g2", Groups: []string{"g2"}, Payload: []byte("2"), Scheduled: time.Now()},
+	)
+	br := NewBridge(meta, "j-shard", "jq-shard", src)
+	cfg := &redisqueue.ShardConfig{
+		Strategy: redisqueue.ShardByGroup,
+		Shards: []redisqueue.Shard{
+			{Name: "s0", Client: s0},
+			{Name: "s1", Client: s1},
+		},
+	}
+	require.NoError(t, br.SetShards(cfg))
+	n, err := br.Pump(ctx, 10)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+
+	// cursor на meta
+	cur, err := br.Cursor(ctx)
+	require.NoError(t, err)
+	require.True(t, cur.Offset >= 2 || cur.After(OffsetCursor(1)))
+
+	// задачи разложены по шардам
+	total := s0.Exists(ctx, "queue:jq-shard:payload:t-g1").Val() +
+		s1.Exists(ctx, "queue:jq-shard:payload:t-g1").Val()
+	require.Equal(t, int64(1), total)
+	total = s0.Exists(ctx, "queue:jq-shard:payload:t-g2").Val() +
+		s1.Exists(ctx, "queue:jq-shard:payload:t-g2").Val()
+	require.Equal(t, int64(1), total)
+}
