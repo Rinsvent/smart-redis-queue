@@ -13,7 +13,7 @@ github.com/Rinsvent/smart-redis-queue/journal/mongo
 
 ## Как это работает
 
-1. Пишете задачу в journal → получаете монотонный **offset** (Kafka offset, `BIGSERIAL`, counter в Mongo).
+1. Пишете задачу в journal → получаете монотонный **offset** (Kafka offset, `BIGSERIAL`, Mongo `_id` / ObjectID).
 2. Один **pump** (Bridge): берёт Redis-lock → читает батч после курсора → `PublishWith(WithJournal(...))` в очередь и двигает курсор в том же Lua.
 3. В journal нет флага «уже прочитали». Есть только **ack обработки** (`acked_at` или ack-топик).
 4. После SRQ `Ack` вызываете journal `Ack` (через `Consumer.SetJournalAck`).
@@ -39,7 +39,7 @@ flowchart LR
 |----------|--------|
 | kafka | partition + offset |
 | pg | `BIGSERIAL` |
-| mongo | атомарный counter |
+| mongo | `_id` (ObjectID) |
 
 `scheduled` в journal пишется как передали (в том числе в прошлом). Zero → `now` при insert — это default «без плана», не подмена уже заданной даты.
 
@@ -86,7 +86,7 @@ prod.PublishWith(ctx, []redisqueue.PublishOption{
 4. Для PG/Mongo: pump с курсора, только `acked_at IS NULL` (отдельный Lock не нужен).
 5. Режим auto — Bridge сам ставит `resume_after`.
 
-Между SRQ Ack и journal Ack возможны дубли (at-least-once). Прямой Publish в Redis без journal journal не закрывает.
+Между SRQ Ack и journal Ack возможны дубли (at-least-once). Прямой Publish в Redis без journal это не закрывает.
 
 ## Схема PG
 
@@ -111,7 +111,7 @@ CREATE INDEX idx_srq_journal_due
     WHERE acked_at IS NULL;
 ```
 
-Mongo: `journal_offset` + unique `task_id`, отдельная collection для counter. Ack: `acked_at` (null до Ack).
+Mongo: `_id` = ObjectID (курсор = hex), unique `task_id`, insert пачкой (`InsertMany`). Ack: `acked_at` (null до Ack).
 
 ## API (кратко)
 

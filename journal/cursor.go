@@ -8,18 +8,24 @@ import (
 
 const sep = "\x1f"
 
-// Cursor — позиция в журнале по offset (единый подход для kafka/pg/mongo).
+// Cursor — позиция в журнале.
+// Offset (+ Partition) — kafka/pg/mem; Key — opaque monotonic id (mongo ObjectID hex, 24 символа).
 type Cursor struct {
 	Offset    int64
-	Partition int32 // kafka; 0 для pg/mongo
+	Partition int32
+	Key       string
 }
 
 // Encode — монотонная строка для Redis.
+// Offset: 20 десятичных цифр; Key: как есть (для ObjectID — 24 hex).
 func (c Cursor) Encode() string {
+	if c.Key != "" {
+		return fmt.Sprintf("%010d%s%s", c.Partition, sep, c.Key)
+	}
 	return fmt.Sprintf("%010d%s%020d", c.Partition, sep, c.Offset)
 }
 
-// After — строго больше other.
+// After — строго больше other (лексикографически по Encode).
 func (c Cursor) After(other Cursor) bool {
 	return c.Encode() > other.Encode()
 }
@@ -37,16 +43,26 @@ func DecodeCursor(s string) (Cursor, error) {
 	if err != nil {
 		return Cursor{}, err
 	}
-	o, err := strconv.ParseInt(parts[1], 10, 64)
-	if err != nil {
-		return Cursor{}, err
+	tail := parts[1]
+	// %020d → ровно 20 цифр; ObjectID hex → 24 символа
+	if len(tail) == 20 {
+		o, err := strconv.ParseInt(tail, 10, 64)
+		if err != nil {
+			return Cursor{}, err
+		}
+		return Cursor{Partition: int32(p), Offset: o}, nil
 	}
-	return Cursor{Partition: int32(p), Offset: o}, nil
+	return Cursor{Partition: int32(p), Key: tail}, nil
 }
 
-// OffsetCursor — pg/mongo (partition=0).
+// OffsetCursor — pg/mem (partition=0).
 func OffsetCursor(offset int64) Cursor {
 	return Cursor{Offset: offset}
+}
+
+// KeyCursor — mongo ObjectID hex и др. opaque id.
+func KeyCursor(key string) Cursor {
+	return Cursor{Key: key}
 }
 
 // KafkaCursor — kafka partition+offset.

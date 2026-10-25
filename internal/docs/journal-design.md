@@ -8,7 +8,9 @@ Time-курсор `(scheduled, task_id)` ломается при двух про
 
 `scheduled`: `journal.ScheduledOrNow` — zero→now, иначе as-is (pg/mongo/mem одинаково).
 
-Far-future: отдельный store → insert в main с новым offset когда due (ещё не в коде).
+Far-future / scheduled-mover: отдельный store → insert в main с новым offset когда due — **не реализован**.
+
+Mongo: offset = ObjectID (`Cursor.Key`), InsertMany без counter collection.
 
 ## Publish
 
