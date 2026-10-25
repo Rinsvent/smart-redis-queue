@@ -42,42 +42,108 @@ func pgIdent(name string) string {
 	return name
 }
 
+func (s *Source) seqName() string {
+	return pgIdent(s.table) + "_offset_seq"
+}
+
 func (s *Source) Init(ctx context.Context) error {
 	t := pgIdent(s.table)
+	seq := s.seqName()
 	_, err := s.pool.Exec(ctx, fmt.Sprintf(`
+CREATE SEQUENCE IF NOT EXISTS %s;
 CREATE TABLE IF NOT EXISTS %s (
-    journal_offset BIGSERIAL PRIMARY KEY,
-    task_id    TEXT NOT NULL UNIQUE,
-    partition  TEXT NOT NULL DEFAULT '',
-    priority   INT NOT NULL DEFAULT 0,
-    payload    BYTEA NOT NULL,
-    tags       TEXT[] NOT NULL DEFAULT '{}',
-    groups     TEXT[] NOT NULL DEFAULT '{}',
-    scheduled  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    acked_at   TIMESTAMPTZ
+    id             BIGSERIAL PRIMARY KEY,
+    journal_offset BIGINT UNIQUE,
+    state          TEXT NOT NULL DEFAULT '%s',
+    task_id        TEXT NOT NULL UNIQUE,
+    partition      TEXT NOT NULL DEFAULT '',
+    priority       INT NOT NULL DEFAULT 0,
+    payload        BYTEA NOT NULL,
+    tags           TEXT[] NOT NULL DEFAULT '{}',
+    groups         TEXT[] NOT NULL DEFAULT '{}',
+    scheduled      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    acked_at       TIMESTAMPTZ
 );
-CREATE INDEX IF NOT EXISTS %s_due ON %s (scheduled) WHERE acked_at IS NULL;
-`, t, t, t))
+CREATE INDEX IF NOT EXISTS %s_due ON %s (scheduled)
+    WHERE state = '%s' AND acked_at IS NULL;
+CREATE INDEX IF NOT EXISTS %s_ready ON %s (journal_offset)
+    WHERE state = '%s' AND acked_at IS NULL AND journal_offset IS NOT NULL;
+`, seq, t, journal.StateReady, t, t, journal.StateScheduled, t, t, journal.StateReady))
 	return err
+}
+
+func (s *Source) reserveOffsets(ctx context.Context, n int) (start int64, err error) {
+	if n < 1 {
+		return 0, nil
+	}
+	// Contiguous nextval in one query.
+	rows, err := s.pool.Query(ctx, fmt.Sprintf(
+		`SELECT nextval('%s') FROM generate_series(1, $1)`, s.seqName()), n)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var first int64
+	i := 0
+	for rows.Next() {
+		var v int64
+		if err := rows.Scan(&v); err != nil {
+			return 0, err
+		}
+		if i == 0 {
+			first = v
+		}
+		i++
+	}
+	return first, rows.Err()
 }
 
 func (s *Source) Insert(ctx context.Context, tasks ...*redisqueue.Task) error {
 	if len(tasks) == 0 {
 		return nil
 	}
+	now := time.Now()
+	type item struct {
+		t   *redisqueue.Task
+		sch time.Time
+		due bool
+	}
+	items := make([]item, len(tasks))
+	dueN := 0
+	for i, t := range tasks {
+		sch := journal.ScheduledOrNow(t.Scheduled)
+		due := journal.IsDue(sch, now)
+		items[i] = item{t: t, sch: sch, due: due}
+		if due {
+			dueN++
+		}
+	}
+	start, err := s.reserveOffsets(ctx, dueN)
+	if err != nil {
+		return err
+	}
 	b := &pgx.Batch{}
-	q := fmt.Sprintf(`INSERT INTO %s (task_id, partition, priority, payload, tags, groups, scheduled)
-		VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (task_id) DO NOTHING`, pgIdent(s.table))
-	for _, t := range tasks {
-		tags, groups := t.Tags, t.Groups
+	q := fmt.Sprintf(`INSERT INTO %s (journal_offset, state, task_id, partition, priority, payload, tags, groups, scheduled)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (task_id) DO NOTHING`, pgIdent(s.table))
+	var dueI int64
+	for _, it := range items {
+		tags, groups := it.t.Tags, it.t.Groups
 		if tags == nil {
 			tags = []string{}
 		}
 		if groups == nil {
 			groups = []string{}
 		}
-		b.Queue(q, t.ID, t.Partition, t.Priority, t.Payload, tags, groups, journal.ScheduledOrNow(t.Scheduled))
+		var off any
+		state := journal.StateScheduled
+		if it.due {
+			v := start + dueI
+			dueI++
+			off = v
+			state = journal.StateReady
+		}
+		b.Queue(q, off, state, it.t.ID, it.t.Partition, it.t.Priority, it.t.Payload, tags, groups, it.sch)
 	}
 	return s.pool.SendBatch(ctx, b).Close()
 }
@@ -93,8 +159,9 @@ func (s *Source) ReadBatch(ctx context.Context, after journal.Cursor, n int) ([]
 	}
 	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
 		SELECT journal_offset, task_id, partition, priority, payload, tags, groups, scheduled
-		FROM %s WHERE acked_at IS NULL AND journal_offset > $1
-		ORDER BY journal_offset LIMIT $2`, tbl), afterOff, n)
+		FROM %s
+		WHERE state = $1 AND acked_at IS NULL AND journal_offset IS NOT NULL AND journal_offset > $2
+		ORDER BY journal_offset LIMIT $3`, tbl), journal.StateReady, afterOff, n)
 	if err != nil {
 		return nil, err
 	}
@@ -107,8 +174,7 @@ func (s *Source) ReadByOffset(ctx context.Context, c journal.Cursor) (journal.Re
 	row := s.pool.QueryRow(ctx, fmt.Sprintf(`
 		SELECT journal_offset, task_id, partition, priority, payload, tags, groups, scheduled
 		FROM %s WHERE journal_offset = $1`, tbl), c.Offset)
-	recs, err := scanOne(row)
-	return recs, err
+	return scanOne(row)
 }
 
 func scanRows(rows pgx.Rows) ([]journal.Record, error) {
@@ -150,6 +216,66 @@ func scanRow(row scannable) (journal.Record, error) {
 	}, nil
 }
 
+// PromoteDue — due scheduled → ready (тот же ряд, новый journal_offset).
+func (s *Source) PromoteDue(ctx context.Context, limit int) (int, error) {
+	if limit < 1 {
+		limit = 64
+	}
+	tbl := pgIdent(s.table)
+	dueAt := time.Now().Add(journal.DueSkew)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx, fmt.Sprintf(`
+		SELECT id FROM %s
+		WHERE state = $1 AND acked_at IS NULL AND scheduled <= $2
+		ORDER BY scheduled
+		FOR UPDATE SKIP LOCKED
+		LIMIT $3`, tbl), journal.StateScheduled, dueAt, limit)
+	if err != nil {
+		return 0, err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if len(ids) == 0 {
+		return 0, tx.Commit(ctx)
+	}
+	start, err := s.reserveOffsets(ctx, len(ids))
+	if err != nil {
+		return 0, err
+	}
+	// reserveOffsets uses pool, not tx — ok for sequence; updates in tx
+	for i, id := range ids {
+		off := start + int64(i)
+		ct, err := tx.Exec(ctx, fmt.Sprintf(`
+			UPDATE %s SET state = $1, journal_offset = $2
+			WHERE id = $3 AND state = $4`, tbl),
+			journal.StateReady, off, id, journal.StateScheduled)
+		if err != nil {
+			return 0, err
+		}
+		_ = ct
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return len(ids), nil
+}
+
 func (s *Source) Ack(ctx context.Context, taskID string, _ map[string]string) error {
 	_, err := s.pool.Exec(ctx, fmt.Sprintf(
 		`UPDATE %s SET acked_at = NOW() WHERE task_id = $1 AND acked_at IS NULL`, pgIdent(s.table)), taskID)
@@ -159,3 +285,5 @@ func (s *Source) Ack(ctx context.Context, taskID string, _ map[string]string) er
 func (s *Source) ReadAcks(context.Context, journal.Cursor, int) ([]journal.AckEvent, error) {
 	return nil, nil
 }
+
+var _ journal.DuePromoter = (*Source)(nil)

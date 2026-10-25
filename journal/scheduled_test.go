@@ -18,3 +18,11 @@ func TestScheduledOrNow(t *testing.T) {
 	assert.False(t, got.IsZero())
 	assert.WithinDuration(t, time.Now(), got, time.Second)
 }
+
+func TestIsDue(t *testing.T) {
+	now := time.Now()
+	assert.True(t, IsDue(now, now))
+	assert.True(t, IsDue(now.Add(DueSkew), now))
+	assert.False(t, IsDue(now.Add(DueSkew+time.Second), now))
+	assert.True(t, IsDue(now.Add(-time.Hour), now))
+}

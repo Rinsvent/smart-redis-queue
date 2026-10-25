@@ -2,30 +2,20 @@
 
 Публично: [`docs/features/journal.md`](../../docs/features/journal.md).
 
-## Offset вместо time-курсора
+## Дыры курсора (не делать)
 
-Time-курсор `(scheduled, task_id)` ломается при двух продюсерах / долгом prepare. Unified model = append offset. Порядок между независимыми продюсерами не обещаем.
+1. Time-курсор / ObjectID «от scheduled» + late insert → skip.
+2. `ReadBatch: offset > cursor AND scheduled <= now` при advance cursor мимо undued → skip навсегда.
+3. In-place `state=ready` **без нового** journal_offset, если cursor уже прошёл «дырявый» id → skip.
 
-`scheduled`: `journal.ScheduledOrNow` — zero→now, иначе as-is (pg/mongo/mem одинаково).
+Правило: в ready-stream попадает только строка с **новым** journal_offset в момент готовности.
 
-Far-future / scheduled-mover: отдельный store → insert в main с новым offset когда due — **не реализован**.
+## pg/mongo scheduler
 
-Mongo: offset = ObjectID (`Cursor.Key`), InsertMany без counter collection.
+Одна таблица: `scheduled` без offset → `PromoteDue` выдаёт batch-reserve offset, payload на месте.  
+Mongo counter: `$inc: {seq: n}` один раз на батч.  
+Kafka: отдельный журнал + mover (ref/dual store).
 
 ## Publish
 
-Только `PublishWith(WithJournal(...))` → `publishLocal` / Lua `jn`. Отдельного PublishJournalBatch нет.
-
-Шардинг: батч с journal на >1 шард → ошибка. Bridge.rdb = Redis очереди (и cursor, и pump).
-
-## Redis pump lock
-
-`srq:journal:{name}:pump` NX TTL 60s, refresh 10s.
-
-## Requester
-
-[Rinsvent/requester](https://github.com/Rinsvent/requester): OutRelock, OffsetRef+Fetcher, PG mover. Публично не ссылаем.
-
-## Инфра
-
-`docker-compose.yaml`: redis, postgres, mongo, kafka. Тесты драйверов skip без сервиса.
+`PublishWith(WithJournal)` only. Шардинг: один шард на journal-батч.

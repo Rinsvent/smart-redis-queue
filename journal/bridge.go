@@ -61,9 +61,21 @@ func (b *Bridge) Cursor(ctx context.Context) (Cursor, error) {
 	return DecodeCursor(s)
 }
 
+func (b *Bridge) promoteDue(ctx context.Context, n int) error {
+	p, ok := b.src.(DuePromoter)
+	if !ok {
+		return nil
+	}
+	_, err := p.PromoteDue(ctx, n)
+	return err
+}
+
 func (b *Bridge) Pump(ctx context.Context, n int) (int, error) {
 	if n < 1 {
 		n = 32
+	}
+	if err := b.promoteDue(ctx, n); err != nil {
+		return 0, err
 	}
 	cur, err := b.Cursor(ctx)
 	if err != nil {
