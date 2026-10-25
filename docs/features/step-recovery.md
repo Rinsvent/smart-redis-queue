@@ -42,15 +42,79 @@ s, err := redisqueue.NewSteps(ctx, task, redisqueue.StepsOptions{TTL: 7 * 24 * t
 s, err := redisqueue.NewStepsRaw(ctx, rdb, "orders", taskID)
 ```
 
-После успешного `Do` в Redis пишется имя шага. При ошибке checkpoint не двигается. На **Reject** / reclaim ключ остаётся; на **Ack** и **Admin.Remove** — удаляется.
+После успешного `Do` / `End` в Redis пишется **только имя** шага (без маркера прогресса). При ошибке checkpoint не двигается на «готово»; mid-progress остаётся в ключе. На **Reject** / reclaim ключ остаётся; на **Ack** и **Admin.Remove** — удаляется.
 
 ## Ручной режим
 
 ```go
 s, _ := redisqueue.NewSteps(ctx, task)
+ok, _ := s.Begin(ctx, "prepared")
+if ok {
+    // ...
+    _ = s.End(ctx) // Commit имени
+}
 _ = s.Last()
-_ = s.Commit(ctx, "prepared")
+_ = s.Commit(ctx, "prepared") // то же без Begin
 ```
+
+## Progress (опционально)
+
+Имя шага **не повторяем** — берётся из текущего `Begin` / `Do`. Счётчик пишется в тот же ключ step:
+
+| Значение | Смысл |
+|----------|--------|
+| `import` | шаг **завершён** (нет маркера `#`) |
+| `import#3/10@1700000000000` | в процессе: 3 из 10, старт unix ms |
+| `import#3/?@1700000000000` | total неизвестен |
+
+Есть `#` → шаг **не закончен** (даже `10/10`). Закончен только голое имя после `End` / успешного `Do`.
+
+```go
+err := s.Do(ctx, "import", func(ctx context.Context) error {
+    bar, err := s.Progress(ctx, redisqueue.StepProgressConfig{
+        FlushEvery: time.Second, // 0 → на каждый Advance
+    })
+    if err != nil {
+        return err
+    }
+    bar.SetTotal(10) // 0 / не звать → «?»
+    for _, row := range rows {
+        if err := process(row); err != nil {
+            return err
+        }
+        if err := bar.Advance(ctx, 1); err != nil {
+            return err
+        }
+    }
+    return nil // Do → End: в ключе останется «import»
+})
+```
+
+Или Begin/End:
+
+```go
+ok, err := s.Begin(ctx, "import")
+if err != nil || !ok {
+    return err
+}
+bar, err := s.Progress(ctx, redisqueue.StepProgressConfig{})
+if err != nil {
+    return err
+}
+bar.SetTotal(len(rows))
+for _, row := range rows {
+    // ...
+    _ = bar.Advance(ctx, 1)
+}
+return s.End(ctx)
+```
+
+- При падении / Reject mid-bar в ключе остаётся прогресс; на следующей попытке `Progress` **продолжит с curr** и тем же `StartedAt` (для ETA / «сколько уже прошло»).
+- `Last()` — имя; `LastProgress()` — curr/total/started при незавершённом баре.
+- `bar.Elapsed()` / `bar.ETA()` — по `StartedAt` и current/total.
+- `bar.Flush(ctx)` — принудительная запись при throttle.
+
+Имена шагов лучше **без** `#` и `@`.
 
 ## Release и TTL
 
@@ -58,10 +122,11 @@ _ = s.Commit(ctx, "prepared")
 
 ## Семантика
 
-- Checkpoint = шаг успешно завершён; при resume `Do` до этого имени включительно пропускаются.
+- Checkpoint без `#` = шаг успешно завершён; при resume `Do` до этого имени включительно пропускаются.
+- Есть `#` = шаг в процессе; тело выполнится снова, bar подхватит curr.
 - Имена — стабильные строки; порядок `Do` должен совпадать между попытками.
 - Get уже отдаёт задачу одному consumer: Steps не про конкуренцию воркеров, а про **повтор во времени** после Reject/reclaim.
-- Окно: упали после внешнего эффекта, но до `Commit` — этот шаг выполнится снова (как в любой at-least-once очереди). Закрывается идемпотентностью шага, не флагом библиотеки.
+- Окно: упали после внешнего эффекта, но до `End`/`Commit` — этот шаг выполнится снова (как в любой at-least-once очереди). Закрывается идемпотентностью шага, не флагом библиотеки.
 
 `!`-партиция + Steps: один обработчик, порядок, прогресс между попытками. Это каркас под «ровно один раз» по бизнесу, если каждый шаг идемпотентен.
 
@@ -123,4 +188,4 @@ pool.Consume(ctx, func(task *redisqueue.Task) error {
 
 ## Ключ Redis
 
-`queue:{name}:step:{taskID}` — см. [Ключи Redis](../reference/redis-keys.md).
+`queue:{name}:step:{taskID}` — STRING: `name` или `name#curr/total@startedMs`. См. [Ключи Redis](../reference/redis-keys.md).

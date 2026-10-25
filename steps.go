@@ -3,6 +3,7 @@ package redisqueue
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -13,28 +14,46 @@ func stepKey(queueName, taskID string) string {
 	return "queue:" + queueName + ":step:" + taskID
 }
 
-// StepFunc — тело одного шага recovery.
+// StepFunc — тело одного шага recovery (Do).
 type StepFunc func(ctx context.Context) error
 
 // StepsOptions — опции NewSteps / NewStepsRaw.
 type StepsOptions struct {
-	// TTL — EXPIRE на ключ step при каждом Commit. 0 = без TTL (ключ живёт до Ack/Remove/Release).
+	// TTL — EXPIRE на ключ step при каждом Commit/Advance. 0 = без TTL.
 	TTL time.Duration
 }
 
-// StepRunner — checkpoint по строковому step.
-// Ключ чистится на Ack/Admin.Remove; опционально Release или TTL.
-type StepRunner struct {
-	last      string
-	skipUntil string
-	active    bool
-	rdb       *redis.Client
-	queue     string
-	taskID    string
-	ttl       time.Duration
+// StepProgressConfig — опции Progress (имя шага берётся из Begin/Do).
+type StepProgressConfig struct {
+	// FlushEvery — как часто писать в Redis при Advance; 0 = на каждый Advance.
+	FlushEvery time.Duration
 }
 
-// NewSteps создаёт runner из Task после Get/Consume (redis и queue подставляет consumer).
+// StepRunner — checkpoint по строковому step.
+//
+// Значение ключа:
+//   - "name" — шаг завершён;
+//   - "name#curr/total@startedMs" или "name#curr/?@startedMs" — шаг в процессе (маркер прогресса).
+type StepRunner struct {
+	last           string
+	skipUntil      string
+	active         bool
+	resumeProgress bool
+	resumeCurr     int
+	resumeTotal    int
+	resumeUnknown  bool
+	resumeStarted  time.Time
+
+	currentName string // активный Begin/Do
+	bar         *StepProgress
+
+	rdb    *redis.Client
+	queue  string
+	taskID string
+	ttl    time.Duration
+}
+
+// NewSteps создаёт runner из Task после Get/Consume.
 func NewSteps(ctx context.Context, task *Task, opts ...StepsOptions) (*StepRunner, error) {
 	if task == nil {
 		return nil, fmt.Errorf("steps: task is nil")
@@ -49,7 +68,7 @@ func NewSteps(ctx context.Context, task *Task, opts ...StepsOptions) (*StepRunne
 	return newSteps(ctx, task.bindRedis, task.bindQueue, task.ID, o)
 }
 
-// NewStepsRaw — без Task: явные redis/queue/id (скрипты, тесты, свой Get-путь).
+// NewStepsRaw — без Task: явные redis/queue/id.
 func NewStepsRaw(ctx context.Context, rdb *redis.Client, queueName, taskID string, opts ...StepsOptions) (*StepRunner, error) {
 	var o StepsOptions
 	if len(opts) > 0 {
@@ -65,25 +84,89 @@ func newSteps(ctx context.Context, rdb *redis.Client, queueName, taskID string, 
 	if queueName == "" || taskID == "" {
 		return nil, fmt.Errorf("steps: queue and task id required")
 	}
-	last := ""
+	raw := ""
 	val, err := rdb.Get(ctx, stepKey(queueName, taskID)).Result()
 	if err == nil {
-		last = val
+		raw = val
 	} else if err != redis.Nil {
 		return nil, fmt.Errorf("steps: load checkpoint: %w", err)
 	}
-	return &StepRunner{
-		rdb:       rdb,
-		queue:     queueName,
-		taskID:    taskID,
-		last:      last,
-		skipUntil: last,
-		active:    last == "",
-		ttl:       opts.TTL,
-	}, nil
+
+	s := &StepRunner{rdb: rdb, queue: queueName, taskID: taskID, ttl: opts.TTL}
+	if raw == "" {
+		s.active = true
+		return s, nil
+	}
+	name, curr, total, unk, started, hasProg := parseStepValue(raw)
+	if hasProg {
+		// есть маркер прогресса → шаг не завершён
+		s.skipUntil = name
+		s.last = name
+		s.resumeProgress = true
+		s.resumeCurr = curr
+		s.resumeTotal = total
+		s.resumeUnknown = unk
+		s.resumeStarted = started
+		s.active = false
+		return s, nil
+	}
+	s.last = name
+	s.skipUntil = name
+	s.active = false
+	return s, nil
 }
 
-// Last — текущий checkpoint ("" если нет).
+// encodeStepValue — незавершённый прогресс. Имя лучше без '#' и '@'.
+func encodeStepValue(name string, curr, total int, unknownTotal bool, started time.Time) string {
+	if started.IsZero() {
+		started = time.Now()
+	}
+	ms := started.UnixMilli()
+	if unknownTotal || total <= 0 {
+		return fmt.Sprintf("%s#%d/?@%d", name, curr, ms)
+	}
+	return fmt.Sprintf("%s#%d/%d@%d", name, curr, total, ms)
+}
+
+// parseStepValue: "name" | "name#3/10" | "name#3/?@ms" | "name#3/10@ms"
+func parseStepValue(v string) (name string, curr, total int, unknownTotal bool, started time.Time, hasProgress bool) {
+	if v == "" {
+		return "", 0, 0, false, time.Time{}, false
+	}
+	at := strings.LastIndexByte(v, '@')
+	body := v
+	if at > 0 {
+		if ms, err := strconv.ParseInt(v[at+1:], 10, 64); err == nil && ms > 0 {
+			started = time.UnixMilli(ms)
+			body = v[:at]
+		}
+	}
+	i := strings.LastIndexByte(body, '#')
+	if i < 0 {
+		return body, 0, 0, false, time.Time{}, false
+	}
+	rest := body[i+1:]
+	slash := strings.IndexByte(rest, '/')
+	if slash < 0 {
+		return body, 0, 0, false, time.Time{}, false
+	}
+	currStr, totStr := rest[:slash], rest[slash+1:]
+	c, err := strconv.Atoi(currStr)
+	if err != nil || c < 0 {
+		return body, 0, 0, false, time.Time{}, false
+	}
+	name = body[:i]
+	if totStr == "?" {
+		return name, c, 0, true, started, true
+	}
+	t, err := strconv.Atoi(totStr)
+	if err != nil || t < 0 {
+		return body, 0, 0, false, time.Time{}, false
+	}
+	return name, c, t, false, started, true
+}
+
+// Last — имя checkpoint без суффикса прогресса.
 func (s *StepRunner) Last() string {
 	if s == nil {
 		return ""
@@ -91,7 +174,19 @@ func (s *StepRunner) Last() string {
 	return s.last
 }
 
-// Commit записывает имя завершённого шага.
+// LastProgress — curr/total/started при незавершённом баре в ключе.
+func (s *StepRunner) LastProgress() (curr, total int, unknownTotal bool, started time.Time, ok bool) {
+	if s == nil || !s.resumeProgress {
+		return 0, 0, false, time.Time{}, false
+	}
+	return s.resumeCurr, s.resumeTotal, s.resumeUnknown, s.resumeStarted, true
+}
+
+func (s *StepRunner) writeValue(ctx context.Context, value string) error {
+	return s.rdb.Set(ctx, stepKey(s.queue, s.taskID), value, s.ttl).Err()
+}
+
+// Commit — шаг завершён (в ключе только имя, без #прогресса).
 func (s *StepRunner) Commit(ctx context.Context, name string) error {
 	if s == nil {
 		return fmt.Errorf("steps: nil runner")
@@ -100,46 +195,243 @@ func (s *StepRunner) Commit(ctx context.Context, name string) error {
 	if name == "" {
 		return fmt.Errorf("step: empty name")
 	}
-	key := stepKey(s.queue, s.taskID)
-	if err := s.rdb.Set(ctx, key, name, s.ttl).Err(); err != nil {
+	if err := s.writeValue(ctx, name); err != nil {
 		return fmt.Errorf("step commit %q: %w", name, err)
 	}
 	s.last = name
+	s.resumeProgress = false
+	s.currentName = ""
+	s.bar = nil
 	return nil
 }
 
-// Do выполняет fn, если шаг ещё не пройден checkpoint'ом; при успехе Commit(name).
-func (s *StepRunner) Do(ctx context.Context, name string, fn StepFunc) error {
+// Begin входит в шаг. ok=false — шаг уже завершён, тело пропускаем.
+// Имя задаётся один раз; Progress() берёт его отсюда.
+func (s *StepRunner) Begin(ctx context.Context, name string) (ok bool, err error) {
 	if s == nil {
-		return fmt.Errorf("steps: nil runner")
+		return false, fmt.Errorf("steps: nil runner")
 	}
 	name = strings.TrimSpace(name)
 	if name == "" {
-		return fmt.Errorf("step: empty name")
+		return false, fmt.Errorf("step: empty name")
 	}
-	if fn == nil {
-		return fmt.Errorf("step %q: nil func", name)
+	if s.currentName != "" {
+		return false, fmt.Errorf("steps: already in step %q (End first)", s.currentName)
 	}
 
 	if !s.active {
 		if name != s.skipUntil {
-			return nil
+			return false, nil
 		}
 		s.active = true
-		return nil
+		if !s.resumeProgress {
+			// завершённый checkpoint с этим именем
+			return false, nil
+		}
+		// mid-progress — выполняем снова
+	} else if name == s.last && !s.resumeProgress {
+		return false, nil
 	}
 
-	if name == s.last {
-		return nil
-	}
+	s.currentName = name
+	return true, nil
+}
 
-	if err := fn(ctx); err != nil {
-		return err
+// End завершает текущий Begin-шаг (Commit имени без прогресса).
+func (s *StepRunner) End(ctx context.Context) error {
+	if s == nil {
+		return fmt.Errorf("steps: nil runner")
+	}
+	if s.currentName == "" {
+		return fmt.Errorf("steps: End without Begin")
+	}
+	name := s.currentName
+	if s.bar != nil {
+		_ = s.bar.flush(ctx)
+		s.bar = nil
 	}
 	return s.Commit(ctx, name)
 }
 
-// Release удаляет checkpoint вручную. Обычно не нужен: Ack и Admin.Remove чистят ключ сами.
+// Progress — bar для текущего Begin/Do шага (имя не повторяем).
+func (s *StepRunner) Progress(ctx context.Context, cfg StepProgressConfig) (*StepProgress, error) {
+	if s == nil {
+		return nil, fmt.Errorf("steps: nil runner")
+	}
+	if s.currentName == "" {
+		return nil, fmt.Errorf("steps: Progress outside Begin/Do")
+	}
+	if s.bar != nil {
+		return s.bar, nil
+	}
+
+	curr, total, unknown := 0, 0, true
+	started := time.Now()
+	if s.resumeProgress && s.currentName == s.skipUntil {
+		curr = s.resumeCurr
+		unknown = s.resumeUnknown
+		total = s.resumeTotal
+		if !s.resumeStarted.IsZero() {
+			started = s.resumeStarted
+		}
+	}
+
+	p := &StepProgress{
+		runner:     s,
+		name:       s.currentName,
+		total:      total,
+		unknown:    unknown,
+		current:    curr,
+		started:    started,
+		flushEvery: cfg.FlushEvery,
+	}
+	s.bar = p
+	// сразу зафиксировать старт в ключе (шаг начат, ещё не завершён)
+	if err := p.flush(ctx); err != nil {
+		s.bar = nil
+		return nil, err
+	}
+	return p, nil
+}
+
+// Do — Begin + fn + End. Внутри fn: bar, _ := s.Progress(ctx, cfg).
+func (s *StepRunner) Do(ctx context.Context, name string, fn StepFunc) error {
+	if fn == nil {
+		return fmt.Errorf("step %q: nil func", name)
+	}
+	ok, err := s.Begin(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	if err := fn(ctx); err != nil {
+		// прогресс остаётся в ключе для resume
+		s.currentName = ""
+		s.bar = nil
+		// active остаётся true — следующие Do в этой попытке могут идти;
+		// но skipUntil/resume уже в Redis. На следующем NewSteps подхватят mid-bar.
+		// Чтобы следующие Do в том же handler не ломались после ошибки mid-step —
+		// оставляем active=true, currentName cleared; resumeProgress из Redis на след. Get.
+		return err
+	}
+	return s.End(ctx)
+}
+
+// StepProgress — счётчик внутри текущего шага.
+type StepProgress struct {
+	runner     *StepRunner
+	name       string
+	total      int
+	unknown    bool
+	current    int
+	started    time.Time
+	flushEvery time.Duration
+	lastFlush  time.Time
+	dirty      bool // SetTotal / смена total — сбросить throttle
+}
+
+func (p *StepProgress) Current() int {
+	if p == nil {
+		return 0
+	}
+	return p.current
+}
+
+func (p *StepProgress) Total() int {
+	if p == nil || p.unknown {
+		return 0
+	}
+	return p.total
+}
+
+// SetTotal задаёт максимум (0 → «?»). Можно вызвать после Progress.
+func (p *StepProgress) SetTotal(n int) {
+	if p == nil {
+		return
+	}
+	if n <= 0 {
+		p.unknown = true
+		p.total = 0
+	} else {
+		p.unknown = false
+		p.total = n
+	}
+	p.dirty = true
+}
+
+// StartedAt — время старта бара (сохраняется в ключе при resume).
+func (p *StepProgress) StartedAt() time.Time {
+	if p == nil {
+		return time.Time{}
+	}
+	return p.started
+}
+
+// Elapsed — сколько уже идёт шаг.
+func (p *StepProgress) Elapsed() time.Duration {
+	if p == nil || p.started.IsZero() {
+		return 0
+	}
+	return time.Since(p.started)
+}
+
+// ETA — оценка до конца по current/total; 0 если total неизвестен или current=0.
+func (p *StepProgress) ETA() time.Duration {
+	if p == nil || p.unknown || p.total <= 0 || p.current <= 0 {
+		return 0
+	}
+	if p.current >= p.total {
+		return 0
+	}
+	per := p.Elapsed() / time.Duration(p.current)
+	return per * time.Duration(p.total-p.current)
+}
+
+// Advance добавляет n (n<1 → 1) и при необходимости пишет в Redis.
+func (p *StepProgress) Advance(ctx context.Context, n int) error {
+	if p == nil || p.runner == nil {
+		return fmt.Errorf("steps: nil progress")
+	}
+	if n < 1 {
+		n = 1
+	}
+	p.current += n
+	if p.dirty || p.flushEvery <= 0 || p.lastFlush.IsZero() || time.Since(p.lastFlush) >= p.flushEvery {
+		p.dirty = false
+		return p.flush(ctx)
+	}
+	return nil
+}
+
+// Flush принудительно пишет прогресс в Redis.
+func (p *StepProgress) Flush(ctx context.Context) error {
+	if p == nil || p.runner == nil {
+		return fmt.Errorf("steps: nil progress")
+	}
+	return p.flush(ctx)
+}
+
+func (p *StepProgress) flush(ctx context.Context) error {
+	if p.started.IsZero() {
+		p.started = time.Now()
+	}
+	val := encodeStepValue(p.name, p.current, p.total, p.unknown, p.started)
+	if err := p.runner.writeValue(ctx, val); err != nil {
+		return fmt.Errorf("step progress %q: %w", p.name, err)
+	}
+	p.runner.last = p.name
+	p.runner.resumeProgress = true
+	p.runner.resumeCurr = p.current
+	p.runner.resumeTotal = p.total
+	p.runner.resumeUnknown = p.unknown
+	p.runner.resumeStarted = p.started
+	p.lastFlush = time.Now()
+	return nil
+}
+
+// Release удаляет checkpoint вручную.
 func (s *StepRunner) Release(ctx context.Context) error {
 	if s == nil {
 		return nil
@@ -150,5 +442,8 @@ func (s *StepRunner) Release(ctx context.Context) error {
 	s.last = ""
 	s.skipUntil = ""
 	s.active = true
+	s.resumeProgress = false
+	s.currentName = ""
+	s.bar = nil
 	return nil
 }
