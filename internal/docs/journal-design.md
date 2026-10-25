@@ -1,61 +1,21 @@
 # Journal — внутренние заметки
 
-Публично: [`docs/features/journal.md`](../../docs/features/journal.md). Здесь — связь с Requester и детали реализации.
+Публично: [`docs/features/journal.md`](../../docs/features/journal.md).
 
-## Опыт Requester
+## Offset вместо time-курсора
 
-Сервис [Rinsvent/requester](https://github.com/Rinsvent/requester) / [хабр](https://habr.com/ru/articles/1028010/):
+Time-курсор `(scheduled, task_id)` ломается при двух продюсерах / долгом prepare: «поздний» батч сдвигает курсор → опоздавшее сообщение skip. Unified model = **append offset** (как Kafka). Порядок между независимыми продюсерами не обещаем.
 
-- Kafka `in` → router → Redis (если due ≤ ~1s) или PostgreSQL outbox (дальше).
-- PG mover → снова Kafka `in` → Redis.
-- Workers → Kafka `out`.
-- Recovery: `OutRelockConsumer` читает `out` с offset и делает `Producer.Lock(taskID)` перед повторной вычиткой.
-- В Redis часто **offset-ref** вместо полного payload (`OffsetRef` + `Fetcher`).
+Far-future: не дырявить main offset-stream; scheduled store → insert в main с **новым** offset когда due.
 
-Публичную доку SRQ **не** ссылаем на Requester; паттерны переносим обобщённо.
+## Redis pump lock
 
-## Отличия SRQ journal от «commit offset после Ack»
+`srq:journal:{name}:pump` NX TTL 60s, refresh 10s — единый single-writer для pg/mongo/kafka. Источник-specific locks optional.
 
-В Requester Kafka `in` часто **1 partition** + быстрый путь в Redis; всё же задача может задерживаться. В SRQ логические партиции блокируются независимо → **нельзя** отождествлять Kafka consumer lag с «ещё не Ack в Redis».
+## Requester
 
-Поэтому:
+[Rinsvent/requester](https://github.com/Rinsvent/requester): OutRelock, OffsetRef+Fetcher, PG mover. Публично не ссылаем.
 
-- **Redis cursor** = «уже опубликовано в очередь» (батч + атомарно с Publish).
-- **Ack store** = «уже обработано» (ack topic / `acked_at`).
-- **PG/Mongo recovery:** replay с cursor + `acked_at IS NULL` (Lock не нужен). Добить зависшие journal Ack после краша воркера.
-- **Kafka recovery:** Lock из ack-топика + replay с offset (в логе нет acked_at).
-- Курсор PG: `(scheduled, task_id)` с монотонным task_id; индекс `(scheduled, task_id)`; колонки tags/groups/priority.
-- Окно everysec на приёме закрывается только для потока через journal; at-least-once между SRQ Ack и journal Ack остаётся — см. публичную § loss-window.
+## Инфра
 
-## Батчи (как в pgqueue Requester)
-
-- `Publish` в PG — multi-row `INSERT`.
-- Claim due — `FOR UPDATE SKIP LOCKED` + prefetch.
-- Bridge SRQ: `ReadBatch` → один EVAL Publish+cursor; размер батча конфигурируемый.
-
-## Emergency / resume stamp
-
-Эвристики «это не transient»:
-
-- явный admin `PauseJournalConsumers` / ключ `srq:resume_after=0` (пауза);
-- Redis `LOADING`;
-- опционально: детект пустого/урезанного `srq:queues` после рестарта при ненулевом ожидаемом cursor (осторожно, false positive).
-
-Не триггерить на обычный `i/o timeout` с успешным ping следом.
-
-## Rescheduler
-
-- pg/mongo: due window `now()+10s` (конфиг).
-- kafka-only far schedule: **не** в v1; dual driver `main+scheduled` (scheduled = pg) — backlog рядом с Connect driver.
-- ordered `!` при reject с длинной задержкой: как в Requester — предпочтительно оставаться в Redis с block, не уносить в far store (иначе ломается порядок).
-
-## Redpanda Connect (backlog)
-
-Не HTTP ingest. Нативный output component в экосистеме Connect: batch → SRQ Publish+cursor Lua. Ack/recovery всё равно в Go-воркерах.
-
-## Ключи (черновик)
-
-| Ключ | Назначение |
-|------|------------|
-| `srq:journal:{name}:cursor` | opaque cursor string/int |
-| `srq:resume_after` | unix ms; воркеры с `faultAt >= resume_after` ждут |
+`docker-compose.yaml`: redis, postgres, mongo, kafka. Тесты драйверов skip без сервиса.

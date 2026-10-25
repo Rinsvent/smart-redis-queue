@@ -237,6 +237,32 @@ if ARGV[1] == "ex" then
 	return {}
 end
 
+-- journal: ARGV = "jn", cursorKey, newCursor, queueName, taskCount, bpCount, ...
+if ARGV[1] == "jn" then
+	local cursorKey = ARGV[2]
+	local newCursor = ARGV[3] or ""
+	if cursorKey ~= "" and newCursor ~= "" then
+		local cur = redis.call("GET", cursorKey)
+		if cur ~= false and cur ~= nil and tostring(cur) >= newCursor then
+			return redis.error_reply("ERR_JOURNAL_CURSOR_REWIND")
+		end
+	end
+	local queueName = ARGV[4]
+	local taskCount = tonumber(ARGV[5]) or 0
+	local bpCount = tonumber(ARGV[6]) or 0
+	local bpBase = 7
+	local taskBase = bpBase + bpCount * 2
+	local bp = check_backpressure(queueName, taskCount, bpCount, bpBase)
+	if bp then
+		return bp
+	end
+	local res = add_tasks_to_queue(queueName, taskCount, taskBase)
+	if cursorKey ~= "" and newCursor ~= "" then
+		redis.call("SET", cursorKey, newCursor)
+	end
+	return res
+end
+
 local queueName = ARGV[1]
 local taskCount = tonumber(ARGV[2])
 local bpCount = tonumber(ARGV[3]) or 0

@@ -42,9 +42,19 @@
 
 Подробности: [Exchange](../features/exchange.md).
 
-## Journal (дизайн)
+## Journal
 
-Opt-in пакеты `journal/kafka`, `journal/pg`, `journal/mongo`: batch ingress + cursor в Redis, ack в источнике, recovery Lock+Replay, emergency `resume_after`. Сигнатуры появятся в GoDoc по мере реализации. Паттерн: [Journal](../features/journal.md).
+Пакеты `journal`, `journal/kafka`, `journal/pg`, `journal/mongo` (import только нужный драйвер).
+
+| API | Назначение |
+|-----|------------|
+| `journal.Bridge` / `Pump` / `Loop` / `RecoverAfterRedis` | Single-writer journal→Redis + cursor |
+| `PublishJournalBatch` | Lua: задачи + cursor (rewind → `ErrJournalCursorRewind`) |
+| `SetResumeAfter` / `GetResumeAfter` | emergency stamp |
+| `Consumer.SetJournalAck` | после SRQ Ack |
+| `Consumer.SetEmergencyResume` | ждать stamp после fault |
+
+Таблица PG по умолчанию `srq_journal_tasks` (имя задаётся в конфиге). Подробности: [Journal](../features/journal.md).
 
 ## Шардинг
 

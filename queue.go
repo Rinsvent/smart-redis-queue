@@ -352,6 +352,9 @@ type Consumer struct {
 	stopPing                    chan struct{}
 	stats                       *StatsSink
 	statsOwn                    bool // true — Close останавливает stats loop
+	journalAck                  func(ctx context.Context, taskID string) error
+	emergencyResume             bool
+	faultAt                     time.Time
 }
 
 // NewConsumer создает нового консьюмера и запускает ping горутину.
@@ -629,8 +632,57 @@ func (c *Consumer) ping(ctx context.Context) error {
 	return err
 }
 
+// SetJournalAck вызывается после успешного SRQ Ack (ретраи — на стороне колбэка).
+func (c *Consumer) SetJournalAck(fn func(ctx context.Context, taskID string) error) {
+	c.journalAck = fn
+}
+
+// SetEmergencyResume — ждать srq:resume_after после ошибки Redis, похожей на потерю состояния.
+func (c *Consumer) SetEmergencyResume(on bool) {
+	c.emergencyResume = on
+}
+
+func (c *Consumer) waitEmergency(ctx context.Context) error {
+	if !c.emergencyResume || c.faultAt.IsZero() {
+		return nil
+	}
+	for {
+		at, ok, err := GetResumeAfter(ctx, c.redis)
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+			}
+			continue
+		}
+		if ok && at.After(c.faultAt) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+}
+
+func (c *Consumer) noteRedisFault(err error) {
+	if !c.emergencyResume || err == nil {
+		return
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "loading") || strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "eof") || strings.Contains(msg, "broken pipe") {
+		c.faultAt = time.Now()
+	}
+}
+
 // Get получает до prefetchCount задач из очереди и возвращает их разом
 func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
+	if err := c.waitEmergency(ctx); err != nil {
+		return nil, err
+	}
 	script := getGetScript()
 
 	args := []interface{}{
@@ -645,6 +697,7 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 	result, err := script.Run(ctx, c.redis, []string{}, args...).Result()
 
 	if err != nil {
+		c.noteRedisFault(err)
 		return nil, fmt.Errorf("failed to get task: %w", err)
 	}
 
@@ -719,6 +772,11 @@ func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl time.D
 
 	if c.stats != nil {
 		c.stats.addAck(1)
+	}
+	if c.journalAck != nil {
+		if err := c.journalAck(ctx, taskID); err != nil {
+			return fmt.Errorf("journal ack: %w", err)
+		}
 	}
 	return nil
 }
