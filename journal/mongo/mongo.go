@@ -96,14 +96,10 @@ func (s *Source) Insert(ctx context.Context, tasks ...*redisqueue.Task) error {
 		if groups == nil {
 			groups = []string{}
 		}
-		sch := t.Scheduled
-		if sch.IsZero() {
-			sch = time.Now() // только отсутствие даты; прошлые значения не трогаем
-		}
 		_, err = s.col.InsertOne(ctx, doc{
 			Offset: off, TaskID: t.ID, Partition: t.Partition, Priority: t.Priority,
 			Payload: t.Payload, Tags: tags, Groups: groups,
-			Scheduled: sch, CreatedAt: time.Now(),
+			Scheduled: journal.ScheduledOrNow(t.Scheduled), CreatedAt: time.Now(),
 			AckedAt: nil,
 		})
 		if err != nil {

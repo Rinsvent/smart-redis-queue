@@ -77,6 +77,7 @@ pool.Consume(ctx, handler)
 - Батч Publish режется по шардам (в одном Lua нельзя смешивать разные Redis).
 - Явный пин: `PublishTo(ctx, "s1", tasks...)` / `PublishManual` / `WithShardKey`.
 - Rate limit и `BlockGroups` — **per-shard** (при sticky ByGroup один аккаунт всегда на одном шарде — этого достаточно).
+- [Journal](features/journal.md) + `WithJournal`: батч должен попасть на **один** шард (иначе ошибка); cursor/pump-lock — на том же Redis, куда пишете.
 
 ## Добавление и удаление шарда {#shard-lifecycle}
 

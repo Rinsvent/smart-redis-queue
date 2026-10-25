@@ -1,6 +1,8 @@
-# Journal (durable ingress + recovery)
+# Journal
 
-Журнал снаружи Redis — **источник правды о принятой работе**. Redis — планировщик (партиции, локи, RL). Драйверы — opt-in пакеты:
+Внешнее хранилище (Kafka / Postgres / Mongo) — источник правды о принятой работе. Redis остаётся планировщиком: партиции, локи, rate limit.
+
+Пакеты подключаются отдельно:
 
 ```text
 github.com/Rinsvent/smart-redis-queue/journal
@@ -9,88 +11,86 @@ github.com/Rinsvent/smart-redis-queue/journal/pg
 github.com/Rinsvent/smart-redis-queue/journal/mongo
 ```
 
-## Поток
+## Как это работает
+
+1. Пишете задачу в journal → получаете монотонный **offset** (Kafka offset, `BIGSERIAL`, counter в Mongo).
+2. Один **pump** (Bridge): берёт Redis-lock → читает батч после курсора → `PublishWith(WithJournal(...))` в очередь и двигает курсор в том же Lua.
+3. В journal нет флага «уже прочитали». Есть только **ack обработки** (`acked_at` или ack-топик).
+4. После SRQ `Ack` вызываете journal `Ack` (через `Consumer.SetJournalAck`).
 
 ```mermaid
 flowchart LR
-  subgraph durable [Durable journal]
-    In[Kafka / PG / Mongo]
-    AckStore[ack topic / acked_at]
-  end
-  subgraph bridge [Single pump]
-    Lock[Redis pump lock]
-    Read[ReadBatch by offset]
-    Pub[Publish plus cursor]
-  end
-  Redis[(Redis)]
-  W[Workers]
-  In --> Lock --> Read --> Pub --> Redis --> W
-  W -->|Ack| AckStore
+  J[Kafka / PG / Mongo] --> Lock[pump lock]
+  Lock --> Pub[Publish + cursor]
+  Pub --> Redis[(Redis queue)]
+  Redis --> W[Workers]
+  W -->|Ack| J
 ```
 
-1. Append в journal → монотонный **offset** (Kafka offset / `BIGSERIAL` / counter).
-2. Один pump: Redis-lock → `ReadBatch(after offset)` → Publish в SRQ + cursor в Redis.
-3. В источнике **не** флаг «прочитано». Только **ack** обработки.
-4. После SRQ Ack: PG/Mongo `acked_at`; Kafka → ack-топик.
+Курсор: `srq:journal:{name}:cursor` — последний успешно уложенный в Redis offset.
 
-## Почему не курсор по `scheduled`
+## Почему offset, а не время
 
-Два продюсера / долгая подготовка записи с `scheduled ≈ now`: более «поздний» батч может уехать в Redis раньше и сдвинуть time-курсор → опоздавшее сообщение **навсегда пропускается**.
+Два продюсера или долгая подготовка записи: более «поздний» батч может попасть в Redis раньше. Курсор по `scheduled` уедет вперёд — опоздавшее сообщение навсегда пропустится.
 
-Порядок между **разными** продюсерами в Redis тоже не гарантирован — только внутри одного упорядочивающего writer’а. Значит естественная ось журнала — **порядок append (offset)**, как в Kafka:
+Между независимыми продюсерами порядок и в Redis не обещан. Ось журнала — порядок append, как в Kafka.
 
 | Источник | Offset |
 |----------|--------|
-| kafka | partition offset |
-| pg | `BIGSERIAL` / `GENERATED … AS IDENTITY` |
-| mongo | атомарный counter (или аналог) |
+| kafka | partition + offset |
+| pg | `BIGSERIAL` |
+| mongo | атомарный counter |
 
-Курсор в Redis: `srq:journal:{name}:cursor` = последний успешно опубликованный offset (с partition для kafka при необходимости).
+`scheduled` в journal пишется как передали (в том числе в прошлом). Zero → `now` при insert — это default «без плана», не подмена уже заданной даты.
 
-### `scheduled` и far-future
+Отложенное далеко в будущее лучше держать **вне** main offset-stream (отдельная таблица / mover → insert с новым offset, когда due). Иначе pump упрётся в ещё не due строку. Для Kafka far-schedule обычно нужен dual store (например pg).
 
-- Даты в journal **не модифицируем скрыто**: переданное `scheduled` пишется как есть (в т.ч. в прошлом).
-- Нет планирования (`scheduled` zero / nil) → при insert подставляется `now` (явный default, не clamp).
-- **Далекое будущее** не должно занимать «дыру» в offset-stream впереди due-сообщений: иначе pump упрётся в undued row или пропустит её. Модель: far schedule → **отдельная** scheduled-таблица/коллекция; mover, когда due, **вставляет в main journal** (новый offset) или качает SKIP LOCKED. Чистый Kafka far-schedule — limitation / dual store (pg).
+## Pump lock
 
-Опционально multi-worker на due в PG: `FOR UPDATE SKIP LOCKED` + краткий claim — для **scheduled-mover**, не для hot offset-pump (pump один).
+Один writer на журнал для всех драйверов:
 
-## Single-writer через Redis
+- `srq:journal:{name}:pump` — `SET NX`, TTL ~60s, refresh ~10s;
+- Redis поднялся, ключа нет — любой инстанс берёт лок и качает.
 
-Один pump на журнал для **всех** драйверов:
+Ack обработки — с любых инстансов, без этого лока.
 
-- ключ `srq:journal:{name}:pump` — `SET NX` + TTL ~60s;
-- holder пингует / обновляет TTL ~каждые 10s (как heartbeat consumer’а);
-- Redis ожил, ключа нет → любой инстанс журнала берёт лок и качает.
+## Publish и rewind
 
-Kafka group по-прежнему полезна как доп. слой; источник истины «кто качает» — Redis-лок (одинаково для pg/mongo/kafka).
-
-`Ack` — с любых инстансов без этого лока.
-
-## Курсор и rewind
-
-- Новый offset **строго больше** текущего → иначе `ErrJournalCursorRewind`.
-- Publish батча + SET cursor — одна точка: `PublishWith(..., WithJournal(name, cursor))` → Lua (`jn`). Повтор тех же id → NX skip.
-
-```text
-ReadBatch WHERE offset > cursor ORDER BY offset LIMIT n
-→ PublishWith(WithJournal(name, lastOffset), tasks...)
-```
-
-## Offset-ref в Redis
-
-В payload очереди можно класть только ссылку на journal offset (экономия RAM). Handler:
+`WithJournal(name, cursor)` идёт в тот же `publishLocal`, что и обычный Publish (compression, backpressure — там же). Новый cursor должен быть строго больше текущего, иначе `ErrJournalCursorRewind`. Повтор тех же task id → NX skip.
 
 ```go
-rec, err := src.ReadByOffset(ctx, offset)
-// полный Task из journal
+prod.PublishWith(ctx, []redisqueue.PublishOption{
+    redisqueue.WithJournal("orders", lastCursor.Encode()),
+}, tasks...)
 ```
 
-Как offset-ref в типичных dual-layer схемах: hot path в Redis лёгкий, body — в SoT.
+В payload можно класть только ссылку на offset; тело читать в handler через `ReadByOffset`.
+
+## Совместимость с другими фичами
+
+| Фича | Как стыкуется |
+|------|----------------|
+| compression / tag backpressure | Обычные `PublishOption` рядом с `WithJournal` |
+| groups / partitions / RL / `race!` | После Publish в Redis — как у любой задачи |
+| Exchange | Journal → work-очередь. Fan-out через Exchange — отдельный шаг, не вместо journal |
+| Шардинг | Курсор и pump-lock живут на **том же** Redis, куда пишется батч. Батч с `WithJournal` не может уехать на несколько шардов сразу — будет ошибка. Либо очередь на одном шарде (`ShardByQueue` / отдельный инстанс), либо `WithShardName` / `SetPublishOptions` и клиент Bridge = этот шард |
+| Emergency | `SetEmergencyResume` + `srq:resume_after` после `RecoverAfterRedis` |
+
+## Recovery
+
+После восстановления Redis:
+
+1. Воркеры с `SetEmergencyResume` ждут `resume_after`.
+2. Bridge берёт pump lock, при необходимости дожидается journal-ack.
+3. Для Kafka: Lock done-id из ack-топика, затем pump с курсора.
+4. Для PG/Mongo: pump с курсора, только `acked_at IS NULL` (отдельный Lock не нужен).
+5. Режим auto — Bridge сам ставит `resume_after`.
+
+Между SRQ Ack и journal Ack возможны дубли (at-least-once). Прямой Publish в Redis без journal journal не закрывает.
 
 ## Схема PG
 
-Имя таблицы: префикс **`srq_`** или полное имя в конфиге.
+Имя таблицы — в конфиге (по умолчанию `srq_journal_tasks`):
 
 ```sql
 CREATE TABLE srq_journal_tasks (
@@ -111,72 +111,24 @@ CREATE INDEX idx_srq_journal_due
     WHERE acked_at IS NULL;
 ```
 
-Mongo: `journal_offset` (long) + unique `task_id`; counter collection для next offset.
+Mongo: `journal_offset` + unique `task_id`, отдельная collection для counter. Ack: `acked_at` (null до Ack).
 
-## Ack
-
-| | Done | Чистка |
-|--|------|--------|
-| pg/mongo | `acked_at` | TTL / job |
-| kafka | ack-топик | retention |
-
-Journal-ack после SRQ Ack — с ретраями до успеха.
-
-## Recovery
-
-```mermaid
-sequenceDiagram
-  participant Redis
-  participant Bridge
-  participant Workers
-  Note over Redis: dump restored
-  Workers->>Workers: faultAt wait resume_after
-  Bridge->>Bridge: take pump lock
-  Bridge->>Bridge: wait journal acks settled
-  opt kafka
-    Bridge->>Redis: Lock from ack topic
-  end
-  Bridge->>Bridge: Pump from cursor skip acked
-  Bridge->>Redis: resume_after now
-```
-
-- **PG/Mongo:** replay с offset-курсора, только `acked_at IS NULL` (Lock done-id не нужен).
-- **Kafka:** Lock из ack-топика, затем replay с offset.
-- **auto resume:** pump сам ставит `resume_after` после догона окна ~everysec; **manual** — админ.
-
-## Окно потери
-
-См. прежний разбор: journal закрывает приём + journal→Redis при everysec; between SRQ Ack и journal Ack — at-least-once. Прямой Publish в Redis journal не покрывает.
-
-## API
+## API (кратко)
 
 ```go
-type Cursor struct {
-    Offset    int64
-    Partition int32 // kafka; 0 для pg/mongo
-}
+src, _ := pg.New(ctx, pg.Config{DSN: dsn})
+_ = src.Init(ctx)
 
-type Source interface {
-    Init(ctx context.Context) error
-    ReadBatch(ctx context.Context, after Cursor, n int) ([]Record, error)
-    ReadByOffset(ctx context.Context, c Cursor) (Record, error)
-    Ack(ctx context.Context, taskID string, meta map[string]string) error
-    ReadAcks(ctx context.Context, from Cursor, n int) ([]AckEvent, error)
-}
+br := journal.NewBridge(rdb, "orders", "orders-q", src)
+// br.SetPublishOptions(redisqueue.WithCompression(...))
+go br.Loop(ctx, 64, 200*time.Millisecond)
 
-type Bridge interface {
-    Pump(ctx context.Context, n int) (int, error)
-    Loop(ctx context.Context, batch int, idle time.Duration) error
-    RecoverAfterRedis(ctx context.Context, waitAcks func(context.Context) error) error
-}
+consumer.SetJournalAck(func(ctx context.Context, id string) error {
+    return src.Ack(ctx, id, nil)
+})
+consumer.SetEmergencyResume(true)
 ```
 
-Pump lock — внутри `Bridge` (Redis), не обязанность драйвера.
+`docker-compose`: Redis, Postgres, MongoDB, Kafka. Интеграционные тесты драйверов сами skip'аются, если сервис недоступен.
 
-## Инфра для тестов
-
-`docker-compose`: Redis + Postgres + MongoDB + Kafka (KRaft). Интеграционные тесты драйверов — по доступности сервисов / env.
-
-## См. также
-
-- [delivery.md](../delivery.md#redis-persist) · [api.md](../reference/api.md) · [redis-keys.md](../reference/redis-keys.md)
+См. также: [delivery](../delivery.md#redis-persist) · [api](../reference/api.md) · [redis-keys](../reference/redis-keys.md)

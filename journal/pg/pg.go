@@ -67,9 +67,8 @@ func (s *Source) Insert(ctx context.Context, tasks ...*redisqueue.Task) error {
 		return nil
 	}
 	b := &pgx.Batch{}
-	// scheduled as-is; nil/zero → DEFAULT NOW() (не clamp прошлых дат)
 	q := fmt.Sprintf(`INSERT INTO %s (task_id, partition, priority, payload, tags, groups, scheduled)
-		VALUES ($1,$2,$3,$4,$5,$6,COALESCE($7, NOW())) ON CONFLICT (task_id) DO NOTHING`, pgIdent(s.table))
+		VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (task_id) DO NOTHING`, pgIdent(s.table))
 	for _, t := range tasks {
 		tags, groups := t.Tags, t.Groups
 		if tags == nil {
@@ -78,11 +77,7 @@ func (s *Source) Insert(ctx context.Context, tasks ...*redisqueue.Task) error {
 		if groups == nil {
 			groups = []string{}
 		}
-		var sch any
-		if !t.Scheduled.IsZero() {
-			sch = t.Scheduled
-		}
-		b.Queue(q, t.ID, t.Partition, t.Priority, t.Payload, tags, groups, sch)
+		b.Queue(q, t.ID, t.Partition, t.Priority, t.Payload, tags, groups, journal.ScheduledOrNow(t.Scheduled))
 	}
 	return s.pool.SendBatch(ctx, b).Close()
 }

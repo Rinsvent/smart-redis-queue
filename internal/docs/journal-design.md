@@ -4,15 +4,21 @@
 
 ## Offset вместо time-курсора
 
-Time-курсор `(scheduled, task_id)` ломается при двух продюсерах / долгом prepare: «поздний» батч сдвигает курсор → опоздавшее сообщение skip. Unified model = **append offset** (как Kafka). Порядок между независимыми продюсерами не обещаем.
+Time-курсор `(scheduled, task_id)` ломается при двух продюсерах / долгом prepare. Unified model = append offset. Порядок между независимыми продюсерами не обещаем.
 
-Far-future: не дырявить main offset-stream; scheduled store → insert в main с **новым** offset когда due.
-`scheduled` в SoT не clamp'им (прошлые даты оставляем); zero → default now.
-Publish + cursor — только через `PublishWith(WithJournal(...))` / `publishLocal`, без отдельного PublishJournalBatch.
+`scheduled`: `journal.ScheduledOrNow` — zero→now, иначе as-is (pg/mongo/mem одинаково).
+
+Far-future: отдельный store → insert в main с новым offset когда due (ещё не в коде).
+
+## Publish
+
+Только `PublishWith(WithJournal(...))` → `publishLocal` / Lua `jn`. Отдельного PublishJournalBatch нет.
+
+Шардинг: батч с journal на >1 шард → ошибка. Bridge.rdb = Redis очереди (и cursor, и pump).
 
 ## Redis pump lock
 
-`srq:journal:{name}:pump` NX TTL 60s, refresh 10s — единый single-writer для pg/mongo/kafka. Источник-specific locks optional.
+`srq:journal:{name}:pump` NX TTL 60s, refresh 10s.
 
 ## Requester
 

@@ -210,3 +210,25 @@ func TestShardByPartition_Strategy(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "!order:1", key)
 }
+
+func TestWithJournal_RejectsMultiShardBatch(t *testing.T) {
+	clients := setupShardClients(t, 12, 13)
+	cfg := shardCfgFromClients(ShardByGroup, clients)
+	producer := NewProducer(nil, "journal-shard-q")
+	require.NoError(t, producer.SetShards(cfg))
+	defer producer.Close()
+
+	ctx := context.Background()
+	err := producer.PublishWith(ctx, []PublishOption{WithJournal("j1", "2")},
+		&Task{ID: "a", Groups: []string{"g1"}, Payload: []byte("1"), Scheduled: time.Now()},
+		&Task{ID: "b", Groups: []string{"g2"}, Payload: []byte("2"), Scheduled: time.Now()},
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WithJournal")
+
+	// один шард — ок
+	require.NoError(t, producer.PublishWith(ctx, []PublishOption{
+		WithShardName("s0"),
+		WithJournal("j1", "1"),
+	}, &Task{ID: "c", Groups: []string{"g1"}, Payload: []byte("3"), Scheduled: time.Now()}))
+}

@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"time"
 
 	redisqueue "github.com/Rinsvent/smart-redis-queue"
 )
@@ -33,9 +32,7 @@ func (m *MemSource) Insert(tasks ...*redisqueue.Task) {
 	defer m.mu.Unlock()
 	for _, t := range tasks {
 		cp := *t
-		if cp.Scheduled.IsZero() {
-			cp.Scheduled = time.Now() // только отсутствие даты; прошлые значения не трогаем
-		}
+		cp.Scheduled = ScheduledOrNow(cp.Scheduled)
 		m.next++
 		off := m.next
 		m.order = append(m.order, off)

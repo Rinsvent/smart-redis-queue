@@ -124,6 +124,10 @@ func (p *Producer) publishSharded(ctx context.Context, opts []PublishOption, tas
 		g.tasks = append(g.tasks, task)
 	}
 
+	if cfg.journalName != "" && len(byIdx) > 1 {
+		return fmt.Errorf("WithJournal: batch spans %d shards; pin with WithShardName or WithShardKey", len(byIdx))
+	}
+
 	order := make([]int, 0, len(byIdx))
 	for idx := range byIdx {
 		order = append(order, idx)

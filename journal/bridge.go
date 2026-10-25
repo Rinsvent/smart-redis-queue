@@ -9,6 +9,10 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Bridge качает journal → одна Redis-очередь.
+// rdb — и pump-lock/cursor, и цель Publish: должен быть тот же инстанс, куда пишутся задачи.
+// При шардинге очереди передайте клиент нужного шарда (или SetPublishOptions(WithShardName) на sharded Producer —
+// тогда rdb всё равно обязан быть этим шардом, иначе cursor и очередь разъедутся).
 type Bridge struct {
 	rdb      *redis.Client
 	prod     *redisqueue.Producer
@@ -16,6 +20,7 @@ type Bridge struct {
 	src      Source
 	resume   ResumeMode
 	holderID string
+	pubOpts  []redisqueue.PublishOption
 }
 
 func NewBridge(rdb *redis.Client, journalName, queueName string, src Source) *Bridge {
@@ -30,6 +35,19 @@ func NewBridge(rdb *redis.Client, journalName, queueName string, src Source) *Br
 }
 
 func (b *Bridge) SetResumeMode(m ResumeMode) { b.resume = m }
+
+// SetPublishOptions — доп. опции к каждому Pump (compression, backpressure, WithShardName…).
+// WithJournal добавляется самим Bridge; передавать его сюда не нужно.
+func (b *Bridge) SetPublishOptions(opts ...redisqueue.PublishOption) {
+	b.pubOpts = append([]redisqueue.PublishOption(nil), opts...)
+}
+
+// SetProducer подменяет publisher (например после SetShards). Cursor/lock по-прежнему на rdb из NewBridge.
+func (b *Bridge) SetProducer(p *redisqueue.Producer) {
+	if p != nil {
+		b.prod = p
+	}
+}
 
 func (b *Bridge) Cursor(ctx context.Context) (Cursor, error) {
 	s, err := b.rdb.Get(ctx, redisqueue.JournalCursorKey(b.name)).Result()
@@ -66,9 +84,10 @@ func (b *Bridge) Pump(ctx context.Context, n int) (int, error) {
 	for i := range recs {
 		tasks[i] = recs[i].Task
 	}
-	if err := b.prod.PublishWith(ctx, []redisqueue.PublishOption{
-		redisqueue.WithJournal(b.name, last.Encode()),
-	}, tasks...); err != nil {
+	opts := make([]redisqueue.PublishOption, 0, len(b.pubOpts)+1)
+	opts = append(opts, b.pubOpts...)
+	opts = append(opts, redisqueue.WithJournal(b.name, last.Encode()))
+	if err := b.prod.PublishWith(ctx, opts, tasks...); err != nil {
 		return 0, err
 	}
 	return len(recs), nil

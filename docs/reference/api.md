@@ -48,13 +48,14 @@
 
 | API | Назначение |
 |-----|------------|
-| `journal.Bridge` / `Pump` / `Loop` / `RecoverAfterRedis` | Single-writer journal→Redis + cursor |
-| `WithJournal(name, cursor)` | PublishOption: задачи + cursor в одном `PublishWith` (rewind → `ErrJournalCursorRewind`) |
+| `journal.Bridge` / `Pump` / `Loop` / `RecoverAfterRedis` | journal→Redis, один writer |
+| `Bridge.SetPublishOptions` / `SetProducer` | compression, `WithShardName`, свой Producer |
+| `WithJournal(name, cursor)` | PublishOption: задачи + cursor в одном Publish (иначе `ErrJournalCursorRewind`) |
 | `SetResumeAfter` / `GetResumeAfter` | emergency stamp |
 | `Consumer.SetJournalAck` | после SRQ Ack |
 | `Consumer.SetEmergencyResume` | ждать stamp после fault |
 
-Таблица PG по умолчанию `srq_journal_tasks` (имя задаётся в конфиге). Подробности: [Journal](../features/journal.md).
+`WithJournal` нельзя смешивать с батчем на несколько шардов. Подробности: [Journal](../features/journal.md).
 
 ## Шардинг
 
