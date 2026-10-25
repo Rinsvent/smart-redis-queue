@@ -11,8 +11,8 @@ import (
 
 type Bridge struct {
 	rdb      *redis.Client
+	prod     *redisqueue.Producer
 	name     string
-	queue    string
 	src      Source
 	resume   ResumeMode
 	holderID string
@@ -21,8 +21,8 @@ type Bridge struct {
 func NewBridge(rdb *redis.Client, journalName, queueName string, src Source) *Bridge {
 	return &Bridge{
 		rdb:      rdb,
+		prod:     redisqueue.NewProducer(rdb, queueName),
 		name:     journalName,
-		queue:    queueName,
 		src:      src,
 		resume:   ResumeAuto,
 		holderID: fmt.Sprintf("bridge-%d", time.Now().UnixNano()),
@@ -66,7 +66,9 @@ func (b *Bridge) Pump(ctx context.Context, n int) (int, error) {
 	for i := range recs {
 		tasks[i] = recs[i].Task
 	}
-	if err := redisqueue.PublishJournalBatch(ctx, b.rdb, b.queue, b.name, last.Encode(), tasks); err != nil {
+	if err := b.prod.PublishWith(ctx, []redisqueue.PublishOption{
+		redisqueue.WithJournal(b.name, last.Encode()),
+	}, tasks...); err != nil {
 		return 0, err
 	}
 	return len(recs), nil

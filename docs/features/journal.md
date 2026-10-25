@@ -49,8 +49,8 @@ flowchart LR
 
 ### `scheduled` и far-future
 
-- Нет планирования → `scheduled` пустой / nil → при insert = `now` (порядок = offset / taskId).
-- Передали время **&lt; now** → **clamp к now**, чтобы due-фильтр не оставлял «вечно просроченный хвост» странным образом и не путал батчи.
+- Даты в journal **не модифицируем скрыто**: переданное `scheduled` пишется как есть (в т.ч. в прошлом).
+- Нет планирования (`scheduled` zero / nil) → при insert подставляется `now` (явный default, не clamp).
 - **Далекое будущее** не должно занимать «дыру» в offset-stream впереди due-сообщений: иначе pump упрётся в undued row или пропустит её. Модель: far schedule → **отдельная** scheduled-таблица/коллекция; mover, когда due, **вставляет в main journal** (новый offset) или качает SKIP LOCKED. Чистый Kafka far-schedule — limitation / dual store (pg).
 
 Опционально multi-worker на due в PG: `FOR UPDATE SKIP LOCKED` + краткий claim — для **scheduled-mover**, не для hot offset-pump (pump один).
@@ -70,11 +70,11 @@ Kafka group по-прежнему полезна как доп. слой; ист
 ## Курсор и rewind
 
 - Новый offset **строго больше** текущего → иначе `ErrJournalCursorRewind`.
-- Publish батча + SET cursor — одна Lua (`jn`). Повтор тех же id → NX skip.
+- Publish батча + SET cursor — одна точка: `PublishWith(..., WithJournal(name, cursor))` → Lua (`jn`). Повтор тех же id → NX skip.
 
 ```text
-ReadBatch WHERE offset > cursor [AND due] ORDER BY offset LIMIT n
-→ PublishJournalBatch(..., lastOffset)
+ReadBatch WHERE offset > cursor ORDER BY offset LIMIT n
+→ PublishWith(WithJournal(name, lastOffset), tasks...)
 ```
 
 ## Offset-ref в Redis

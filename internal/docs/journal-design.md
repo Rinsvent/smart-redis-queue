@@ -7,6 +7,8 @@
 Time-курсор `(scheduled, task_id)` ломается при двух продюсерах / долгом prepare: «поздний» батч сдвигает курсор → опоздавшее сообщение skip. Unified model = **append offset** (как Kafka). Порядок между независимыми продюсерами не обещаем.
 
 Far-future: не дырявить main offset-stream; scheduled store → insert в main с **новым** offset когда due.
+`scheduled` в SoT не clamp'им (прошлые даты оставляем); zero → default now.
+Publish + cursor — только через `PublishWith(WithJournal(...))` / `publishLocal`, без отдельного PublishJournalBatch.
 
 ## Redis pump lock
 

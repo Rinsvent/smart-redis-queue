@@ -102,8 +102,10 @@ func TestPublishJournal_CursorRewind(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, n)
 
-	err = redisqueue.PublishJournalBatch(ctx, rdb, "qrw", "jrw", OffsetCursor(1).Encode(),
-		[]*redisqueue.Task{{ID: "old", Payload: []byte("x"), Scheduled: time.Now()}})
+	prod := redisqueue.NewProducer(rdb, "qrw")
+	err = prod.PublishWith(ctx, []redisqueue.PublishOption{
+		redisqueue.WithJournal("jrw", OffsetCursor(1).Encode()),
+	}, &redisqueue.Task{ID: "old", Payload: []byte("x"), Scheduled: time.Now()})
 	require.ErrorIs(t, err, redisqueue.ErrJournalCursorRewind)
 }
 

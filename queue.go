@@ -211,10 +211,19 @@ func (p *Producer) publishLocal(ctx context.Context, opts []PublishOption, tasks
 	if err := cfg.validate(); err != nil {
 		return err
 	}
+	if cfg.journalName != "" && cfg.journalCursor == "" {
+		return fmt.Errorf("WithJournal: cursor required")
+	}
 
 	bp := cfg.bpArgs()
-	args := make([]interface{}, 0, 2+len(bp)+len(tasks)*7)
-	args = append(args, p.queueName, len(tasks))
+	args := make([]interface{}, 0, 6+len(bp)+len(tasks)*7)
+	if cfg.journalName != "" {
+		// Lua: "jn", cursorKey, newCursor, queueName, taskCount, bpCount, ...
+		args = append(args, journalARGVMarker, JournalCursorKey(cfg.journalName), cfg.journalCursor,
+			p.queueName, len(tasks))
+	} else {
+		args = append(args, p.queueName, len(tasks))
+	}
 	args = append(args, bp...)
 
 	for _, task := range tasks {
@@ -245,6 +254,9 @@ func (p *Producer) publishLocal(ctx context.Context, opts []PublishOption, tasks
 	script := getAddScript()
 	result, err := script.Run(ctx, p.redis, []string{}, args...).Result()
 	if err != nil {
+		if isJournalCursorRewind(err) {
+			return ErrJournalCursorRewind
+		}
 		return fmt.Errorf("failed to publish tasks: %w", err)
 	}
 

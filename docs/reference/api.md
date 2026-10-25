@@ -49,7 +49,7 @@
 | API | Назначение |
 |-----|------------|
 | `journal.Bridge` / `Pump` / `Loop` / `RecoverAfterRedis` | Single-writer journal→Redis + cursor |
-| `PublishJournalBatch` | Lua: задачи + cursor (rewind → `ErrJournalCursorRewind`) |
+| `WithJournal(name, cursor)` | PublishOption: задачи + cursor в одном `PublishWith` (rewind → `ErrJournalCursorRewind`) |
 | `SetResumeAfter` / `GetResumeAfter` | emergency stamp |
 | `Consumer.SetJournalAck` | после SRQ Ack |
 | `Consumer.SetEmergencyResume` | ждать stamp после fault |

@@ -83,14 +83,6 @@ func (s *Source) nextOffset(ctx context.Context) (int64, error) {
 	return out.Seq, nil
 }
 
-func clampScheduled(sch time.Time) time.Time {
-	now := time.Now()
-	if sch.IsZero() || sch.Before(now) {
-		return now
-	}
-	return sch
-}
-
 func (s *Source) Insert(ctx context.Context, tasks ...*redisqueue.Task) error {
 	for _, t := range tasks {
 		off, err := s.nextOffset(ctx)
@@ -104,10 +96,14 @@ func (s *Source) Insert(ctx context.Context, tasks ...*redisqueue.Task) error {
 		if groups == nil {
 			groups = []string{}
 		}
+		sch := t.Scheduled
+		if sch.IsZero() {
+			sch = time.Now() // только отсутствие даты; прошлые значения не трогаем
+		}
 		_, err = s.col.InsertOne(ctx, doc{
 			Offset: off, TaskID: t.ID, Partition: t.Partition, Priority: t.Priority,
 			Payload: t.Payload, Tags: tags, Groups: groups,
-			Scheduled: clampScheduled(t.Scheduled), CreatedAt: time.Now(),
+			Scheduled: sch, CreatedAt: time.Now(),
 			AckedAt: nil,
 		})
 		if err != nil {

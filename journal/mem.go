@@ -31,11 +31,10 @@ func (m *MemSource) Init(context.Context) error { return nil }
 func (m *MemSource) Insert(tasks ...*redisqueue.Task) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	now := time.Now()
 	for _, t := range tasks {
 		cp := *t
-		if cp.Scheduled.IsZero() || cp.Scheduled.Before(now) {
-			cp.Scheduled = now
+		if cp.Scheduled.IsZero() {
+			cp.Scheduled = time.Now() // только отсутствие даты; прошлые значения не трогаем
 		}
 		m.next++
 		off := m.next

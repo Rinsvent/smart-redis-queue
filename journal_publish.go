@@ -25,59 +25,6 @@ func JournalCursorKey(name string) string {
 // ErrJournalCursorRewind — новый cursor не больше текущего в Redis.
 var ErrJournalCursorRewind = fmt.Errorf("journal: cursor rewind forbidden")
 
-// PublishJournalBatch пишет задачи в очередь и атомарно ставит cursor, если он строго больше текущего.
-func PublishJournalBatch(ctx context.Context, rdb *redis.Client, queueName, journalName, newCursor string, tasks []*Task) error {
-	if rdb == nil || queueName == "" {
-		return fmt.Errorf("journal publish: redis and queue required")
-	}
-	if len(tasks) == 0 {
-		return nil
-	}
-	args := make([]interface{}, 0, 6+len(tasks)*7)
-	args = append(args, journalARGVMarker, JournalCursorKey(journalName), newCursor, queueName, len(tasks), 0)
-	now := time.Now()
-	for _, task := range tasks {
-		if task.ID == "" {
-			return fmt.Errorf("task ID is required")
-		}
-		scheduled := task.Scheduled.UnixMilli()
-		if scheduled == 0 {
-			scheduled = now.UnixMilli()
-		}
-		tags, err := encodeTags(task.Tags)
-		if err != nil {
-			return err
-		}
-		groups, err := encodeGroups(task.Groups)
-		if err != nil {
-			return err
-		}
-		payload, err := encodePayloadForRedis(task.Payload, CompressionNone, 0)
-		if err != nil {
-			return err
-		}
-		args = append(args, task.ID, task.Partition, task.Priority, scheduled, payload, tags, groups)
-	}
-	result, err := getAddScript().Run(ctx, rdb, []string{}, args...).Result()
-	if err != nil {
-		if isJournalCursorRewind(err) {
-			return ErrJournalCursorRewind
-		}
-		return fmt.Errorf("journal publish: %w", err)
-	}
-	notAdded, ok := result.([]interface{})
-	if !ok {
-		return nil
-	}
-	if len(notAdded) == 0 {
-		return nil
-	}
-	if s, _ := notAdded[0].(string); s == "!" {
-		return parseBackpressureResult(notAdded)
-	}
-	return nil
-}
-
 func isJournalCursorRewind(err error) bool {
 	return err != nil && strings.Contains(err.Error(), errJournalCursorRewindLua)
 }

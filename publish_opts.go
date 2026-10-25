@@ -26,6 +26,8 @@ type publishConfig struct {
 	compressMinBytes int
 	shardKey         string // ShardedProducer: явный ключ (ByManual / override)
 	shardName        string // ShardedProducer: пин на имя шарда
+	journalName      string // journal bridge: атомарно SET cursor после add
+	journalCursor    string
 }
 
 // WithShardKey задаёт строку для выбора шарда (обязательно при ShardByManual;
@@ -86,6 +88,15 @@ func WithTagLimits(limits map[string]int64) PublishOption {
 			}
 			c.tagLimits[tag] = max
 		}
+	}
+}
+
+// WithJournal — атомарно Publish + SET journal cursor (строго вперёд; иначе ErrJournalCursorRewind).
+// name — имя журнала; cursor — Encode() последнего offset батча.
+func WithJournal(name, cursor string) PublishOption {
+	return func(c *publishConfig) {
+		c.journalName = name
+		c.journalCursor = cursor
 	}
 }
 
