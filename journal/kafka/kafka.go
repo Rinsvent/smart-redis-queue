@@ -4,23 +4,34 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/IBM/sarama"
 	redisqueue "github.com/Rinsvent/smart-redis-queue"
 	"github.com/Rinsvent/smart-redis-queue/journal"
+	"github.com/redis/go-redis/v9"
 )
 
 type Config struct {
 	Brokers  []string
 	InTopic  string
 	AckTopic string
+	// ScheduleTopic — far-future (> DueSkew). Пусто = всё в InTopic (Redis будет ждать Scheduled).
+	ScheduleTopic string
+	// CursorRDB + JournalName — персистентный offset schedule-mover (тот же Redis, что у Bridge).
+	CursorRDB   *redis.Client
+	JournalName string
 }
 
 type Source struct {
 	cfg      Config
 	client   sarama.Client
 	producer sarama.SyncProducer
+
+	schedMu  sync.Mutex
+	schedOff int64 // последний обработанный offset ScheduleTopic; -1 = ещё не читали
 }
 
 type envelope struct {
@@ -46,7 +57,19 @@ func New(cfg Config) (*Source, error) {
 		_ = cl.Close()
 		return nil, err
 	}
-	return &Source{cfg: cfg, client: cl, producer: prod}, nil
+	s := &Source{cfg: cfg, client: cl, producer: prod, schedOff: -1}
+	if cfg.CursorRDB != nil && cfg.JournalName != "" {
+		if v, err := cfg.CursorRDB.Get(context.Background(), s.schedCursorKey()).Result(); err == nil {
+			if off, err := strconv.ParseInt(v, 10, 64); err == nil {
+				s.schedOff = off
+			}
+		}
+	}
+	return s, nil
+}
+
+func (s *Source) schedCursorKey() string {
+	return "srq:journal:" + s.cfg.JournalName + ":kafka_sched"
 }
 
 func (s *Source) Close() error {
@@ -55,6 +78,41 @@ func (s *Source) Close() error {
 }
 
 func (s *Source) Init(context.Context) error { return nil }
+
+// Publish — due → InTopic; far → ScheduleTopic (если задан), иначе InTopic.
+func (s *Source) Publish(ctx context.Context, tasks ...*redisqueue.Task) error {
+	now := time.Now()
+	for _, t := range tasks {
+		sch := journal.ScheduledOrNow(t.Scheduled)
+		env := envelope{
+			ID: t.ID, Partition: t.Partition, Priority: t.Priority,
+			Payload: t.Payload, Tags: t.Tags, Groups: t.Groups,
+			Scheduled: sch.UnixMilli(),
+		}
+		body, err := json.Marshal(env)
+		if err != nil {
+			return err
+		}
+		topic := s.cfg.InTopic
+		if s.cfg.ScheduleTopic != "" && !journal.IsDue(sch, now) {
+			topic = s.cfg.ScheduleTopic
+		}
+		_, _, err = s.producer.SendMessage(&sarama.ProducerMessage{
+			Topic: topic,
+			Key:   sarama.StringEncoder(t.ID),
+			Value: sarama.ByteEncoder(body),
+		})
+		if err != nil {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+	}
+	return nil
+}
 
 func (s *Source) ReadBatch(ctx context.Context, after journal.Cursor, n int) ([]journal.Record, error) {
 	if n < 1 {
@@ -90,7 +148,7 @@ func (s *Source) ReadBatch(ctx context.Context, after journal.Cursor, n int) ([]
 			if !ok {
 				return out, nil
 			}
-			if after.Offset > 0 && msg.Offset <= after.Offset {
+			if after.Offset >= 0 && msg.Offset <= after.Offset {
 				continue
 			}
 			rec, err := recordFromMsg(s.cfg.InTopic, msg)
@@ -162,15 +220,23 @@ func (s *Source) Ack(_ context.Context, taskID string, _ map[string]string) erro
 }
 
 func (s *Source) ReadAcks(ctx context.Context, from journal.Cursor, n int) ([]journal.AckEvent, error) {
+	if s.cfg.AckTopic == "" {
+		return nil, nil
+	}
+	if n < 1 {
+		n = 32
+	}
+	var off int64
+	if from.Offset < 0 {
+		off = sarama.OffsetOldest
+	} else {
+		off = from.Offset + 1
+	}
 	cons, err := sarama.NewConsumerFromClient(s.client)
 	if err != nil {
 		return nil, err
 	}
 	defer cons.Close()
-	off := from.Offset
-	if off < 0 {
-		off = 0
-	}
 	pc, err := cons.ConsumePartition(s.cfg.AckTopic, from.Partition, off)
 	if err != nil {
 		return nil, err
@@ -198,3 +264,86 @@ func (s *Source) ReadAcks(ctx context.Context, from journal.Cursor, n int) ([]jo
 	}
 	return out, nil
 }
+
+// PromoteDue — due из ScheduleTopic → InTopic (новый offset в main stream).
+func (s *Source) PromoteDue(ctx context.Context, limit int) (int, error) {
+	if s.cfg.ScheduleTopic == "" {
+		return 0, nil
+	}
+	if limit < 1 {
+		limit = 64
+	}
+	s.schedMu.Lock()
+	defer s.schedMu.Unlock()
+
+	start := sarama.OffsetOldest
+	if s.schedOff >= 0 {
+		start = s.schedOff + 1
+	}
+	cons, err := sarama.NewConsumerFromClient(s.client)
+	if err != nil {
+		return 0, err
+	}
+	defer cons.Close()
+	pc, err := cons.ConsumePartition(s.cfg.ScheduleTopic, 0, start)
+	if err != nil {
+		return 0, err
+	}
+	defer pc.Close()
+
+	now := time.Now()
+	moved := 0
+	timer := time.NewTimer(600 * time.Millisecond)
+	defer timer.Stop()
+
+	for moved < limit {
+		select {
+		case <-ctx.Done():
+			return moved, s.persistSchedOff(ctx, s.schedOff)
+		case <-timer.C:
+			return moved, s.persistSchedOff(ctx, s.schedOff)
+		case msg, ok := <-pc.Messages():
+			if !ok {
+				return moved, s.persistSchedOff(ctx, s.schedOff)
+			}
+			rec, err := recordFromMsg(s.cfg.ScheduleTopic, msg)
+			if err != nil {
+				return moved, err
+			}
+			if !journal.IsDue(rec.Task.Scheduled, now) {
+				// стоп на первом not-due (schedule topic пишите примерно в порядке due)
+				return moved, s.persistSchedOff(ctx, s.schedOff)
+			}
+			body, _ := json.Marshal(envelope{
+				ID: rec.Task.ID, Partition: rec.Task.Partition, Priority: rec.Task.Priority,
+				Payload: rec.Task.Payload, Tags: rec.Task.Tags, Groups: rec.Task.Groups,
+				Scheduled: rec.Task.Scheduled.UnixMilli(),
+			})
+			_, _, err = s.producer.SendMessage(&sarama.ProducerMessage{
+				Topic: s.cfg.InTopic,
+				Key:   sarama.StringEncoder(rec.Task.ID),
+				Value: sarama.ByteEncoder(body),
+			})
+			if err != nil {
+				return moved, err
+			}
+			moved++
+			s.schedOff = msg.Offset
+		}
+	}
+	return moved, s.persistSchedOff(ctx, s.schedOff)
+}
+
+func (s *Source) persistSchedOff(ctx context.Context, off int64) error {
+	if off < 0 {
+		return nil
+	}
+	s.schedOff = off
+	if s.cfg.CursorRDB == nil || s.cfg.JournalName == "" {
+		return nil
+	}
+	return s.cfg.CursorRDB.Set(ctx, s.schedCursorKey(), strconv.FormatInt(off, 10), 0).Err()
+}
+
+var _ journal.DuePromoter = (*Source)(nil)
+var _ journal.Source = (*Source)(nil)

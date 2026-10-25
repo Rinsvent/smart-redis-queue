@@ -2,6 +2,7 @@ package journal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -100,9 +101,43 @@ func (b *Bridge) Pump(ctx context.Context, n int) (int, error) {
 	opts = append(opts, b.pubOpts...)
 	opts = append(opts, redisqueue.WithJournal(b.name, last.Encode()))
 	if err := b.prod.PublishWith(ctx, opts, tasks...); err != nil {
-		return 0, err
+		// NX skip уже Locked/существующих id — норма для recovery replay
+		var exists *redisqueue.ErrTasksAlreadyExist
+		if !errors.As(err, &exists) {
+			return 0, err
+		}
 	}
 	return len(recs), nil
+}
+
+// lockDoneAcks — Kafka recovery: Lock task id из ack-топика, чтобы replay не создал дубли.
+// pg/mongo ReadAcks пустой — no-op (фильтр acked_at в ReadBatch).
+func (b *Bridge) lockDoneAcks(ctx context.Context) error {
+	from := Cursor{Offset: -1}
+	for {
+		acks, err := b.src.ReadAcks(ctx, from, 500)
+		if err != nil {
+			return err
+		}
+		if len(acks) == 0 {
+			return nil
+		}
+		ids := make([]string, 0, len(acks))
+		for _, a := range acks {
+			if a.TaskID != "" {
+				ids = append(ids, a.TaskID)
+			}
+		}
+		if len(ids) > 0 {
+			if err := b.prod.Lock(ctx, ids...); err != nil {
+				var exists *redisqueue.ErrTasksAlreadyExist
+				if !errors.As(err, &exists) {
+					return err
+				}
+			}
+		}
+		from = acks[len(acks)-1].Cursor
+	}
 }
 
 func (b *Bridge) RecoverAfterRedis(ctx context.Context, waitAcks func(context.Context) error) error {
@@ -115,6 +150,9 @@ func (b *Bridge) RecoverAfterRedis(ctx context.Context, waitAcks func(context.Co
 		if err := waitAcks(ctx); err != nil {
 			return err
 		}
+	}
+	if err := b.lockDoneAcks(ctx); err != nil {
+		return fmt.Errorf("journal recover lock acks: %w", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {

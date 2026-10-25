@@ -44,13 +44,11 @@ API: `ShardConfig`, `ShardByGroup|Queue|Manual|Partition`, `Producer.SetShards` 
 Тесты: `persistence_crash_test.go` (`SRQ_PERSIST_DOCKER=1`), конфиги `scripts/redis-persist/`.  
 Сырые: `docs/bench-results/persistence-HEAD.txt`.
 
-### 4. Persist / replay (журнал) — дизайн зафиксирован
+### 4. Persist / replay (журнал) — сделано
 
-Публично: [`docs/features/journal.md`](docs/features/journal.md). Внутри: [`internal/docs/journal-design.md`](internal/docs/journal-design.md).
+Публично: [`docs/features/journal.md`](docs/features/journal.md). Пример: `examples/journal`.
 
-Кратко: durable SoT снаружи (kafka/pg/mongo, opt-in subpackages); Redis cursor + batch Publish; ack отдельно (ack topic / `acked_at`); recovery = Lock из ack + Replay с cursor; emergency `resume_after`; rescheduler для far schedule (pg/mongo; kafka — dual store или limitation). Connect — backlog (нативный output, не HTTP).
-
-Код драйверов / bridge — в работе.
+Durable SoT (kafka/pg/mongo); Redis cursor + `WithJournal`; ack отдельно; recovery = Lock из ack-топика + pump; `PromoteDue` (pg/mongo in-place, kafka ScheduleTopic); emergency `resume_after`.
 
 ### 5. Exactly-once (уточнение + возможные доработки)
 

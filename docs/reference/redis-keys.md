@@ -9,6 +9,7 @@
 | `srq:exchange:{name}:ver` | STRING | Версия bindings (`INCR` на Persist). Читается только при `WithCheckVersion`. |
 | `srq:journal:{name}:cursor` | STRING | Offset journal bridge («уже в Redis»). Двигается атомарно с batch Publish. |
 | `srq:journal:{name}:pump` | STRING | Single-writer lock pump (NX + TTL ~60s, refresh ~10s). |
+| `srq:journal:{name}:kafka_sched` | STRING | Offset schedule-mover (kafka ScheduleTopic → InTopic). |
 | `srq:resume_after` | STRING | Unix timestamp; emergency pause воркеров до bump. См. [Journal](../features/journal.md). |
 
 Тип exchange (direct/fanout/topic) в Redis **не** хранится — алгоритм на продюсере. См. [Exchange](../features/exchange.md).

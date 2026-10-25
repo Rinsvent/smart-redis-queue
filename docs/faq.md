@@ -10,7 +10,7 @@
 
 ## Как не потерять работу при падении Redis?
 
-Внешний journal (Kafka / Postgres / Mongo) как источник правды, в Redis — курсор «уже в очереди» и планировщик. После восстановления Redis: pump с курсора + ack в journal (`acked_at` / ack-топик). Для Kafka при recovery ещё Lock done-id из ack-топика. Подробности: [Journal](features/journal.md).
+Внешний journal (Kafka / Postgres / Mongo) как источник правды, в Redis — курсор «уже в очереди» и планировщик. После восстановления Redis: `RecoverAfterRedis` делает Lock id из ack-топика (kafka) и pump с курсора; pg/mongo режут по `acked_at`. Пример: `go run ./examples/journal`. Подробности: [Journal](features/journal.md).
 
 ## Нужен ли отдельный Redis только под очередь?
 
