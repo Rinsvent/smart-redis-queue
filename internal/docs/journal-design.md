@@ -22,7 +22,10 @@
 
 - **Redis cursor** = «уже опубликовано в очередь» (батч + атомарно с Publish).
 - **Ack store** = «уже обработано» (ack topic / `acked_at`).
-- Recovery = Lock из ack store + Replay с cursor.
+- **PG/Mongo recovery:** replay с cursor + `acked_at IS NULL` (Lock не нужен). Добить зависшие journal Ack после краша воркера.
+- **Kafka recovery:** Lock из ack-топика + replay с offset (в логе нет acked_at).
+- Курсор PG: `(scheduled, task_id)` с монотонным task_id; индекс `(scheduled, task_id)`; колонки tags/groups/priority.
+- Окно everysec на приёме закрывается только для потока через journal; at-least-once между SRQ Ack и journal Ack остаётся — см. публичную § loss-window.
 
 ## Батчи (как в pgqueue Requester)
 
