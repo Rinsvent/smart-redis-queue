@@ -2,8 +2,7 @@ package desktopui
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -1269,27 +1268,25 @@ func (a *App) ListRegistryTasks(queue string, db int, query string) ([]RegistryT
 	return out, nil
 }
 
-// EnqueueRegistryTask — Publish Name или Name~rand (bypassLock).
-func (a *App) EnqueueRegistryTask(queue, name, payloadJSON string, bypassLock bool, db int) (string, error) {
+// EnqueueRegistryTask — Publish Name / ~o{hash} / ~r{rand}.
+func (a *App) EnqueueRegistryTask(queue, name, payloadJSON string, bypassLock, byOptions bool, db int) (string, error) {
 	rdb, err := a.clientForDB(db)
 	if err != nil {
 		return "", err
 	}
 	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), dbScanTimeout)
 	defer cancel()
-	id := name
-	if bypassLock {
-		b := make([]byte, 4)
-		if _, err := rand.Read(b); err != nil {
-			return "", err
-		}
-		id = name + "~" + hex.EncodeToString(b)
-	}
-	p := redisqueue.NewProducer(rdb, queue)
 	payload := []byte(payloadJSON)
 	if len(payload) == 0 {
 		payload = []byte("{}")
 	}
+	args := map[string]string{}
+	_ = json.Unmarshal(payload, &args)
+	id, err := tasks.BuildTaskID(name, args, bypassLock, byOptions)
+	if err != nil {
+		return "", err
+	}
+	p := redisqueue.NewProducer(rdb, queue)
 	if err := p.Publish(ctx, &redisqueue.Task{ID: id, Payload: payload}); err != nil {
 		return "", err
 	}

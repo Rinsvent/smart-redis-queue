@@ -47,8 +47,13 @@ Scheduler шлёт payload **только из defaults схемы** — last ar
 ## UI Run
 
 - По умолчанию `ID=Name` → лок payload.
-- Галочка bypass lock → `Name~{rand}` — параллельный прогон с другими args.
+- **By options** → `Name~o{hash8}` — одинаковые args блокируются, другие наборы можно параллелить.
+- **Bypass lock** → `Name~r{rand}` — всегда новый ID (галочка by options тогда не нужна).
 - Режим **tasks** в Manager: Def’ы текущей очереди, статусы, replay, pause/stop.
+
+## Progress / control
+
+Счётчик и `!pause`/`!stop` живут в одном `step:{id}`. Flush — Lua: пишет progress, **не затирает** control от UI, один RTT. Отдельный ключ control не нужен (Ack и так чистит step).
 
 ## Control
 

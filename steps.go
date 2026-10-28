@@ -240,18 +240,49 @@ func (s *StepRunner) writeValue(ctx context.Context, value string) error {
 	return s.rdb.Set(ctx, stepKey(s.queue, s.taskID), value, s.ttl).Err()
 }
 
-// writeValueGet — SET value GET: атомарно пишет и возвращает предыдущее значение ("" если ключа не было).
-func (s *StepRunner) writeValueGet(ctx context.Context, value string) (old string, err error) {
-	args := redis.SetArgs{Get: true}
-	if s.ttl > 0 {
-		args.TTL = s.ttl
-	}
-	old, err = s.rdb.SetArgs(ctx, stepKey(s.queue, s.taskID), value, args).Result()
-	if err == redis.Nil {
-		return "", nil
-	}
-	return old, err
-}
+// stepProgressFlushScript — один RTT: пишет progress base, сохраняет !control из ключа, возвращает control.
+// Отдельный ключ control не заводим: Ack уже чистит step; Lua атомарно не затирает pause/stop от UI.
+var stepProgressFlushScript = redis.NewScript(`
+local cur = redis.call('GET', KEYS[1])
+local suffix = ''
+if cur then
+  local i = string.find(cur, '!', 1, true)
+  if i then
+    suffix = string.sub(cur, i)
+  end
+end
+local val = ARGV[1] .. suffix
+local ttl = tonumber(ARGV[2]) or 0
+if ttl > 0 then
+  redis.call('SET', KEYS[1], val, 'EX', ttl)
+else
+  redis.call('SET', KEYS[1], val)
+end
+if suffix == '' then
+  return ''
+end
+return string.sub(suffix, 2)
+`)
+
+// stepControlScript — выставляет control, progress не трогает (один RTT).
+var stepControlScript = redis.NewScript(`
+local cur = redis.call('GET', KEYS[1])
+if not cur then
+  return redis.error_reply('no step')
+end
+local body = cur
+local i = string.find(cur, '!', 1, true)
+if i then
+  body = string.sub(cur, 1, i - 1)
+end
+local ctrl = ARGV[1]
+local val = body
+if ctrl ~= nil and ctrl ~= '' then
+  val = body .. '!' .. ctrl
+end
+redis.call('SET', KEYS[1], val)
+return val
+`)
 
 // Commit — шаг завершён (в ключе только имя, без #прогресса).
 func (s *StepRunner) Commit(ctx context.Context, name string) error {
@@ -498,28 +529,20 @@ func (p *StepProgress) flush(ctx context.Context) error {
 		p.started = time.Now()
 	}
 	key := stepKey(p.runner.queue, p.runner.taskID)
-	if cur, err := p.runner.rdb.Get(ctx, key).Result(); err == nil {
-		_, _, _, _, _, _, ctrl := parseStepValue(cur)
-		p.control = ctrl
-	} else if err != redis.Nil {
-		return fmt.Errorf("step progress %q: %w", p.name, err)
+	// base без control — Lua подставит !pause/!stop из текущего ключа
+	base := encodeStepValue(p.name, p.current, p.total, p.unknown, p.started, StepControlNone)
+	ttlSec := int64(0)
+	if p.runner.ttl > 0 {
+		ttlSec = int64(p.runner.ttl / time.Second)
+		if ttlSec < 1 {
+			ttlSec = 1
+		}
 	}
-	val := encodeStepValue(p.name, p.current, p.total, p.unknown, p.started, p.control)
-	prev, err := p.runner.writeValueGet(ctx, val)
+	ctrl, err := stepProgressFlushScript.Run(ctx, p.runner.rdb, []string{key}, base, ttlSec).Text()
 	if err != nil {
 		return fmt.Errorf("step progress %q: %w", p.name, err)
 	}
-	if prev != "" {
-		_, _, _, _, _, _, prevCtrl := parseStepValue(prev)
-		if prevCtrl != p.control {
-			// UI успел сменить control между GET и SET — восстановим
-			p.control = prevCtrl
-			val = encodeStepValue(p.name, p.current, p.total, p.unknown, p.started, p.control)
-			if err := p.runner.writeValue(ctx, val); err != nil {
-				return fmt.Errorf("step progress %q: %w", p.name, err)
-			}
-		}
-	}
+	p.control = normalizeStepControl(ctrl)
 	p.runner.last = p.name
 	p.runner.resumeProgress = true
 	p.runner.resumeCurr = p.current
@@ -586,20 +609,14 @@ func SetStepControl(ctx context.Context, rdb *redis.Client, queueName, taskID, c
 	}
 	control = normalizeStepControl(control)
 	key := stepKey(queueName, taskID)
-	raw, err := rdb.Get(ctx, key).Result()
-	if err == redis.Nil {
-		return fmt.Errorf("steps: no step for %s/%s", queueName, taskID)
-	}
+	_, err := stepControlScript.Run(ctx, rdb, []string{key}, control).Result()
 	if err != nil {
+		if strings.Contains(err.Error(), "no step") {
+			return fmt.Errorf("steps: no step for %s/%s", queueName, taskID)
+		}
 		return err
 	}
-	name, curr, total, unk, started, hp, _ := parseStepValue(raw)
-	if !hp {
-		// завершённый checkpoint — некуда вешать control
-		return fmt.Errorf("steps: step %q has no progress marker", name)
-	}
-	val := encodeStepValue(name, curr, total, unk, started, control)
-	return rdb.Set(ctx, key, val, 0).Err()
+	return nil
 }
 
 // Release удаляет checkpoint вручную.

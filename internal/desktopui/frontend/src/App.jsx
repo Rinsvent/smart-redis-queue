@@ -337,6 +337,7 @@ export default function App() {
   const [taskRunName, setTaskRunName] = useState('')
   const [taskRunArgs, setTaskRunArgs] = useState({})
   const [taskRunBypass, setTaskRunBypass] = useState(false)
+  const [taskRunByOptions, setTaskRunByOptions] = useState(false)
   const [taskRunBusy, setTaskRunBusy] = useState(false)
 
   const [tagOpen, setTagOpen] = useState(false)
@@ -1733,6 +1734,7 @@ export default function App() {
                             })
                             setTaskRunArgs(defaults)
                             setTaskRunBypass(false)
+                            setTaskRunByOptions(false)
                             setTaskRunOpen(true)
                           }}
                           sx={{ flexShrink: 0 }}
@@ -2152,6 +2154,7 @@ export default function App() {
                                                 t.name,
                                                 '{}',
                                                 false,
+                                                false,
                                                 activeDb,
                                               )
                                               notify(`Enqueued ${id}`, 'success')
@@ -2501,10 +2504,24 @@ export default function App() {
               control={
                 <Checkbox
                   checked={taskRunBypass}
-                  onChange={(e) => setTaskRunBypass(e.target.checked)}
+                  onChange={(e) => {
+                    const on = e.target.checked
+                    setTaskRunBypass(on)
+                    if (on) setTaskRunByOptions(false)
+                  }}
                 />
               }
-              label="Bypass lock (parallel run with random suffix)"
+              label="Bypass lock (random suffix ~r…)"
+            />
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={taskRunByOptions}
+                  disabled={taskRunBypass}
+                  onChange={(e) => setTaskRunByOptions(e.target.checked)}
+                />
+              }
+              label="Lock by options (suffix ~o{hash} — same args blocked)"
             />
           </Stack>
         </DialogContent>
@@ -2523,6 +2540,7 @@ export default function App() {
                   taskRunName,
                   JSON.stringify(taskRunArgs || {}),
                   taskRunBypass,
+                  taskRunByOptions,
                   activeDb,
                 )
                 notify(`Enqueued ${id}`, 'success')

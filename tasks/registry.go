@@ -2,8 +2,6 @@ package tasks
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -300,7 +298,8 @@ func (r *Registry) MirrorProgress(ctx context.Context, name, stepRaw string) err
 // RunOptions — ручной/UI Publish.
 type RunOptions struct {
 	Args       map[string]string
-	BypassLock bool // суффикс ~rand → параллельный прогон
+	BypassLock bool // ~r{rand} — всегда новый ID
+	ByOptions  bool // ~o{hash} — лок по набору args (игнор если BypassLock)
 }
 
 // Enqueue публикует задачу. Scheduler и UI Run.
@@ -314,14 +313,6 @@ func (r *Registry) Enqueue(ctx context.Context, name string, opts RunOptions) (t
 	if err != nil {
 		return "", err
 	}
-	id := name
-	if opts.BypassLock {
-		suf, err := randomSuffix(4)
-		if err != nil {
-			return "", err
-		}
-		id = name + "~" + suf
-	}
 	payloadArgs := map[string]string{}
 	for _, a := range d.Args {
 		payloadArgs[a.Name] = a.Default
@@ -329,20 +320,16 @@ func (r *Registry) Enqueue(ctx context.Context, name string, opts RunOptions) (t
 	for k, v := range opts.Args {
 		payloadArgs[k] = v
 	}
+	id, err := BuildTaskID(name, payloadArgs, opts.BypassLock, opts.ByOptions)
+	if err != nil {
+		return "", err
+	}
 	body, _ := json.Marshal(payloadArgs)
 	t := &redisqueue.Task{ID: id, Payload: body}
 	if err := p.Publish(ctx, t); err != nil {
 		return "", err
 	}
 	return id, nil
-}
-
-func randomSuffix(n int) (string, error) {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }
 
 // defaultArgsPayload — только defaults из схемы (для scheduler).

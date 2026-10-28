@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,6 +62,12 @@ func TestRegistryCatalogAndDispatch(t *testing.T) {
 	id2, err := reg.Enqueue(ctx, "billing", RunOptions{BypassLock: true})
 	if err != nil || BaseName(id2) != "billing" || id2 == "billing" {
 		t.Fatalf("bypass: %v %q", err, id2)
+	}
+	id3, err := BuildTaskID("billing", map[string]string{"day": "1"}, false, true)
+	id4, err2 := BuildTaskID("billing", map[string]string{"day": "1"}, false, true)
+	id5, _ := BuildTaskID("billing", map[string]string{"day": "2"}, false, true)
+	if err != nil || err2 != nil || id3 != id4 || !strings.HasPrefix(id3, "billing~o") || id3 == id5 {
+		t.Fatalf("byOptions: %v %v %q %q %q", err, err2, id3, id4, id5)
 	}
 
 	task := &redisqueue.Task{ID: "billing", Payload: []byte(`{"day":"1"}`)}

@@ -256,3 +256,30 @@ func TestStepsETA(t *testing.T) {
 		t.Fatalf("ETA=%v", eta)
 	}
 }
+
+func TestStepProgressFlushPreservesControl(t *testing.T) {
+	rdb := stepsTestRedis(t)
+	ctx := context.Background()
+	key := stepKey("steps-lua", "t1")
+	_ = rdb.Del(ctx, key)
+
+	started := time.UnixMilli(1_700_000_000_000)
+	base1 := encodeStepValue("import", 1, 10, false, started, "")
+	ctrl, err := stepProgressFlushScript.Run(ctx, rdb, []string{key}, base1, 0).Text()
+	if err != nil || ctrl != "" {
+		t.Fatalf("flush1: ctrl=%q err=%v", ctrl, err)
+	}
+	if err := SetStepControl(ctx, rdb, "steps-lua", "t1", StepControlPause); err != nil {
+		t.Fatal(err)
+	}
+	base2 := encodeStepValue("import", 5, 10, false, started, "")
+	ctrl, err = stepProgressFlushScript.Run(ctx, rdb, []string{key}, base2, 0).Text()
+	if err != nil || ctrl != StepControlPause {
+		t.Fatalf("flush2: ctrl=%q err=%v", ctrl, err)
+	}
+	raw, _ := rdb.Get(ctx, key).Result()
+	cp := ParseStepCheckpoint(raw)
+	if cp.Curr != 5 || cp.Control != StepControlPause {
+		t.Fatalf("got %q %+v", raw, cp)
+	}
+}
