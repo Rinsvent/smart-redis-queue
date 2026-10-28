@@ -193,7 +193,7 @@ pool.Consume(ctx, func(task *redisqueue.Task) error {
 1. Publish с тем же ID — пока жив `payload:{id}` (pending / in-flight / idempotency-stub), повтор режется `SET NX` (`ErrTasksAlreadyExist`). Дубликаты «по расписанию» сами не стартуют.
 2. В handler — `NewSteps` + `Progress` / `Advance`: в Redis видно `import#3/10@startedMs` (и опционально `!pause` / `!stop`).
 3. Manager UI → режим **messages**: peek до 50 задач, reject count, progress, exact id — без consume.
-4. После Ack `step` удаляется. Долгоживущий last-run / каталог команд / scheduler — пакет [`tasks`](tasks.md), рядом с очередью.
+4. После Ack `step` удаляется. Долгоживущий last-run / каталог команд / scheduler / `Consume` — пакет [`tasks`](tasks.md), рядом с очередью.
 
 ```go
 pool.Consume(ctx, func(task *redisqueue.Task) error {

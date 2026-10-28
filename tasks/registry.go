@@ -129,16 +129,36 @@ func (r *Registry) Register(d Def) error {
 }
 
 // SetProducer привязывает Producer к имени очереди (для Publish/Scheduler).
+// Необязательно: Enqueue/Consume сами создадут Producer на rdb registry.
 func (r *Registry) SetProducer(queue string, p *redisqueue.Producer) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.prods[queue] = p
 }
 
+func (r *Registry) ensureProducer(queue string) {
+	if queue == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, ok := r.prods[queue]; ok {
+		return
+	}
+	r.prods[queue] = redisqueue.NewProducer(r.rdb, queue)
+}
+
 func (r *Registry) producer(queue string) (*redisqueue.Producer, error) {
 	r.mu.RLock()
 	p := r.prods[queue]
 	r.mu.RUnlock()
+	if p != nil {
+		return p, nil
+	}
+	r.ensureProducer(queue)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p = r.prods[queue]
 	if p == nil {
 		return nil, fmt.Errorf("tasks: no producer for queue %q", queue)
 	}

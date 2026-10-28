@@ -97,7 +97,7 @@
 
 `ListQueues`, `ListQueueIndex`, `QueueDepth`, `QueueDepthIfIndexed`, `RebuildQueueDepth`, `Inspect`, `QueueOverview`, `ListPartitions`, `ListBlockedPartitions`, `ListLockedPartitions`, `ListGroups`, `ListBlockedGroups`, `ListRaceLocks`, `ScanTopPending`, `ScanHighReject`, `ListTags`, `CountTags`, `ListMessages`, `InspectTask`, `SetTaskStepControl`, `BlockGroups`, `BlockPartition`, `UnblockPartition`, `Remove`, `RemoveByTag`, `CountByTag`, `Purge`, `Retry`, `QueueStatsBounds`, `ListQueueStats`.
 
-Пакет `tasks`: `New`, `Register`, `SyncCatalog`, `Dispatch`, `Enqueue`, `StartScheduler`, `ListForQueue` — см. [Tasks](../features/tasks.md).
+Пакет `tasks`: `New`, `Register`, `SyncCatalog`, `Dispatch`, `Enqueue`, `Consume`, `StartScheduler`, `ListForQueue` — см. [Tasks](../features/tasks.md).
 
 `srq:queues` — total очереди без SCAN партиций; UI сортирует alpha или по total. `QueueDepthIfIndexed` — ok=false если реестра/члена ещё нет (график total пропускает). Top pending / poison / locked — фоновые SCAN в Admin/UI, не hot path.
 

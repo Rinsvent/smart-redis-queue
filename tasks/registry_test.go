@@ -154,3 +154,35 @@ func TestConcurrencyAfterPendingRerunImmediate(t *testing.T) {
 		t.Fatal("pending_rerun should be cleared")
 	}
 }
+
+func TestRegistryConsume(t *testing.T) {
+	rdb := testRDB(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reg, err := New(rdb, Config{Namespace: "svc-c", DefaultQueue: "q-c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{}, 1)
+	if err := reg.Register(Def{
+		Name: "job",
+		Handle: func(ctx context.Context, inv Invocation) error {
+			done <- struct{}{}
+			return nil
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reg.Enqueue(ctx, "job", RunOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		_ = reg.Consume(ctx, ConsumeOptions{Workers: 1})
+	}()
+	select {
+	case <-done:
+		cancel()
+	case <-time.After(5 * time.Second):
+		t.Fatal("Consume did not Dispatch in time")
+	}
+}

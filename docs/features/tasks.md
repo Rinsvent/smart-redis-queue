@@ -2,7 +2,9 @@
 
 Рядом с очередями: каталог команд, cron-scheduler, last-run, pause/stop через step-ключ. Очередь — только транспорт + anti-dupe по ID.
 
-## Регистрация
+## Минимальный воркер (UI + cron)
+
+Scheduler и UI только **публикуют** в очередь. Чтобы Run из UI что-то сделал, нужен процесс с `Register` + `Consume`:
 
 ```go
 reg, _ := tasks.New(rdb, tasks.Config{
@@ -10,28 +12,45 @@ reg, _ := tasks.New(rdb, tasks.Config{
     DefaultQueue: "billing-cron",
 })
 
-// разные опции / расписания = разные Name (Dispatch ищет handler по base name)
 _ = reg.Register(tasks.Def{
-    Name: "import_full",
-    Cron: "0 3 * * *",
+    Name:        "import_full",
+    Cron:        "0 3 * * *",
     Concurrency: tasks.ConcurrencyForbid,
-    Args: []tasks.ArgDef{{Name: "mode", Default: "full"}},
-    Handle: importHandle,
+    Args:        []tasks.ArgDef{{Name: "mode", Default: "full"}},
+    Handle:      importHandle,
 })
 _ = reg.Register(tasks.Def{
-    Name: "import_delta",
-    Cron: "*/15 * * * *",
+    Name:        "import_delta",
+    Cron:        "*/15 * * * *",
     Concurrency: tasks.ConcurrencyAfter,
-    Args: []tasks.ArgDef{{Name: "mode", Default: "delta"}},
-    Handle: importHandle, // тот же код
+    Args:        []tasks.ArgDef{{Name: "mode", Default: "delta"}},
+    Handle:      importHandle, // тот же код, другой Name
 })
 
-reg.SetProducer("billing-cron", producer)
-_ = reg.SyncCatalog(ctx)
-reg.StartScheduler(ctx)
+_ = reg.SyncCatalog(ctx) // UI увидит catalog
+reg.StartScheduler(ctx)  // опционально; без Consume тики только копятся в очереди
+
+// блокирует до cancel: пул на каждую очередь из Def / DefaultQueue
+err := reg.Consume(ctx, tasks.ConsumeOptions{Workers: 8})
 ```
 
-Scheduler публикует payload из defaults Args. UI last-args cron не перебивают.
+`SetProducer` не обязателен — `Enqueue` / `Consume` создают Producer на `rdb` registry сами.
+
+Поток: **UI Run / Scheduler** → `Publish` (тот же task id / payload-лок) → **воркер** `Get` → `Dispatch` по `BaseName(task.ID)` → handler из `Def`.
+
+## Почему пул, а не consumer на задачу
+
+| Вариант | Минус |
+|---------|--------|
+| Consumer на каждый Name / при появлении задачи | Лишние poll-циклы, сложно масштабировать, нет выигрыша vs пула |
+| Один воркер на очередь | UI Run ждёт, пока длинный cron освободит слот |
+| **Пул воркеров на очередь** (`Consume`) | Параллельные Name / `~r` сразу; лок только NX payload |
+
+Лок из UI — обычный Publish SET NX по id. Нет лока → задача берётся свободным воркером сразу. Несколько `Def` на одной очереди не мешают друг другу, пока хватает `Workers`.
+
+Если очередей несколько (`Def.Queue` разный) — `Consume` поднимает **отдельный пул на каждую**.
+
+Ручной путь без registry (редко): свой `ConsumerPool` + `reg.Dispatch(ctx, task)`.
 
 ## Concurrency
 
@@ -47,7 +66,7 @@ Scheduler публикует payload из defaults Args. UI last-args cron не 
 
 ## UI Run (вручную)
 
-В модалке по-прежнему: bypass (`~r`) и lock-by-options (`~o`) — только для ручного запуска, не в catalog/Def.
+В модалке: bypass (`~r`) и lock-by-options (`~o`) — только для ручного запуска, не в catalog/Def. Оба пишут в ту же очередь, что обрабатывает `Consume`.
 
 ## Ключи
 
