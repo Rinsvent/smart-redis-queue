@@ -42,6 +42,14 @@ export const api = {
   purge: (queue, partition, db) => call('Purge', queue, partition || '', db),
   retry: (queue, db) => call('Retry', queue, db),
   getTaskPayload: (queue, taskId, db) => call('GetTaskPayload', queue, taskId, db),
+  listMessages: (queue, db, tag, query) =>
+    call('ListMessages', queue, db, tag || '', query || ''),
+  listRegistryTasks: (queue, db, query) =>
+    call('ListRegistryTasks', queue, db, query || ''),
+  enqueueRegistryTask: (queue, name, payloadJSON, bypassLock, db) =>
+    call('EnqueueRegistryTask', queue, name, payloadJSON || '{}', !!bypassLock, db),
+  setTaskStepControl: (queue, taskId, control, db) =>
+    call('SetTaskStepControl', queue, taskId, control || '', db),
   countByTag: (queue, tag, db) => call('CountByTag', queue, tag, db),
   removeByTag: (queue, tag, limit, returnPayload, db) =>
     call('RemoveByTag', queue, tag, limit, returnPayload, db),

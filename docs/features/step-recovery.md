@@ -186,6 +186,42 @@ pool.Consume(ctx, func(task *redisqueue.Task) error {
 
 После успеха Consume делает Ack. Повторный Publish того же id при необходимости режется через `SetIdempotencyTtl` — см. [Debounce / идемпотентность](debounce-idempotency.md) и [Гарантии доставки](../delivery.md).
 
+## Рецепт: cron-очередь + progress
+
+Очередь вроде `{service}-cron`, стабильные ID (`billing`, `import`):
+
+1. Publish с тем же ID — пока жив `payload:{id}` (pending / in-flight / idempotency-stub), повтор режется `SET NX` (`ErrTasksAlreadyExist`). Дубликаты «по расписанию» сами не стартуют.
+2. В handler — `NewSteps` + `Progress` / `Advance`: в Redis видно `import#3/10@startedMs` (и опционально `!pause` / `!stop`).
+3. Manager UI → режим **messages**: peek до 50 задач, reject count, progress, exact id — без consume.
+4. После Ack `step` удаляется. Долгоживущий last-run / каталог команд / scheduler — пакет [`tasks`](tasks.md), рядом с очередью.
+
+```go
+pool.Consume(ctx, func(task *redisqueue.Task) error {
+    s, err := redisqueue.NewSteps(ctx, task)
+    if err != nil {
+        return err
+    }
+    return s.Do(ctx, "import", func(ctx context.Context) error {
+        bar, err := s.Progress(ctx, redisqueue.StepProgressConfig{FlushEvery: time.Second})
+        if err != nil {
+            return err
+        }
+        bar.SetTotal(len(rows))
+        for _, row := range rows {
+            if err := process(row); err != nil {
+                return err
+            }
+            if err := bar.Advance(ctx, 1); err != nil {
+                return err // в т.ч. ErrStepStopped
+            }
+        }
+        return nil
+    })
+})
+```
+
+Control (`pause`/`stop`): UI/Admin пишет суффикс в тот же step-ключ (`…@ms!pause`); `Advance` делает SET GET и при pause ждёт resume. См. [Tasks](tasks.md).
+
 ## Ключ Redis
 
-`queue:{name}:step:{taskID}` — STRING: `name` или `name#curr/total@startedMs`. См. [Ключи Redis](../reference/redis-keys.md).
+`queue:{name}:step:{taskID}` — STRING: `name` или `name#curr/total@startedMs[!control]`. См. [Ключи Redis](../reference/redis-keys.md).

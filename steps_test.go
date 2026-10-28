@@ -42,9 +42,12 @@ func TestParseEncodeStepValue(t *testing.T) {
 		{"bad#x/y", "bad#x/y", 0, 0, false, false, false},
 	}
 	for _, tc := range cases {
-		n, c, tot, unk, st, hp := parseStepValue(tc.raw)
+		n, c, tot, unk, st, hp, ctrl := parseStepValue(tc.raw)
 		if n != tc.name || c != tc.curr || tot != tc.total || unk != tc.unk || hp != tc.hasProg {
 			t.Fatalf("parse %q: got name=%q %d/%d unk=%v hp=%v", tc.raw, n, c, tot, unk, hp)
+		}
+		if ctrl != "" {
+			t.Fatalf("parse %q unexpected control %q", tc.raw, ctrl)
 		}
 		if tc.hasTime {
 			if st.UnixMilli() != started.UnixMilli() {
@@ -55,13 +58,21 @@ func TestParseEncodeStepValue(t *testing.T) {
 		}
 	}
 
-	enc := encodeStepValue("import", 3, 10, false, started)
+	enc := encodeStepValue("import", 3, 10, false, started, "")
 	if enc != "import#3/10@1700000000000" {
 		t.Fatalf("encode: %q", enc)
 	}
-	encU := encodeStepValue("import", 3, 0, true, started)
+	encU := encodeStepValue("import", 3, 0, true, started, "")
 	if encU != "import#3/?@1700000000000" {
 		t.Fatalf("encode unk: %q", encU)
+	}
+	encP := encodeStepValue("import", 3, 10, false, started, StepControlPause)
+	if encP != "import#3/10@1700000000000!pause" {
+		t.Fatalf("encode pause: %q", encP)
+	}
+	cp := ParseStepCheckpoint(encP)
+	if !cp.HasProgress || cp.Control != StepControlPause || cp.Curr != 3 {
+		t.Fatalf("ParseStepCheckpoint: %+v", cp)
 	}
 }
 
@@ -128,7 +139,7 @@ func TestStepsProgressResume(t *testing.T) {
 		t.Fatalf("want boom, got %v", err)
 	}
 	raw, _ := rdb.Get(ctx, key).Result()
-	name, curr, total, unk, started, hp := parseStepValue(raw)
+	name, curr, total, unk, started, hp, _ := parseStepValue(raw)
 	if !hp || name != "import" || curr != 3 || total != 10 || unk {
 		t.Fatalf("mid key %q → %s %d/%d", raw, name, curr, total)
 	}

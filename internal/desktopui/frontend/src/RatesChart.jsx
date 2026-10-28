@@ -108,6 +108,34 @@ export function buildChartSeries(points, fromSec, toSec, watchSeries, totalPoint
     if (ffTotal != null) row.total = ffTotal
     out.push(row)
   }
+
+  // Leading backfill for gauges: нет семпла слева окна ≠ «было 0» (иначе вертикальный обрыв у Y).
+  let leadTotal = null
+  for (const row of out) {
+    if (row.total != null) {
+      leadTotal = row.total
+      break
+    }
+  }
+  if (leadTotal != null) {
+    for (const row of out) {
+      if (row.total != null) break
+      row.total = leadTotal
+    }
+  }
+  const tagLead = {}
+  for (const row of out) {
+    for (const [t, n] of Object.entries(row.tags || {})) {
+      if (tagLead[t] == null && n != null) tagLead[t] = n
+    }
+  }
+  for (const [t, lead] of Object.entries(tagLead)) {
+    for (const row of out) {
+      if (row.tags?.[t] != null) break
+      if (!row.tags) row.tags = {}
+      row.tags[t] = lead
+    }
+  }
   return out
 }
 

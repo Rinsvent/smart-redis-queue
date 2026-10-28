@@ -2,6 +2,8 @@ package desktopui
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"sort"
 	"strconv"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	redisqueue "github.com/Rinsvent/smart-redis-queue"
+	"github.com/Rinsvent/smart-redis-queue/tasks"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -97,13 +100,61 @@ type TagListResult struct {
 
 // TaskView — payload, headers и мета по id.
 type TaskView struct {
-	TaskID    string            `json:"taskId"`
-	Payload   string            `json:"payload"`
-	Headers   map[string]string `json:"headers,omitempty"`
-	Partition string            `json:"partition"`
-	Priority  string            `json:"priority"`
-	Group     string            `json:"group"`
-	Exists    bool              `json:"exists"`
+	TaskID      string            `json:"taskId"`
+	Payload     string            `json:"payload"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Partition   string            `json:"partition"`
+	Priority    string            `json:"priority"`
+	Group       string            `json:"group"`
+	Exists      bool              `json:"exists"`
+	RejectCount int64             `json:"rejectCount,omitempty"`
+	Step        string            `json:"step,omitempty"`
+	State       string            `json:"state,omitempty"`
+	Progress    *StepProgressUI   `json:"progress,omitempty"`
+}
+
+// StepProgressUI — progress из step-ключа.
+type StepProgressUI struct {
+	Name         string `json:"name"`
+	Curr         int    `json:"curr"`
+	Total        int    `json:"total"`
+	UnknownTotal bool   `json:"unknownTotal,omitempty"`
+	StartedMs    int64  `json:"startedMs,omitempty"`
+	Control      string `json:"control,omitempty"`
+}
+
+// MessageListResult — Admin.ListMessages для UI.
+type MessageListResult struct {
+	Messages  []MessageRow `json:"messages"`
+	Limit     int          `json:"limit"`
+	Truncated bool         `json:"truncated"`
+}
+
+// MessageRow — строка режима messages.
+type MessageRow struct {
+	ID          string          `json:"id"`
+	Partition   string          `json:"partition"`
+	State       string          `json:"state"`
+	RejectCount int64           `json:"rejectCount"`
+	Step        string          `json:"step,omitempty"`
+	Progress    *StepProgressUI `json:"progress,omitempty"`
+}
+
+// RegistryTaskRow — режим tasks (catalog + run).
+type RegistryTaskRow struct {
+	Namespace   string            `json:"namespace"`
+	Name        string            `json:"name"`
+	Queue       string            `json:"queue"`
+	IntervalSec float64           `json:"intervalSec,omitempty"`
+	Args        []tasksArgDef     `json:"args,omitempty"`
+	Run         map[string]string `json:"run,omitempty"`
+}
+
+type tasksArgDef struct {
+	Name    string `json:"name"`
+	Type    string `json:"type,omitempty"`
+	Default string `json:"default,omitempty"`
+	Help    string `json:"help,omitempty"`
 }
 
 // TagRemoveResult — агрегат RemoveByTag для UI.
@@ -146,10 +197,12 @@ type App struct {
 	loopMu     sync.Mutex
 	loopCancel context.CancelFunc
 
-	// Отмена устаревших UI-запросов при смене очереди / новом list|inspect.
-	queryMu       sync.Mutex
-	listCancel    context.CancelFunc
-	inspectCancel context.CancelFunc
+	// Отмена UI-запросов только через CancelQueries (смена очереди).
+	// Параллельные List* больше не отменяют друг друга (раньше один beginList
+	// убивал ListRegistryTasks / ListMessages при одновременном ListTags и т.п.).
+	queryMu        sync.Mutex
+	listCancels    []context.CancelFunc
+	inspectCancels []context.CancelFunc
 
 	prevMu sync.Mutex
 	prev   map[string]sample // key: name@db
@@ -187,24 +240,18 @@ func (a *App) ctxOrBackground() context.Context {
 }
 
 func (a *App) beginList(timeout time.Duration) (context.Context, context.CancelFunc) {
-	a.queryMu.Lock()
-	defer a.queryMu.Unlock()
-	if a.listCancel != nil {
-		a.listCancel()
-	}
 	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), timeout)
-	a.listCancel = cancel
+	a.queryMu.Lock()
+	a.listCancels = append(a.listCancels, cancel)
+	a.queryMu.Unlock()
 	return ctx, cancel
 }
 
 func (a *App) beginInspect(timeout time.Duration) (context.Context, context.CancelFunc) {
-	a.queryMu.Lock()
-	defer a.queryMu.Unlock()
-	if a.inspectCancel != nil {
-		a.inspectCancel()
-	}
 	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), timeout)
-	a.inspectCancel = cancel
+	a.queryMu.Lock()
+	a.inspectCancels = append(a.inspectCancels, cancel)
+	a.queryMu.Unlock()
 	return ctx, cancel
 }
 
@@ -212,14 +259,14 @@ func (a *App) beginInspect(timeout time.Duration) (context.Context, context.Canc
 func (a *App) CancelQueries() {
 	a.queryMu.Lock()
 	defer a.queryMu.Unlock()
-	if a.listCancel != nil {
-		a.listCancel()
-		a.listCancel = nil
+	for _, c := range a.listCancels {
+		c()
 	}
-	if a.inspectCancel != nil {
-		a.inspectCancel()
-		a.inspectCancel = nil
+	a.listCancels = nil
+	for _, c := range a.inspectCancels {
+		c()
 	}
+	a.inspectCancels = nil
 }
 
 func sampleKey(name string, db int) string {
@@ -1133,33 +1180,131 @@ func (a *App) Retry(queue string, db int) (int, error) {
 }
 
 func (a *App) GetTaskPayload(queue, taskID string, db int) (TaskView, error) {
-	rdb, err := a.clientForDB(db)
+	admin, err := a.adminForDB(db)
 	if err != nil {
 		return TaskView{}, err
 	}
 	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), dbScanTimeout)
 	defer cancel()
-	payload, err := rdb.Get(ctx, "queue:"+queue+":payload:"+taskID).Result()
-	if err == redis.Nil {
-		return TaskView{TaskID: taskID, Exists: false}, nil
-	}
+	ti, err := admin.InspectTask(ctx, queue, taskID)
 	if err != nil {
 		return TaskView{}, err
 	}
-	part, _ := rdb.Get(ctx, "queue:"+queue+":partition:"+taskID).Result()
-	prio, _ := rdb.Get(ctx, "queue:"+queue+":priority:"+taskID).Result()
-	headers, _ := rdb.HGetAll(ctx, "queue:"+queue+":headers:"+taskID).Result()
-	if len(headers) == 0 {
-		headers = nil
+	tv := TaskView{
+		TaskID: taskID, Exists: ti.Exists, Payload: ti.Payload, Headers: ti.Headers,
+		Partition: ti.Partition, Priority: ti.Priority, RejectCount: ti.RejectCount,
+		Step: ti.Step, State: ti.State,
 	}
-	return TaskView{
-		TaskID:    taskID,
-		Payload:   payload,
-		Headers:   headers,
-		Partition: part,
-		Priority:  prio,
-		Exists:    true,
+	if ti.Progress != nil {
+		tv.Progress = &StepProgressUI{
+			Name: ti.Progress.Name, Curr: ti.Progress.Curr, Total: ti.Progress.Total,
+			UnknownTotal: ti.Progress.UnknownTotal, StartedMs: ti.Progress.StartedMs,
+			Control: ti.Progress.Control,
+		}
+	}
+	return tv, nil
+}
+
+// ListMessages — peek ≤50 (tag / query / SCAN).
+func (a *App) ListMessages(queue string, db int, tag, query string) (MessageListResult, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return MessageListResult{}, err
+	}
+	ctx, cancel := a.beginList(30 * time.Second)
+	defer cancel()
+	items, err := admin.ListMessages(ctx, queue, redisqueue.ListMessagesOptions{
+		Tag: tag, Query: query, Limit: redisqueue.MaxListMessages,
+	})
+	if err != nil {
+		return MessageListResult{}, err
+	}
+	out := make([]MessageRow, 0, len(items))
+	for _, m := range items {
+		row := MessageRow{
+			ID: m.ID, Partition: m.Partition, State: m.State,
+			RejectCount: m.RejectCount, Step: m.Step,
+		}
+		if m.Progress != nil {
+			row.Progress = &StepProgressUI{
+				Name: m.Progress.Name, Curr: m.Progress.Curr, Total: m.Progress.Total,
+				UnknownTotal: m.Progress.UnknownTotal, StartedMs: m.Progress.StartedMs,
+				Control: m.Progress.Control,
+			}
+		}
+		out = append(out, row)
+	}
+	return MessageListResult{
+		Messages: out, Limit: redisqueue.MaxListMessages,
+		Truncated: len(out) >= redisqueue.MaxListMessages,
 	}, nil
+}
+
+// ListRegistryTasks — catalog+run для очереди (все namespace).
+func (a *App) ListRegistryTasks(queue string, db int, query string) ([]RegistryTaskRow, error) {
+	rdb, err := a.clientForDB(db)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := a.beginList(30 * time.Second)
+	defer cancel()
+	views, err := tasks.ListForQueue(ctx, rdb, queue)
+	if err != nil {
+		return nil, err
+	}
+	views = tasks.FilterQuery(views, query)
+	out := make([]RegistryTaskRow, 0, len(views))
+	for _, v := range views {
+		row := RegistryTaskRow{
+			Namespace: v.Namespace, Name: v.Name, Queue: v.Queue,
+			IntervalSec: v.IntervalSec, Run: v.Run,
+		}
+		for _, arg := range v.Args {
+			row.Args = append(row.Args, tasksArgDef{
+				Name: arg.Name, Type: arg.Type, Default: arg.Default, Help: arg.Help,
+			})
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
+// EnqueueRegistryTask — Publish Name или Name~rand (bypassLock).
+func (a *App) EnqueueRegistryTask(queue, name, payloadJSON string, bypassLock bool, db int) (string, error) {
+	rdb, err := a.clientForDB(db)
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), dbScanTimeout)
+	defer cancel()
+	id := name
+	if bypassLock {
+		b := make([]byte, 4)
+		if _, err := rand.Read(b); err != nil {
+			return "", err
+		}
+		id = name + "~" + hex.EncodeToString(b)
+	}
+	p := redisqueue.NewProducer(rdb, queue)
+	payload := []byte(payloadJSON)
+	if len(payload) == 0 {
+		payload = []byte("{}")
+	}
+	if err := p.Publish(ctx, &redisqueue.Task{ID: id, Payload: payload}); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
+// SetTaskStepControl — pause|stop|"" на step.
+func (a *App) SetTaskStepControl(queue, taskID, control string, db int) error {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(a.ctxOrBackground(), dbScanTimeout)
+	defer cancel()
+	return admin.SetTaskStepControl(ctx, queue, taskID, control)
 }
 
 func (a *App) CountByTag(queue, tag string, db int) (int64, error) {

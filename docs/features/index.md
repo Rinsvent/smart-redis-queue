@@ -18,7 +18,8 @@
 | zstd | Меньше памяти Redis на крупных payload | [Сжатие / метрики](compression-stats.md) |
 | Stats | get/ack/reject в Redis и в UI | [Сжатие / метрики](compression-stats.md) |
 | Шардинг | Несколько Redis, sticky ByGroup/ByManual | [Шардинг](../sharding.md) |
-| Step recovery | Checkpoint шагов handler (`NewSteps`) | [Step recovery](step-recovery.md) |
+| Step recovery | Checkpoint шагов handler (`NewSteps`) + progress | [Step recovery](step-recovery.md) |
+| Tasks | Каталог команд, cron, last-run, pause/stop (рядом с очередью) | [Tasks](tasks.md) |
 | Headers | Мета между попытками (ошибки и т.п.) | [Headers](headers.md) |
 | Exchange | direct / fanout / topic → копии в N очередей | [Exchange](exchange.md) |
 | Journal | Durable ingress (kafka/pg/mongo) + recovery | [Journal](journal.md) |

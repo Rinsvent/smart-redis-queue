@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Alert,
   AppBar,
+  Autocomplete,
   Box,
   Button,
   ButtonBase,
@@ -53,6 +54,10 @@ import MoreVertIcon from '@mui/icons-material/MoreVert'
 import RefreshIcon from '@mui/icons-material/Refresh'
 import SortByAlphaIcon from '@mui/icons-material/SortByAlpha'
 import SwapVertIcon from '@mui/icons-material/SwapVert'
+import PauseIcon from '@mui/icons-material/Pause'
+import PlayArrowIcon from '@mui/icons-material/PlayArrow'
+import ReplayIcon from '@mui/icons-material/Replay'
+import StopIcon from '@mui/icons-material/Stop'
 import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined'
 import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined'
 import { api } from './api'
@@ -141,7 +146,31 @@ const VIEW_MODES = [
   { id: 'partitions', label: 'Partitions' },
   { id: 'groups', label: 'Groups' },
   { id: 'tags', label: 'Tags' },
+  { id: 'messages', label: 'Messages' },
+  { id: 'tasks', label: 'Tasks' },
 ]
+
+function formatProgress(p) {
+  if (!p) return '—'
+  const tot = p.unknownTotal || !p.total ? '?' : p.total
+  let s = `${p.curr}/${tot}`
+  if (p.control) s += ` !${p.control}`
+  return s
+}
+
+function taskStepRaw(t) {
+  return t?.run?.progress || t?.run?.step || ''
+}
+
+function isTaskInProgress(t) {
+  if (t?.run?.status === 'running') return true
+  const raw = taskStepRaw(t)
+  return raw.includes('#')
+}
+
+function isTaskPaused(t) {
+  return taskStepRaw(t).includes('!pause')
+}
 
 const POLL_PRESETS = [
   { label: 'Off', ms: 0 },
@@ -257,6 +286,8 @@ export default function App() {
   const [detail, setDetail] = useState(null)
 
   const [viewMode, setViewMode] = useState('partitions')
+  /** Режим, к которому относятся текущие `rows` — не рисуем чужие строки при смене select. */
+  const [rowsMode, setRowsMode] = useState('partitions')
   const [listScope, setListScope] = useState('all') // all | blocked | locked
   const [rows, setRows] = useState([])
   const [poisonRows, setPoisonRows] = useState([])
@@ -267,6 +298,9 @@ export default function App() {
   const [listTruncated, setListTruncated] = useState(false)
   const [listFilter, setListFilter] = useState('')
   const [listFilterDraft, setListFilterDraft] = useState('')
+  const [msgTagDraft, setMsgTagDraft] = useState('')
+  const [msgTagFilter, setMsgTagFilter] = useState('')
+  const [msgTagOptions, setMsgTagOptions] = useState([])
   const [tagsCount, setTagsCount] = useState(null)
   const [tagsCounting, setTagsCounting] = useState(false)
   const [chartOpen, setChartOpen] = useState(() => localStorage.getItem(CHART_OPEN_KEY) !== '0')
@@ -298,6 +332,12 @@ export default function App() {
   const [payloadOpen, setPayloadOpen] = useState(false)
   const [payloadId, setPayloadId] = useState('')
   const [payloadResult, setPayloadResult] = useState(null)
+
+  const [taskRunOpen, setTaskRunOpen] = useState(false)
+  const [taskRunName, setTaskRunName] = useState('')
+  const [taskRunArgs, setTaskRunArgs] = useState({})
+  const [taskRunBypass, setTaskRunBypass] = useState(false)
+  const [taskRunBusy, setTaskRunBusy] = useState(false)
 
   const [tagOpen, setTagOpen] = useState(false)
   const [tagMode, setTagMode] = useState('count')
@@ -347,6 +387,7 @@ export default function App() {
     bumpQueryGen()
     setDetail(null)
     setRows([])
+    setRowsMode(viewMode)
     setListTotal(0)
     setListTruncated(false)
     setTagsCount(null)
@@ -391,7 +432,11 @@ export default function App() {
       ? 'Filter groups (glob * ?)'
       : viewMode === 'tags'
         ? 'Filter tags (glob * ?)'
-        : 'Filter partitions (glob * ?)'
+        : viewMode === 'messages'
+          ? 'Task id / substring (exact id = one row)'
+          : viewMode === 'tasks'
+            ? 'Filter task names'
+            : 'Filter partitions (glob * ?)'
 
   const loadConnections = useCallback(async () => {
     try {
@@ -464,8 +509,10 @@ export default function App() {
   const loadList = useCallback(async () => {
     if (!selectedQueue) {
       setRows([])
+      setRowsMode(viewMode)
       setListTotal(0)
       setListTruncated(false)
+      setListLoading(false)
       return
     }
     const gen = queryGen.current
@@ -473,6 +520,8 @@ export default function App() {
     const db = activeDb
     const mode = viewMode
     const filter = listFilter
+    const tag = msgTagFilter
+    const scope = listScope
     setListLoading(true)
     try {
       let nextRows = []
@@ -480,7 +529,7 @@ export default function App() {
       let nextTrunc = false
       if (mode === 'groups') {
         const r =
-          listScope === 'blocked'
+          scope === 'blocked'
             ? await api.listBlockedGroups(q, db)
             : await api.listGroups(q, db, filter)
         nextRows = r?.groups || []
@@ -491,12 +540,22 @@ export default function App() {
         nextRows = r?.tags || []
         nextTotal = 0
         nextTrunc = !!r?.truncated
-      } else if (listScope === 'blocked') {
+      } else if (mode === 'messages') {
+        const r = await api.listMessages(q, db, tag, filter)
+        nextRows = r?.messages || []
+        nextTotal = nextRows.length
+        nextTrunc = !!r?.truncated
+      } else if (mode === 'tasks') {
+        const r = await api.listRegistryTasks(q, db, filter)
+        nextRows = r || []
+        nextTotal = nextRows.length
+        nextTrunc = false
+      } else if (scope === 'blocked') {
         const r = await api.listBlockedPartitions(q, db)
         nextRows = r?.partitions || []
         nextTotal = r?.total || 0
         nextTrunc = !!r?.truncated
-      } else if (listScope === 'locked') {
+      } else if (scope === 'locked') {
         const r = await api.listLockedPartitions(q, db)
         nextRows = r?.partitions || []
         nextTotal = r?.total || 0
@@ -511,18 +570,20 @@ export default function App() {
       setObsMode('list')
       setPoisonRows([])
       setRows(nextRows)
+      setRowsMode(mode)
       setListTotal(nextTotal)
       setListTruncated(nextTrunc)
     } catch (e) {
       if (isStale(gen, q, db, mode) || isCanceled(e)) return
       notify(String(e), 'error')
       setRows([])
+      setRowsMode(mode)
       setListTotal(0)
       setListTruncated(false)
     } finally {
       if (!isStale(gen, q, db, mode)) setListLoading(false)
     }
-  }, [selectedQueue, activeDb, listFilter, viewMode, listScope])
+  }, [selectedQueue, activeDb, listFilter, msgTagFilter, viewMode, listScope])
 
   const loadRaceLocks = useCallback(async () => {
     if (!selectedQueue) {
@@ -601,13 +662,13 @@ export default function App() {
     }
   }, [queues, selectedQueue, activeDb])
 
-  // Загрузка + poll; устаревшие ответы режет isStale / CancelQueries.
+  // Detail / race locks + poll. Список — отдельным эффектом (ниже), чтобы смена
+  // viewMode не терялась и не гонялась с beginList-отменами.
   useEffect(() => {
     if (!selectedQueue) return undefined
     const item = queues.find((q) => q.name === selectedQueue)
     if (!item?.dbs?.includes(activeDb)) return undefined
     loadDetail()
-    loadList()
     loadRaceLocks()
     if (pollRef.current) clearInterval(pollRef.current)
     if (pollMs > 0) {
@@ -621,6 +682,14 @@ export default function App() {
       if (pollRef.current) clearInterval(pollRef.current)
     }
   }, [queues, selectedQueue, activeDb, loadDetail, loadList, loadRaceLocks, pollMs])
+
+  // Список: очередь / DB / режим / фильтры.
+  useEffect(() => {
+    if (!selectedQueue) return
+    const item = queues.find((q) => q.name === selectedQueue)
+    if (!item?.dbs?.includes(activeDb)) return
+    loadList()
+  }, [viewMode, listScope, listFilter, msgTagFilter, selectedQueue, activeDb, queues, loadList])
 
   useEffect(() => {
     localStorage.setItem('srq-theme', themeMode)
@@ -746,9 +815,10 @@ export default function App() {
       if (!ok) return // нет srq:queues / очереди в индексе — не рисуем total
       const n = Number(d?.total ?? d?.Total) || 0
       const sec = Math.floor(Date.now() / 1000)
-      const keepSec = chartWindowSec > 0 ? chartWindowSec : 86400
+      // Держим запас шире окна, чтобы слева 1m/5m был seed для forward/backfill, а не «обрыв в 0».
+      const keepSec = Math.max(chartWindowSec > 0 ? chartWindowSec * 2 : 86400, 600)
       setTotalSeries((prev) => {
-        const arr = [...prev, { sec, n }]
+        const arr = [...prev.filter((p) => p.sec !== sec), { sec, n }]
         const cutoff = sec - keepSec
         return arr.filter((p) => p.sec >= cutoff)
       })
@@ -854,6 +924,33 @@ export default function App() {
       if (filterTimer.current) clearTimeout(filterTimer.current)
     }
   }, [listFilterDraft])
+
+  useEffect(() => {
+    const t = setTimeout(() => setMsgTagFilter(msgTagDraft.trim()), 300)
+    return () => clearTimeout(t)
+  }, [msgTagDraft])
+
+  // Подсказки тегов для messages (autocomplete).
+  useEffect(() => {
+    if (viewMode !== 'messages' || !selectedQueue) {
+      setMsgTagOptions([])
+      return undefined
+    }
+    let cancelled = false
+    ;(async () => {
+      try {
+        const r = await api.listTags(selectedQueue, activeDb, '')
+        if (!cancelled) {
+          setMsgTagOptions((r?.tags || []).map((x) => x.tag).filter(Boolean))
+        }
+      } catch {
+        if (!cancelled) setMsgTagOptions([])
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [viewMode, selectedQueue, activeDb])
 
   const selectedMeta = queues.find((q) => q.name === selectedQueue) || null
 
@@ -1058,25 +1155,26 @@ export default function App() {
     })
   }
 
+  const tableRows = rowsMode === viewMode ? rows : []
   const countLabel =
     viewMode === 'tags'
       ? tagsCount == null
         ? listTruncated
-          ? `${rows.length}+`
-          : String(rows.length)
+          ? `${tableRows.length}+`
+          : String(tableRows.length)
         : listTruncated
-          ? `${rows.length}/${tagsCount}`
+          ? `${tableRows.length}/${tagsCount}`
           : String(tagsCount)
       : listTruncated
-        ? `${rows.length}/${listTotal}`
+        ? `${tableRows.length}/${listTotal}`
         : String(listTotal)
   const countTitle =
     viewMode === 'tags'
       ? tagsCount == null
         ? 'Click calculate to count all tags'
-        : `Showing ${rows.length} of ${tagsCount}`
+        : `Showing ${tableRows.length} of ${tagsCount}`
       : listTruncated
-        ? `Showing ${rows.length} of ${listTotal}`
+        ? `Showing ${tableRows.length} of ${listTotal}`
         : `${listTotal} in Redis`
 
   const showQueueList = !isCompact || !selectedQueue
@@ -1550,21 +1648,22 @@ export default function App() {
                         <Select
                           value={viewMode}
                           onChange={(e) => {
+                            const next = e.target.value
+                            // Не cancelQueries: асинхронный cancel может убить новый beginList.
                             bumpQueryGen()
-                            try {
-                              api.cancelQueries()
-                            } catch {
-                              /* ignore */
-                            }
-                            setViewMode(e.target.value)
+                            setViewMode(next)
                             setListScope('all')
                             setObsMode('list')
                             setPoisonRows([])
                             setListFilterDraft('')
                             setListFilter('')
+                            setMsgTagDraft('')
+                            setMsgTagFilter('')
                             setRows([])
+                            setRowsMode(next)
                             setListTotal(0)
                             setListTruncated(false)
+                            setListLoading(true)
                             setTagsCount(null)
                           }}
                         >
@@ -1584,6 +1683,10 @@ export default function App() {
                               setListScope(e.target.value)
                               setObsMode('list')
                               setRows([])
+                              setRowsMode(viewMode)
+                              setListTotal(0)
+                              setListTruncated(false)
+                              setListLoading(true)
                             }}
                           >
                             <MenuItem value="all">All</MenuItem>
@@ -1602,6 +1705,41 @@ export default function App() {
                         disabled={listScope === 'blocked' || listScope === 'locked'}
                         onChange={(e) => setListFilterDraft(e.target.value)}
                       />
+                      {viewMode === 'messages' && (
+                        <Autocomplete
+                          size="small"
+                          freeSolo
+                          options={msgTagOptions}
+                          value={msgTagDraft}
+                          onInputChange={(_, v) => setMsgTagDraft(v || '')}
+                          onChange={(_, v) => setMsgTagDraft(typeof v === 'string' ? v : v || '')}
+                          sx={{ minWidth: 160, maxWidth: 220, flexShrink: 0 }}
+                          renderInput={(params) => (
+                            <TextField {...params} placeholder="Tag filter" />
+                          )}
+                        />
+                      )}
+                      {viewMode === 'tasks' && (
+                        <Button
+                          size="small"
+                          variant="contained"
+                          disabled={!selectedQueue || tableRows.length === 0}
+                          onClick={() => {
+                            const first = tableRows[0]
+                            setTaskRunName(first?.name || '')
+                            const defaults = {}
+                            ;(first?.args || []).forEach((a) => {
+                              defaults[a.name] = a.default || ''
+                            })
+                            setTaskRunArgs(defaults)
+                            setTaskRunBypass(false)
+                            setTaskRunOpen(true)
+                          }}
+                          sx={{ flexShrink: 0 }}
+                        >
+                          Run
+                        </Button>
+                      )}
                       {viewMode === 'partitions' && (
                         <>
                           <Tooltip title="Scan all partitions, show top 20 by pending">
@@ -1763,16 +1901,16 @@ export default function App() {
                           </TableRow>
                         </TableHead>
                         <TableBody>
-                          {rows.length === 0 ? (
+                          {tableRows.length === 0 ? (
                             <TableRow>
                               <TableCell colSpan={6}>
                                 <Typography variant="body2" color="text.secondary">
-                                  No partitions found
+                                  {listLoading ? 'Loading…' : 'No partitions found'}
                                 </Typography>
                               </TableCell>
                             </TableRow>
                           ) : (
-                            rows.map((p) => (
+                            tableRows.map((p) => (
                               <TableRow key={p.id}>
                                 <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
                                   {p.id}
@@ -1829,16 +1967,16 @@ export default function App() {
                           </TableRow>
                         </TableHead>
                         <TableBody>
-                          {rows.length === 0 ? (
+                          {tableRows.length === 0 ? (
                             <TableRow>
                               <TableCell colSpan={4}>
                                 <Typography variant="body2" color="text.secondary">
-                                  No groups found
+                                  {listLoading ? 'Loading…' : 'No groups found'}
                                 </Typography>
                               </TableCell>
                             </TableRow>
                           ) : (
-                            rows.map((g) => (
+                            tableRows.map((g) => (
                               <TableRow key={g.name}>
                                 <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
                                   {g.name}
@@ -1865,16 +2003,16 @@ export default function App() {
                           </TableRow>
                         </TableHead>
                         <TableBody>
-                          {rows.length === 0 ? (
+                          {tableRows.length === 0 ? (
                             <TableRow>
                               <TableCell colSpan={3}>
                                 <Typography variant="body2" color="text.secondary">
-                                  No tags found
+                                  {listLoading ? 'Loading…' : 'No tags found'}
                                 </Typography>
                               </TableCell>
                             </TableRow>
                           ) : (
-                            rows.map((t) => (
+                            tableRows.map((t) => (
                               <TableRow key={t.tag}>
                                 <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
                                   {t.tag}
@@ -1904,6 +2042,185 @@ export default function App() {
                                 </TableCell>
                               </TableRow>
                             ))
+                          )}
+                        </TableBody>
+                      </Table>
+                    )}
+
+                    {obsMode === 'list' && viewMode === 'messages' && (
+                      <Table size="small" stickyHeader>
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>ID</TableCell>
+                            <TableCell>State</TableCell>
+                            <TableCell align="right">Reject</TableCell>
+                            <TableCell>Progress</TableCell>
+                            <TableCell align="right">Open</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {tableRows.length === 0 ? (
+                            <TableRow>
+                              <TableCell colSpan={5}>
+                                <Typography variant="body2" color="text.secondary">
+                                  {listLoading
+                                    ? 'Loading…'
+                                    : 'No messages (try tag filter via exact id, or empty queue)'}
+                                </Typography>
+                              </TableCell>
+                            </TableRow>
+                          ) : (
+                            tableRows.map((m) => (
+                              <TableRow key={m.id}>
+                                <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                                  {m.id}
+                                </TableCell>
+                                <TableCell>{m.state}</TableCell>
+                                <TableCell align="right">{m.rejectCount || 0}</TableCell>
+                                <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                                  {formatProgress(m.progress)}
+                                </TableCell>
+                                <TableCell align="right">
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => {
+                                      setPayloadId(m.id)
+                                      setPayloadResult(null)
+                                      setPayloadOpen(true)
+                                      api
+                                        .getTaskPayload(selectedQueue, m.id, activeDb)
+                                        .then(setPayloadResult)
+                                        .catch((e) => notify(String(e), 'error'))
+                                    }}
+                                  >
+                                    <VisibilityOutlinedIcon fontSize="small" />
+                                  </IconButton>
+                                </TableCell>
+                              </TableRow>
+                            ))
+                          )}
+                        </TableBody>
+                      </Table>
+                    )}
+
+                    {obsMode === 'list' && viewMode === 'tasks' && (
+                      <Table size="small" stickyHeader>
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>Name</TableCell>
+                            <TableCell>NS</TableCell>
+                            <TableCell>Status</TableCell>
+                            <TableCell>Progress</TableCell>
+                            <TableCell align="right">Actions</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {tableRows.length === 0 ? (
+                            <TableRow>
+                              <TableCell colSpan={5}>
+                                <Typography variant="body2" color="text.secondary">
+                                  {listLoading
+                                    ? 'Loading…'
+                                    : 'No registered tasks for this queue (SyncCatalog from app)'}
+                                </Typography>
+                              </TableCell>
+                            </TableRow>
+                          ) : (
+                            tableRows.map((t) => {
+                              const inFlight = isTaskInProgress(t)
+                              const paused = isTaskPaused(t)
+                              return (
+                              <TableRow key={`${t.namespace}/${t.name}`}>
+                                <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                                  {t.name}
+                                </TableCell>
+                                <TableCell>{t.namespace}</TableCell>
+                                <TableCell>{t.run?.status || '—'}</TableCell>
+                                <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                                  {taskStepRaw(t) || '—'}
+                                </TableCell>
+                                <TableCell align="right">
+                                  <Stack direction="row" spacing={0} justifyContent="flex-end">
+                                    {!inFlight && (
+                                      <Tooltip title="Replay">
+                                        <IconButton
+                                          size="small"
+                                          onClick={async () => {
+                                            try {
+                                              const id = await api.enqueueRegistryTask(
+                                                selectedQueue,
+                                                t.name,
+                                                '{}',
+                                                false,
+                                                activeDb,
+                                              )
+                                              notify(`Enqueued ${id}`, 'success')
+                                              refreshSelected()
+                                            } catch (e) {
+                                              notify(String(e), 'error')
+                                            }
+                                          }}
+                                        >
+                                          <ReplayIcon fontSize="small" />
+                                        </IconButton>
+                                      </Tooltip>
+                                    )}
+                                    {inFlight && (
+                                      <Tooltip title={paused ? 'Resume' : 'Pause'}>
+                                        <IconButton
+                                          size="small"
+                                          onClick={async () => {
+                                            try {
+                                              await api.setTaskStepControl(
+                                                selectedQueue,
+                                                t.name,
+                                                paused ? '' : 'pause',
+                                                activeDb,
+                                              )
+                                              notify(paused ? 'resume' : 'pause', 'success')
+                                              refreshSelected()
+                                            } catch (e) {
+                                              notify(String(e), 'error')
+                                            }
+                                          }}
+                                        >
+                                          {paused ? (
+                                            <PlayArrowIcon fontSize="small" />
+                                          ) : (
+                                            <PauseIcon fontSize="small" />
+                                          )}
+                                        </IconButton>
+                                      </Tooltip>
+                                    )}
+                                    {inFlight && (
+                                      <Tooltip title="Stop">
+                                        <IconButton
+                                          size="small"
+                                          color="warning"
+                                          onClick={async () => {
+                                            try {
+                                              await api.setTaskStepControl(
+                                                selectedQueue,
+                                                t.name,
+                                                'stop',
+                                                activeDb,
+                                              )
+                                              notify('stop', 'success')
+                                              refreshSelected()
+                                            } catch (e) {
+                                              notify(String(e), 'error')
+                                            }
+                                          }}
+                                        >
+                                          <StopIcon fontSize="small" />
+                                        </IconButton>
+                                      </Tooltip>
+                                    )}
+                                  </Stack>
+                                </TableCell>
+                              </TableRow>
+                              )
+                            })
                           )}
                         </TableBody>
                       </Table>
@@ -2123,6 +2440,103 @@ export default function App() {
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setPayloadOpen(false)}>Close</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog
+        open={taskRunOpen}
+        onClose={() => !taskRunBusy && setTaskRunOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle>Run task</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 1 }}>
+            <Autocomplete
+              size="small"
+              options={tableRows}
+              value={tableRows.find((r) => r.name === taskRunName) || null}
+              onChange={(_, opt) => {
+                const name = opt?.name || ''
+                setTaskRunName(name)
+                const defaults = {}
+                ;(opt?.args || []).forEach((a) => {
+                  defaults[a.name] = a.default || ''
+                })
+                setTaskRunArgs(defaults)
+              }}
+              getOptionLabel={(opt) =>
+                opt?.namespace ? `${opt.name} (${opt.namespace})` : opt?.name || ''
+              }
+              isOptionEqualToValue={(a, b) =>
+                a?.name === b?.name && a?.namespace === b?.namespace
+              }
+              filterOptions={(opts, { inputValue }) => {
+                const q = inputValue.trim().toLowerCase()
+                if (!q) return opts
+                return opts.filter(
+                  (o) =>
+                    o.name?.toLowerCase().includes(q) ||
+                    o.namespace?.toLowerCase().includes(q),
+                )
+              }}
+              renderInput={(params) => (
+                <TextField {...params} label="Command" placeholder="Type to filter…" />
+              )}
+            />
+            {(tableRows.find((r) => r.name === taskRunName)?.args || []).map((a) => (
+              <TextField
+                key={a.name}
+                size="small"
+                fullWidth
+                label={a.name}
+                helperText={a.help || undefined}
+                value={taskRunArgs[a.name] ?? ''}
+                onChange={(e) =>
+                  setTaskRunArgs((prev) => ({ ...prev, [a.name]: e.target.value }))
+                }
+              />
+            ))}
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={taskRunBypass}
+                  onChange={(e) => setTaskRunBypass(e.target.checked)}
+                />
+              }
+              label="Bypass lock (parallel run with random suffix)"
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button disabled={taskRunBusy} onClick={() => setTaskRunOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            disabled={!taskRunName || taskRunBusy || !selectedQueue}
+            onClick={async () => {
+              setTaskRunBusy(true)
+              try {
+                const id = await api.enqueueRegistryTask(
+                  selectedQueue,
+                  taskRunName,
+                  JSON.stringify(taskRunArgs || {}),
+                  taskRunBypass,
+                  activeDb,
+                )
+                notify(`Enqueued ${id}`, 'success')
+                setTaskRunOpen(false)
+                refreshSelected()
+              } catch (e) {
+                notify(String(e), 'error')
+              } finally {
+                setTaskRunBusy(false)
+              }
+            }}
+          >
+            {taskRunBusy ? '…' : 'Run'}
+          </Button>
         </DialogActions>
       </Dialog>
 

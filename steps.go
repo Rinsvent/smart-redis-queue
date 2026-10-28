@@ -97,7 +97,7 @@ func newSteps(ctx context.Context, rdb *redis.Client, queueName, taskID string, 
 		s.active = true
 		return s, nil
 	}
-	name, curr, total, unk, started, hasProg := parseStepValue(raw)
+	name, curr, total, unk, started, hasProg, _ := parseStepValue(raw)
 	if hasProg {
 		// есть маркер прогресса → шаг не завершён
 		s.skipUntil = name
@@ -116,54 +116,108 @@ func newSteps(ctx context.Context, rdb *redis.Client, queueName, taskID string, 
 	return s, nil
 }
 
-// encodeStepValue — незавершённый прогресс. Имя лучше без '#' и '@'.
-func encodeStepValue(name string, curr, total int, unknownTotal bool, started time.Time) string {
+// StepControl — внешнее управление процессом (пишется в тот же step-ключ).
+const (
+	StepControlNone  = ""
+	StepControlPause = "pause"
+	StepControlStop  = "stop"
+)
+
+// ErrStepStopped — Advance/Flush увидел !stop в step-ключе.
+var ErrStepStopped = fmt.Errorf("steps: stopped")
+
+// StepCheckpoint — разобранное значение step-ключа.
+type StepCheckpoint struct {
+	Name         string
+	Curr, Total  int
+	UnknownTotal bool
+	Started      time.Time
+	HasProgress  bool
+	Control      string // "", "pause", "stop"
+}
+
+// ParseStepCheckpoint разбирает "name" | "name#3/10@ms" | "name#3/10@ms!pause".
+func ParseStepCheckpoint(v string) StepCheckpoint {
+	name, curr, total, unk, started, hp, ctrl := parseStepValue(v)
+	return StepCheckpoint{
+		Name: name, Curr: curr, Total: total, UnknownTotal: unk,
+		Started: started, HasProgress: hp, Control: ctrl,
+	}
+}
+
+// encodeStepValue — незавершённый прогресс (+ опциональный !control). Имя без '#'/'@'/'!'.
+func encodeStepValue(name string, curr, total int, unknownTotal bool, started time.Time, control string) string {
 	if started.IsZero() {
 		started = time.Now()
 	}
 	ms := started.UnixMilli()
+	var base string
 	if unknownTotal || total <= 0 {
-		return fmt.Sprintf("%s#%d/?@%d", name, curr, ms)
+		base = fmt.Sprintf("%s#%d/?@%d", name, curr, ms)
+	} else {
+		base = fmt.Sprintf("%s#%d/%d@%d", name, curr, total, ms)
 	}
-	return fmt.Sprintf("%s#%d/%d@%d", name, curr, total, ms)
+	control = normalizeStepControl(control)
+	if control != "" {
+		return base + "!" + control
+	}
+	return base
 }
 
-// parseStepValue: "name" | "name#3/10" | "name#3/?@ms" | "name#3/10@ms"
-func parseStepValue(v string) (name string, curr, total int, unknownTotal bool, started time.Time, hasProgress bool) {
-	if v == "" {
-		return "", 0, 0, false, time.Time{}, false
+func normalizeStepControl(c string) string {
+	switch strings.ToLower(strings.TrimSpace(c)) {
+	case StepControlPause:
+		return StepControlPause
+	case StepControlStop:
+		return StepControlStop
+	default:
+		return StepControlNone
 	}
+}
+
+// parseStepValue: "name" | "name#3/10" | "name#3/?@ms" | "name#3/10@ms!pause"
+func parseStepValue(v string) (name string, curr, total int, unknownTotal bool, started time.Time, hasProgress bool, control string) {
+	if v == "" {
+		return "", 0, 0, false, time.Time{}, false, ""
+	}
+	// control suffix: …@ms!pause
+	bang := strings.LastIndexByte(v, '!')
 	at := strings.LastIndexByte(v, '@')
 	body := v
+	if bang > at && bang > 0 {
+		control = normalizeStepControl(v[bang+1:])
+		body = v[:bang]
+	}
+	at = strings.LastIndexByte(body, '@')
 	if at > 0 {
-		if ms, err := strconv.ParseInt(v[at+1:], 10, 64); err == nil && ms > 0 {
+		if ms, err := strconv.ParseInt(body[at+1:], 10, 64); err == nil && ms > 0 {
 			started = time.UnixMilli(ms)
-			body = v[:at]
+			body = body[:at]
 		}
 	}
 	i := strings.LastIndexByte(body, '#')
 	if i < 0 {
-		return body, 0, 0, false, time.Time{}, false
+		return body, 0, 0, false, time.Time{}, false, control
 	}
 	rest := body[i+1:]
 	slash := strings.IndexByte(rest, '/')
 	if slash < 0 {
-		return body, 0, 0, false, time.Time{}, false
+		return body, 0, 0, false, time.Time{}, false, control
 	}
 	currStr, totStr := rest[:slash], rest[slash+1:]
 	c, err := strconv.Atoi(currStr)
 	if err != nil || c < 0 {
-		return body, 0, 0, false, time.Time{}, false
+		return body, 0, 0, false, time.Time{}, false, control
 	}
 	name = body[:i]
 	if totStr == "?" {
-		return name, c, 0, true, started, true
+		return name, c, 0, true, started, true, control
 	}
 	t, err := strconv.Atoi(totStr)
 	if err != nil || t < 0 {
-		return body, 0, 0, false, time.Time{}, false
+		return body, 0, 0, false, time.Time{}, false, control
 	}
-	return name, c, t, false, started, true
+	return name, c, t, false, started, true, control
 }
 
 // Last — имя checkpoint без суффикса прогресса.
@@ -184,6 +238,19 @@ func (s *StepRunner) LastProgress() (curr, total int, unknownTotal bool, started
 
 func (s *StepRunner) writeValue(ctx context.Context, value string) error {
 	return s.rdb.Set(ctx, stepKey(s.queue, s.taskID), value, s.ttl).Err()
+}
+
+// writeValueGet — SET value GET: атомарно пишет и возвращает предыдущее значение ("" если ключа не было).
+func (s *StepRunner) writeValueGet(ctx context.Context, value string) (old string, err error) {
+	args := redis.SetArgs{Get: true}
+	if s.ttl > 0 {
+		args.TTL = s.ttl
+	}
+	old, err = s.rdb.SetArgs(ctx, stepKey(s.queue, s.taskID), value, args).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return old, err
 }
 
 // Commit — шаг завершён (в ключе только имя, без #прогресса).
@@ -329,7 +396,8 @@ type StepProgress struct {
 	started    time.Time
 	flushEvery time.Duration
 	lastFlush  time.Time
-	dirty      bool // SetTotal / смена total — сбросить throttle
+	dirty      bool   // SetTotal / смена total — сбросить throttle
+	control    string // из step-ключа (!pause / !stop)
 }
 
 func (p *StepProgress) Current() int {
@@ -389,10 +457,22 @@ func (p *StepProgress) ETA() time.Duration {
 	return per * time.Duration(p.total-p.current)
 }
 
+// Control — текущий control из последнего flush (pause/stop/"").
+func (p *StepProgress) Control() string {
+	if p == nil {
+		return ""
+	}
+	return p.control
+}
+
 // Advance добавляет n (n<1 → 1) и при необходимости пишет в Redis.
+// При !pause в ключе — ждёт resume/stop; при !stop — ErrStepStopped.
 func (p *StepProgress) Advance(ctx context.Context, n int) error {
 	if p == nil || p.runner == nil {
 		return fmt.Errorf("steps: nil progress")
+	}
+	if err := p.applyControl(ctx); err != nil {
+		return err
 	}
 	if n < 1 {
 		n = 1
@@ -417,9 +497,28 @@ func (p *StepProgress) flush(ctx context.Context) error {
 	if p.started.IsZero() {
 		p.started = time.Now()
 	}
-	val := encodeStepValue(p.name, p.current, p.total, p.unknown, p.started)
-	if err := p.runner.writeValue(ctx, val); err != nil {
+	key := stepKey(p.runner.queue, p.runner.taskID)
+	if cur, err := p.runner.rdb.Get(ctx, key).Result(); err == nil {
+		_, _, _, _, _, _, ctrl := parseStepValue(cur)
+		p.control = ctrl
+	} else if err != redis.Nil {
 		return fmt.Errorf("step progress %q: %w", p.name, err)
+	}
+	val := encodeStepValue(p.name, p.current, p.total, p.unknown, p.started, p.control)
+	prev, err := p.runner.writeValueGet(ctx, val)
+	if err != nil {
+		return fmt.Errorf("step progress %q: %w", p.name, err)
+	}
+	if prev != "" {
+		_, _, _, _, _, _, prevCtrl := parseStepValue(prev)
+		if prevCtrl != p.control {
+			// UI успел сменить control между GET и SET — восстановим
+			p.control = prevCtrl
+			val = encodeStepValue(p.name, p.current, p.total, p.unknown, p.started, p.control)
+			if err := p.runner.writeValue(ctx, val); err != nil {
+				return fmt.Errorf("step progress %q: %w", p.name, err)
+			}
+		}
 	}
 	p.runner.last = p.name
 	p.runner.resumeProgress = true
@@ -428,7 +527,79 @@ func (p *StepProgress) flush(ctx context.Context) error {
 	p.runner.resumeUnknown = p.unknown
 	p.runner.resumeStarted = p.started
 	p.lastFlush = time.Now()
-	return nil
+	return p.applyControl(ctx)
+}
+
+func (p *StepProgress) applyControl(ctx context.Context) error {
+	for {
+		switch p.control {
+		case StepControlStop:
+			return ErrStepStopped
+		case StepControlPause:
+			if err := p.waitWhilePaused(ctx); err != nil {
+				return err
+			}
+			continue
+		default:
+			return nil
+		}
+	}
+}
+
+func (p *StepProgress) waitWhilePaused(ctx context.Context) error {
+	key := stepKey(p.runner.queue, p.runner.taskID)
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		raw, err := p.runner.rdb.Get(ctx, key).Result()
+		if err == redis.Nil {
+			p.control = StepControlNone
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("step progress pause poll: %w", err)
+		}
+		_, _, _, _, _, _, ctrl := parseStepValue(raw)
+		p.control = ctrl
+		switch ctrl {
+		case StepControlStop:
+			return ErrStepStopped
+		case StepControlPause:
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+			}
+		default:
+			return nil
+		}
+	}
+}
+
+// SetStepControl — UI/admin: выставить pause|stop|"" на существующий step (progress сохраняется).
+func SetStepControl(ctx context.Context, rdb *redis.Client, queueName, taskID, control string) error {
+	if rdb == nil {
+		return fmt.Errorf("steps: redis client is nil")
+	}
+	control = normalizeStepControl(control)
+	key := stepKey(queueName, taskID)
+	raw, err := rdb.Get(ctx, key).Result()
+	if err == redis.Nil {
+		return fmt.Errorf("steps: no step for %s/%s", queueName, taskID)
+	}
+	if err != nil {
+		return err
+	}
+	name, curr, total, unk, started, hp, _ := parseStepValue(raw)
+	if !hp {
+		// завершённый checkpoint — некуда вешать control
+		return fmt.Errorf("steps: step %q has no progress marker", name)
+	}
+	val := encodeStepValue(name, curr, total, unk, started, control)
+	return rdb.Set(ctx, key, val, 0).Err()
 }
 
 // Release удаляет checkpoint вручную.

@@ -84,7 +84,7 @@
 | `SetIdempotencyTtl` | Окно после Ack |
 | `SetRateLimit` | Rate limit на Get |
 | `SetConcurrencyTags` | `race!` |
-| `NewSteps` / `NewStepsRaw` / `Do` / `Begin` / `End` / `Progress` / `Commit` / `Last` / `LastProgress` / `Release` | Step recovery + progress bar (`name#3/10@ms`); имя шага из Begin/Do; см. [доку](../features/step-recovery.md) |
+| `NewSteps` / `NewStepsRaw` / `Do` / `Begin` / `End` / `Progress` / `Commit` / `Last` / `LastProgress` / `Release` / `SetStepControl` / `ParseStepCheckpoint` | Step recovery + progress (`name#3/10@ms[!pause]`); см. [доку](../features/step-recovery.md) |
 | `Task.Headers` / `SetHeader` / `SetHeaders` | Мета между попытками |
 | `SetStatsRetention` / `SetTagsStats` | Метрики |
 | `SetCheckDeadConsumerLocksOnGet` | Probe dead locks |
@@ -95,7 +95,9 @@
 
 ## Admin
 
-`ListQueues`, `ListQueueIndex`, `QueueDepth`, `QueueDepthIfIndexed`, `RebuildQueueDepth`, `Inspect`, `QueueOverview`, `ListPartitions`, `ListBlockedPartitions`, `ListLockedPartitions`, `ListGroups`, `ListBlockedGroups`, `ListRaceLocks`, `ScanTopPending`, `ScanHighReject`, `ListTags`, `CountTags`, `BlockGroups`, `BlockPartition`, `UnblockPartition`, `Remove`, `RemoveByTag`, `CountByTag`, `Purge`, `Retry`, `QueueStatsBounds`, `ListQueueStats`.
+`ListQueues`, `ListQueueIndex`, `QueueDepth`, `QueueDepthIfIndexed`, `RebuildQueueDepth`, `Inspect`, `QueueOverview`, `ListPartitions`, `ListBlockedPartitions`, `ListLockedPartitions`, `ListGroups`, `ListBlockedGroups`, `ListRaceLocks`, `ScanTopPending`, `ScanHighReject`, `ListTags`, `CountTags`, `ListMessages`, `InspectTask`, `SetTaskStepControl`, `BlockGroups`, `BlockPartition`, `UnblockPartition`, `Remove`, `RemoveByTag`, `CountByTag`, `Purge`, `Retry`, `QueueStatsBounds`, `ListQueueStats`.
+
+Пакет `tasks`: `New`, `Register`, `SyncCatalog`, `Dispatch`, `Enqueue`, `StartScheduler`, `ListForQueue` — см. [Tasks](../features/tasks.md).
 
 `srq:queues` — total очереди без SCAN партиций; UI сортирует alpha или по total. `QueueDepthIfIndexed` — ok=false если реестра/члена ещё нет (график total пропускает). Top pending / poison / locked — фоновые SCAN в Admin/UI, не hot path.
 

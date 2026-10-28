@@ -14,17 +14,24 @@
 
 Тип exchange (direct/fanout/topic) в Redis **не** хранится — алгоритм на продюсере. См. [Exchange](../features/exchange.md).
 
+| Ключ | Тип | Назначение |
+|------|-----|------------|
+| `srq:tasks:namespaces` | SET | Зарегистрированные namespace (SyncCatalog) |
+| `srq:tasks:{ns}:catalog` | HASH | Схема Tasks (name → JSON); см. [Tasks](../features/tasks.md) |
+| `srq:tasks:{ns}:run:{name}` | HASH | Last-run status / progress mirror |
+
 Префикс очереди: `queue:{name}:…`
 
 | Ключ | Тип | Назначение |
 |------|-----|------------|
 | `partitions` | SET | Известные партиции |
-| `partition:{p}` | ZSET | Ожидающие задачи |
+| `partition:{part}:{prio}` | ZSET | Ожидающие задачи (score = scheduled ms) |
+| `partition:{part}:priorities` | ZSET | Известные priority для партиции |
 | `payload:{id}` | STRING | Тело задачи / маркер идемпотентности |
-| `step:{id}` | STRING | Checkpoint step: `name` (готово) или `name#curr/total@startedMs` / `name#curr/?@ms` (в процессе); чистится на Ack/Remove |
+| `step:{id}` | STRING | Checkpoint: `name` или `name#curr/total@startedMs[!pause\|!stop]`; чистится на Ack/Remove |
 | `headers:{id}` | HASH | Мета между попытками; чистится на Ack/Remove |
-| `consumers` | HASH | Heartbeat consumer’ов |
-| `consumer:{cid}:tasks` | SET | In-progress у consumer |
+| `consumers` | SET | ID consumer’ов |
+| `consumer:{cid}:tasks` | HASH | In-progress: taskId → score |
 | `groups` | ZSET | Группы; score ≤ now — свободна |
 | `group:{g}:ready` | ZSET / SET | Ready партиции группы |
 | `blocked` | ZSET | Заблокированные партиции |
