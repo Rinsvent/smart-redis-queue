@@ -88,3 +88,76 @@ func TestBaseName(t *testing.T) {
 		t.Fatal()
 	}
 }
+
+func TestCronParseAndTwoOptionDefs(t *testing.T) {
+	next, err := NextRunAfter("*/5 * * * *", time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
+	if err != nil || next.Minute()%5 != 0 {
+		t.Fatalf("next=%v err=%v", next, err)
+	}
+
+	rdb := testRDB(t)
+	ctx := context.Background()
+	reg, _ := New(rdb, Config{Namespace: "svc2", DefaultQueue: "q"})
+	h := func(ctx context.Context, inv Invocation) error { return nil }
+	if err := reg.Register(Def{
+		Name: "full", Cron: "0 3 * * *", ByOptions: true, Concurrency: ConcurrencyForbid,
+		Args: []ArgDef{{Name: "mode", Default: "full"}}, Handle: h,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Register(Def{
+		Name: "delta", Cron: "*/15 * * * *", ByOptions: true, Concurrency: ConcurrencyAfter,
+		Args: []ArgDef{{Name: "mode", Default: "delta"}}, Handle: h,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.SyncCatalog(ctx); err != nil {
+		t.Fatal(err)
+	}
+	ents, _ := CatalogForQueue(ctx, rdb, "svc2", "q")
+	if len(ents) != 2 {
+		t.Fatalf("ents=%d", len(ents))
+	}
+	var sawAfter, sawByOpts bool
+	for _, e := range ents {
+		if e.ByOptions {
+			sawByOpts = true
+		}
+		if e.Concurrency == ConcurrencyAfter {
+			sawAfter = true
+		}
+		if e.Cron == "" {
+			t.Fatalf("missing cron: %+v", e)
+		}
+	}
+	if !sawAfter || !sawByOpts {
+		t.Fatalf("catalog flags: %+v", ents)
+	}
+}
+
+func TestConcurrencyAfterPendingRerun(t *testing.T) {
+	rdb := testRDB(t)
+	ctx := context.Background()
+	reg, _ := New(rdb, Config{Namespace: "svc3", DefaultQueue: "q"})
+	reg.SetProducer("q", redisqueue.NewProducer(rdb, "q"))
+	n := 0
+	_ = reg.Register(Def{
+		Name: "job", Cron: "* * * * *", Concurrency: ConcurrencyAfter,
+		Handle: func(ctx context.Context, inv Invocation) error {
+			n++
+			return nil
+		},
+	})
+	// simulate lock held + pending
+	_ = rdb.Set(ctx, "queue:q:payload:job", "{}", 0).Err()
+	_ = rdb.HSet(ctx, runKey("svc3", "job"), "pending_rerun", "1").Err()
+	// finish dispatch path for pending without holding lock on re-enqueue:
+	_ = rdb.Del(ctx, "queue:q:payload:job").Err()
+	d, _ := reg.def("job")
+	if err := reg.flushPendingRerun(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	if n := rdb.Exists(ctx, "queue:q:payload:job").Val(); n != 1 {
+		t.Fatalf("expected re-enqueue, exists=%d", n)
+	}
+}

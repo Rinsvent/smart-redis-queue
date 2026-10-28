@@ -31,17 +31,29 @@ type ArgDef struct {
 type CatalogEntry struct {
 	Name        string   `json:"name"`
 	Queue       string   `json:"queue"`
-	IntervalSec float64  `json:"interval_sec,omitempty"`
+	Cron        string   `json:"cron,omitempty"` // standard 5-field cron
+	Concurrency string   `json:"concurrency,omitempty"`
+	ByOptions   bool     `json:"by_options,omitempty"`
+	BypassLock  bool     `json:"bypass_lock,omitempty"`
 	Args        []ArgDef `json:"args,omitempty"`
+	// IntervalSec — deprecated; читается только как fallback в UI/старых каталогах.
+	IntervalSec float64 `json:"interval_sec,omitempty"`
 }
 
-// Def — регистрация обработчика.
+// Def — регистрация обработчика (+ опциональный cron-schedule).
+// Две команды с разными опциями = два Register с разными Name/Args (и ByOptions).
 type Def struct {
-	Name     string
-	Queue    string // "" → Config.DefaultQueue
+	Name        string
+	Queue       string // "" → Config.DefaultQueue
+	Cron        string // "*/5 * * * *"; пусто = только вручную/UI
+	Concurrency string // forbid|after|allow
+	ByOptions   bool
+	BypassLock  bool
+	Args        []ArgDef
+	Handle      Handler
+
+	// Interval — deprecated; если Cron пуст и Interval>0 → синтетический "@every".
 	Interval time.Duration
-	Args     []ArgDef
-	Handle   Handler
 }
 
 // Invocation — вызов handler из Dispatch.
@@ -109,6 +121,16 @@ func (r *Registry) Register(d Def) error {
 	if d.Queue == "" {
 		return fmt.Errorf("tasks: %q empty queue (set Def.Queue or Config.DefaultQueue)", d.Name)
 	}
+	d.Concurrency = normalizeConcurrency(d.Concurrency)
+	if d.Cron == "" && d.Interval > 0 {
+		// совместимость: был Interval → @every
+		d.Cron = "@every " + d.Interval.String()
+	}
+	if d.Cron != "" {
+		if _, err := parseCron(d.Cron); err != nil {
+			return fmt.Errorf("tasks: %q cron: %w", d.Name, err)
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, ok := r.defs[d.Name]; ok {
@@ -153,10 +175,9 @@ func (r *Registry) SyncCatalog(ctx context.Context) error {
 	pipe.SAdd(ctx, namespacesKey(), r.cfg.Namespace)
 	for _, d := range r.defs {
 		ent := CatalogEntry{
-			Name: d.Name, Queue: d.Queue, Args: d.Args,
-		}
-		if d.Interval > 0 {
-			ent.IntervalSec = d.Interval.Seconds()
+			Name: d.Name, Queue: d.Queue, Cron: d.Cron,
+			Concurrency: d.Concurrency, ByOptions: d.ByOptions,
+			BypassLock: d.BypassLock, Args: d.Args,
 		}
 		b, err := json.Marshal(ent)
 		if err != nil {
@@ -234,10 +255,29 @@ func (r *Registry) Dispatch(ctx context.Context, task *redisqueue.Task) error {
 	err := d.Handle(ctx, inv)
 	if err != nil {
 		_ = r.markRun(ctx, base, "error", err.Error(), "")
+		_ = r.flushPendingRerun(ctx, d)
 		return err
 	}
 	_ = r.markRun(ctx, base, "ok", "", "")
+	_ = r.flushPendingRerun(ctx, d)
 	return nil
+}
+
+func (r *Registry) flushPendingRerun(ctx context.Context, d *Def) error {
+	if d == nil || normalizeConcurrency(d.Concurrency) != ConcurrencyAfter {
+		return nil
+	}
+	key := runKey(r.cfg.Namespace, d.Name)
+	v, err := r.rdb.HGet(ctx, key, "pending_rerun").Result()
+	if err != nil || v != "1" {
+		return nil
+	}
+	_ = r.rdb.HDel(ctx, key, "pending_rerun").Err()
+	_, err = r.Enqueue(ctx, d.Name, RunOptions{
+		BypassLock: d.BypassLock,
+		ByOptions:  d.ByOptions,
+	})
+	return err
 }
 
 func argsFromTask(ctx context.Context, task *redisqueue.Task, schema []ArgDef) map[string]string {
@@ -288,11 +328,21 @@ func (r *Registry) markRun(ctx context.Context, name, status, lastErr, progress 
 
 // MirrorProgress пишет progress/step в run HASH (для UI после mid-flight).
 func (r *Registry) MirrorProgress(ctx context.Context, name, stepRaw string) error {
-	return r.rdb.HSet(ctx, runKey(r.cfg.Namespace, name), map[string]interface{}{
+	fields := map[string]interface{}{
 		"progress": stepRaw,
 		"step":     stepRaw,
 		"status":   "running",
-	}).Err()
+	}
+	cp := redisqueue.ParseStepCheckpoint(stepRaw)
+	if cp.Control == redisqueue.StepControlPause {
+		cur, _ := r.rdb.HGet(ctx, runKey(r.cfg.Namespace, name), "paused_at").Result()
+		if cur == "" {
+			fields["paused_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+		}
+	} else {
+		fields["paused_at"] = ""
+	}
+	return r.rdb.HSet(ctx, runKey(r.cfg.Namespace, name), fields).Err()
 }
 
 // RunOptions — ручной/UI Publish.
@@ -332,17 +382,60 @@ func (r *Registry) Enqueue(ctx context.Context, name string, opts RunOptions) (t
 	return id, nil
 }
 
-// defaultArgsPayload — только defaults из схемы (для scheduler).
-func defaultArgsPayload(d *Def) []byte {
+func defaultArgsMap(d *Def) map[string]string {
 	m := map[string]string{}
 	for _, a := range d.Args {
 		m[a.Name] = a.Default
 	}
-	b, _ := json.Marshal(m)
-	return b
+	return m
 }
 
-// StartScheduler — тик 1s; Interval из конфига Def; payload = defaults схемы.
+func (r *Registry) setNextRun(ctx context.Context, name string, next time.Time) {
+	_ = r.rdb.HSet(ctx, runKey(r.cfg.Namespace, name), "next_run_at", next.UTC().Format(time.RFC3339Nano)).Err()
+}
+
+func (r *Registry) scheduleTick(ctx context.Context, d *Def, now time.Time, nextDue map[string]time.Time) {
+	sched, err := parseCron(d.Cron)
+	if err != nil {
+		return
+	}
+	due, ok := nextDue[d.Name]
+	if !ok || due.IsZero() {
+		due = sched.Next(now.Add(-time.Second))
+		nextDue[d.Name] = due
+		r.setNextRun(ctx, d.Name, due)
+	}
+	if now.Before(due) {
+		return
+	}
+	// тик наступил
+	next := sched.Next(now)
+	nextDue[d.Name] = next
+	r.setNextRun(ctx, d.Name, next)
+
+	pol := normalizeConcurrency(d.Concurrency)
+	bypass := d.BypassLock || pol == ConcurrencyAllow
+	_, err = r.Enqueue(ctx, d.Name, RunOptions{
+		Args:       defaultArgsMap(d),
+		BypassLock: bypass,
+		ByOptions:  d.ByOptions && !bypass,
+	})
+	if err == nil {
+		return
+	}
+	if !isAlreadyExists(err) {
+		return
+	}
+	// уже in-flight / в очереди
+	switch pol {
+	case ConcurrencyAfter:
+		_ = r.rdb.HSet(ctx, runKey(r.cfg.Namespace, d.Name), "pending_rerun", "1").Err()
+	case ConcurrencyForbid, ConcurrencyAllow:
+		// allow уже ушёл с bypass; forbid — просто ждём следующего cron
+	}
+}
+
+// StartScheduler — тик 1s; Cron из Def; payload = defaults схемы.
 func (r *Registry) StartScheduler(parent context.Context) {
 	if r.schedStop != nil {
 		return
@@ -354,7 +447,7 @@ func (r *Registry) StartScheduler(parent context.Context) {
 		defer r.schedWG.Done()
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
-		last := map[string]time.Time{}
+		nextDue := map[string]time.Time{}
 		for {
 			select {
 			case <-ctx.Done():
@@ -363,26 +456,13 @@ func (r *Registry) StartScheduler(parent context.Context) {
 				r.mu.RLock()
 				defs := make([]*Def, 0, len(r.defs))
 				for _, d := range r.defs {
-					if d.Interval > 0 {
+					if d.Cron != "" {
 						defs = append(defs, d)
 					}
 				}
 				r.mu.RUnlock()
 				for _, d := range defs {
-					prev := last[d.Name]
-					if !prev.IsZero() && now.Sub(prev) < d.Interval {
-						continue
-					}
-					p, err := r.producer(d.Queue)
-					if err != nil {
-						continue
-					}
-					task := &redisqueue.Task{ID: d.Name, Payload: defaultArgsPayload(d)}
-					pubErr := p.Publish(ctx, task)
-					if pubErr == nil || isAlreadyExists(pubErr) {
-						last[d.Name] = now
-					}
-					// lock / already in flight — ок, ждём следующий интервал после due
+					r.scheduleTick(ctx, d, now, nextDue)
 				}
 			}
 		}

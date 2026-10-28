@@ -1,6 +1,6 @@
 # Tasks (control-plane)
 
-Рядом с очередями: каталог команд, scheduler из конфига, last-run, pause/stop через step-ключ. Очередь — только транспорт + anti-dupe по ID.
+Рядом с очередями: каталог команд, cron-scheduler, last-run, pause/stop через step-ключ. Очередь — только транспорт + anti-dupe по ID.
 
 ## Идея
 
@@ -16,47 +16,61 @@
 ```go
 reg, _ := tasks.New(rdb, tasks.Config{
     Namespace:    "billing",
-    DefaultQueue: "billing-cron", // не писать Queue в каждом Def
+    DefaultQueue: "billing-cron",
+})
+
+// две «команды» с разными опциями = два Def (разные Name/Args + ByOptions)
+_ = reg.Register(tasks.Def{
+    Name: "import_full",
+    Cron: "0 3 * * *",
+    Concurrency: tasks.ConcurrencyForbid, // skip если ещё бежит
+    ByOptions: true,
+    Args: []tasks.ArgDef{{Name: "mode", Default: "full"}},
+    Handle: importHandle,
 })
 _ = reg.Register(tasks.Def{
-    Name:     "import",
-    Interval: time.Hour, // 0 = только вручную из UI
-    Args:     []tasks.ArgDef{{Name: "day", Default: "1"}},
-    Handle: func(ctx context.Context, inv tasks.Invocation) error {
-        // Steps + Progress; TrackStep после Advance при желании
-        return nil
-    },
+    Name: "import_delta",
+    Cron: "*/15 * * * *",
+    Concurrency: tasks.ConcurrencyAfter, // если тик при живом локе — повтор после End
+    ByOptions: true,
+    Args: []tasks.ArgDef{{Name: "mode", Default: "delta"}},
+    Handle: importHandle,
 })
+
 reg.SetProducer("billing-cron", producer)
 _ = reg.SyncCatalog(ctx)
 reg.StartScheduler(ctx)
 // pool.Consume → reg.Dispatch(ctx, task)
 ```
 
-Scheduler шлёт payload **только из defaults схемы** — last args из UI cron не перебивают.
+Scheduler шлёт payload **только из defaults** схемы Args. UI last-args cron не перебивают.
+
+## Concurrency (когда тик наступил, а задача ещё жива)
+
+| Режим | Поведение |
+|-------|-----------|
+| `forbid` (default) | Пропустить тик (лок payload) |
+| `after` | `pending_rerun=1` → после Dispatch Enqueue ещё раз |
+| `allow` | Тик с `~r` (параллельный прогон) |
+
+**Почему не debounce:** `deb!` = перезапись payload in-flight и повтор после Ack с *новым* телом (latest-wins). `after` = один отложенный прогон теми же defaults schedule, без параллели и без смены payload.
+
+## UI Run
+
+- `ID=Name` — обычный лок
+- **By options** → `Name~o{hash8}`
+- **Bypass lock** → `Name~r{rand}` (by options тогда disabled)
+
+## Progress / control
+
+Счётчик и `!pause`/`!stop` в `step:{id}`. Flush — Lua, один RTT. `paused_at` в run HASH для UI (>15m).
 
 ## Ключи
 
 | Ключ | Назначение |
 |------|------------|
-| `srq:tasks:{ns}:catalog` | HASH name → JSON схемы (queue, interval_sec, args) |
-| `srq:tasks:{ns}:run:{name}` | last-run: status, started_at, finished_at, progress, last_error |
+| `srq:tasks:namespaces` | SET namespace |
+| `srq:tasks:{ns}:catalog` | HASH name → JSON (cron, concurrency, by_options, bypass_lock, args) |
+| `srq:tasks:{ns}:run:{name}` | status, next_run_at, pending_rerun, paused_at, progress, … |
 
-Отдельный `names` SET не нужен — `HKEYS catalog`.
-
-## UI Run
-
-- По умолчанию `ID=Name` → лок payload.
-- **By options** → `Name~o{hash8}` — одинаковые args блокируются, другие наборы можно параллелить.
-- **Bypass lock** → `Name~r{rand}` — всегда новый ID (галочка by options тогда не нужна).
-- Режим **tasks** в Manager: Def’ы текущей очереди, статусы, replay, pause/stop.
-
-## Progress / control
-
-Счётчик и `!pause`/`!stop` живут в одном `step:{id}`. Flush — Lua: пишет progress, **не затирает** control от UI, один RTT. Отдельный ключ control не нужен (Ack и так чистит step).
-
-## Control
-
-В step: `name#curr/total@ms!pause` / `!stop`. Admin `SetTaskStepControl`. Воркер в `Advance` синхронизирует control (SET GET) и при pause ждёт.
-
-См. также [Step recovery](step-recovery.md), [Messages peek](../reference/api.md).
+См. также [Step recovery](step-recovery.md).

@@ -172,6 +172,36 @@ function isTaskPaused(t) {
   return taskStepRaw(t).includes('!pause')
 }
 
+function parseRunTime(s) {
+  if (!s) return null
+  const d = Date.parse(s)
+  return Number.isFinite(d) ? d : null
+}
+
+/** overdue: не running и next_run_at в прошлом */
+function isTaskOverdue(t) {
+  if (isTaskInProgress(t) || t.run?.status === 'running') return false
+  const next = parseRunTime(t.run?.next_run_at)
+  if (next == null) return false
+  return Date.now() > next
+}
+
+/** пауза дольше 15 минут */
+function isTaskLongPause(t) {
+  if (!isTaskPaused(t)) return false
+  const pausedAt = parseRunTime(t.run?.paused_at)
+  if (pausedAt == null) return false
+  return Date.now() - pausedAt > 15 * 60 * 1000
+}
+
+function formatNextRun(t) {
+  const next = parseRunTime(t.run?.next_run_at)
+  if (next == null) return t.cron || '—'
+  const d = new Date(next)
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+}
+
 const POLL_PRESETS = [
   { label: 'Off', ms: 0 },
   { label: '5s', ms: 5000 },
@@ -2110,7 +2140,8 @@ export default function App() {
                         <TableHead>
                           <TableRow>
                             <TableCell>Name</TableCell>
-                            <TableCell>NS</TableCell>
+                            <TableCell>Cron</TableCell>
+                            <TableCell>Next</TableCell>
                             <TableCell>Status</TableCell>
                             <TableCell>Progress</TableCell>
                             <TableCell align="right">Actions</TableCell>
@@ -2119,7 +2150,7 @@ export default function App() {
                         <TableBody>
                           {tableRows.length === 0 ? (
                             <TableRow>
-                              <TableCell colSpan={5}>
+                              <TableCell colSpan={6}>
                                 <Typography variant="body2" color="text.secondary">
                                   {listLoading
                                     ? 'Loading…'
@@ -2131,13 +2162,32 @@ export default function App() {
                             tableRows.map((t) => {
                               const inFlight = isTaskInProgress(t)
                               const paused = isTaskPaused(t)
+                              const overdue = isTaskOverdue(t)
+                              const longPause = isTaskLongPause(t)
+                              const rowSx = longPause
+                                ? { bgcolor: 'rgba(237, 108, 2, 0.14)' }
+                                : overdue
+                                  ? { bgcolor: 'rgba(211, 47, 47, 0.12)' }
+                                  : undefined
                               return (
-                              <TableRow key={`${t.namespace}/${t.name}`}>
+                              <TableRow key={`${t.namespace}/${t.name}`} sx={rowSx}>
                                 <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
                                   {t.name}
+                                  {t.byOptions ? ' ~o' : ''}
+                                  {t.bypassLock ? ' ~r' : ''}
                                 </TableCell>
-                                <TableCell>{t.namespace}</TableCell>
-                                <TableCell>{t.run?.status || '—'}</TableCell>
+                                <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
+                                  {t.cron || (t.intervalSec ? `~${t.intervalSec}s` : '—')}
+                                </TableCell>
+                                <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                                  {formatNextRun(t)}
+                                </TableCell>
+                                <TableCell>
+                                  {t.run?.status || '—'}
+                                  {t.concurrency && t.concurrency !== 'forbid'
+                                    ? ` (${t.concurrency})`
+                                    : ''}
+                                </TableCell>
                                 <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
                                   {taskStepRaw(t) || '—'}
                                 </TableCell>

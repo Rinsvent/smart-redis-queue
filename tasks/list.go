@@ -13,12 +13,16 @@ type TaskView struct {
 	Namespace   string            `json:"namespace"`
 	Name        string            `json:"name"`
 	Queue       string            `json:"queue"`
-	IntervalSec float64           `json:"intervalSec,omitempty"`
+	Cron        string            `json:"cron,omitempty"`
+	Concurrency string            `json:"concurrency,omitempty"`
+	ByOptions   bool              `json:"byOptions,omitempty"`
+	BypassLock  bool              `json:"bypassLock,omitempty"`
+	IntervalSec float64           `json:"intervalSec,omitempty"` // deprecated
 	Args        []ArgDef          `json:"args,omitempty"`
 	Run         map[string]string `json:"run,omitempty"`
 }
 
-// ListForQueue — все catalog entries с Queue==queue по всем namespace (SCAN).
+// ListForQueue — все catalog entries с Queue==queue по всем namespace.
 func ListForQueue(ctx context.Context, rdb *redis.Client, queue string) ([]TaskView, error) {
 	nsList, err := ListNamespaces(ctx, rdb)
 	if err != nil {
@@ -50,6 +54,8 @@ func ListForQueue(ctx context.Context, rdb *redis.Client, queue string) ([]TaskV
 			}
 			out = append(out, TaskView{
 				Namespace: ns, Name: e.Name, Queue: e.Queue,
+				Cron: e.Cron, Concurrency: e.Concurrency,
+				ByOptions: e.ByOptions, BypassLock: e.BypassLock,
 				IntervalSec: e.IntervalSec, Args: e.Args, Run: run,
 			})
 		}
