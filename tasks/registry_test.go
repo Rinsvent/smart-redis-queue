@@ -89,7 +89,7 @@ func TestBaseName(t *testing.T) {
 	}
 }
 
-func TestCronParseAndTwoOptionDefs(t *testing.T) {
+func TestCronParseAndTwoDefs(t *testing.T) {
 	next, err := NextRunAfter("*/5 * * * *", time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
 	if err != nil || next.Minute()%5 != 0 {
 		t.Fatalf("next=%v err=%v", next, err)
@@ -100,13 +100,13 @@ func TestCronParseAndTwoOptionDefs(t *testing.T) {
 	reg, _ := New(rdb, Config{Namespace: "svc2", DefaultQueue: "q"})
 	h := func(ctx context.Context, inv Invocation) error { return nil }
 	if err := reg.Register(Def{
-		Name: "full", Cron: "0 3 * * *", ByOptions: true, Concurrency: ConcurrencyForbid,
+		Name: "full", Cron: "0 3 * * *", Concurrency: ConcurrencyForbid,
 		Args: []ArgDef{{Name: "mode", Default: "full"}}, Handle: h,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if err := reg.Register(Def{
-		Name: "delta", Cron: "*/15 * * * *", ByOptions: true, Concurrency: ConcurrencyAfter,
+		Name: "delta", Cron: "*/15 * * * *", Concurrency: ConcurrencyAfter,
 		Args: []ArgDef{{Name: "mode", Default: "delta"}}, Handle: h,
 	}); err != nil {
 		t.Fatal(err)
@@ -118,11 +118,8 @@ func TestCronParseAndTwoOptionDefs(t *testing.T) {
 	if len(ents) != 2 {
 		t.Fatalf("ents=%d", len(ents))
 	}
-	var sawAfter, sawByOpts bool
+	var sawAfter bool
 	for _, e := range ents {
-		if e.ByOptions {
-			sawByOpts = true
-		}
 		if e.Concurrency == ConcurrencyAfter {
 			sawAfter = true
 		}
@@ -130,34 +127,30 @@ func TestCronParseAndTwoOptionDefs(t *testing.T) {
 			t.Fatalf("missing cron: %+v", e)
 		}
 	}
-	if !sawAfter || !sawByOpts {
-		t.Fatalf("catalog flags: %+v", ents)
+	if !sawAfter {
+		t.Fatalf("catalog: %+v", ents)
 	}
 }
 
-func TestConcurrencyAfterPendingRerun(t *testing.T) {
+func TestConcurrencyAfterPendingRerunImmediate(t *testing.T) {
 	rdb := testRDB(t)
 	ctx := context.Background()
 	reg, _ := New(rdb, Config{Namespace: "svc3", DefaultQueue: "q"})
 	reg.SetProducer("q", redisqueue.NewProducer(rdb, "q"))
-	n := 0
 	_ = reg.Register(Def{
-		Name: "job", Cron: "* * * * *", Concurrency: ConcurrencyAfter,
-		Handle: func(ctx context.Context, inv Invocation) error {
-			n++
-			return nil
-		},
+		Name: "job", Cron: "0 * * * *", Concurrency: ConcurrencyAfter,
+		Handle: func(ctx context.Context, inv Invocation) error { return nil },
 	})
-	// simulate lock held + pending
-	_ = rdb.Set(ctx, "queue:q:payload:job", "{}", 0).Err()
+	// как после пропущенного cron-тика
 	_ = rdb.HSet(ctx, runKey("svc3", "job"), "pending_rerun", "1").Err()
-	// finish dispatch path for pending without holding lock on re-enqueue:
-	_ = rdb.Del(ctx, "queue:q:payload:job").Err()
 	d, _ := reg.def("job")
 	if err := reg.flushPendingRerun(ctx, d); err != nil {
 		t.Fatal(err)
 	}
-	if n := rdb.Exists(ctx, "queue:q:payload:job").Val(); n != 1 {
-		t.Fatalf("expected re-enqueue, exists=%d", n)
+	if rdb.Exists(ctx, "queue:q:payload:job").Val() != 1 {
+		t.Fatal("expected immediate re-enqueue after finish")
+	}
+	if rdb.HGet(ctx, runKey("svc3", "job"), "pending_rerun").Val() != "" {
+		t.Fatal("pending_rerun should be cleared")
 	}
 }

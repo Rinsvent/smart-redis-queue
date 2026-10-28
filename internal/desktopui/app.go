@@ -146,9 +146,6 @@ type RegistryTaskRow struct {
 	Queue       string            `json:"queue"`
 	Cron        string            `json:"cron,omitempty"`
 	Concurrency string            `json:"concurrency,omitempty"`
-	ByOptions   bool              `json:"byOptions,omitempty"`
-	BypassLock  bool              `json:"bypassLock,omitempty"`
-	IntervalSec float64           `json:"intervalSec,omitempty"`
 	Args        []tasksArgDef     `json:"args,omitempty"`
 	Run         map[string]string `json:"run,omitempty"`
 }
@@ -1260,9 +1257,7 @@ func (a *App) ListRegistryTasks(queue string, db int, query string) ([]RegistryT
 	for _, v := range views {
 		row := RegistryTaskRow{
 			Namespace: v.Namespace, Name: v.Name, Queue: v.Queue,
-			Cron: v.Cron, Concurrency: v.Concurrency,
-			ByOptions: v.ByOptions, BypassLock: v.BypassLock,
-			IntervalSec: v.IntervalSec, Run: v.Run,
+			Cron: v.Cron, Concurrency: v.Concurrency, Run: v.Run,
 		}
 		for _, arg := range v.Args {
 			row.Args = append(row.Args, tasksArgDef{

@@ -15,9 +15,6 @@ type TaskView struct {
 	Queue       string            `json:"queue"`
 	Cron        string            `json:"cron,omitempty"`
 	Concurrency string            `json:"concurrency,omitempty"`
-	ByOptions   bool              `json:"byOptions,omitempty"`
-	BypassLock  bool              `json:"bypassLock,omitempty"`
-	IntervalSec float64           `json:"intervalSec,omitempty"` // deprecated
 	Args        []ArgDef          `json:"args,omitempty"`
 	Run         map[string]string `json:"run,omitempty"`
 }
@@ -55,8 +52,7 @@ func ListForQueue(ctx context.Context, rdb *redis.Client, queue string) ([]TaskV
 			out = append(out, TaskView{
 				Namespace: ns, Name: e.Name, Queue: e.Queue,
 				Cron: e.Cron, Concurrency: e.Concurrency,
-				ByOptions: e.ByOptions, BypassLock: e.BypassLock,
-				IntervalSec: e.IntervalSec, Args: e.Args, Run: run,
+				Args: e.Args, Run: run,
 			})
 		}
 	}

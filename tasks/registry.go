@@ -33,27 +33,18 @@ type CatalogEntry struct {
 	Queue       string   `json:"queue"`
 	Cron        string   `json:"cron,omitempty"` // standard 5-field cron
 	Concurrency string   `json:"concurrency,omitempty"`
-	ByOptions   bool     `json:"by_options,omitempty"`
-	BypassLock  bool     `json:"bypass_lock,omitempty"`
 	Args        []ArgDef `json:"args,omitempty"`
-	// IntervalSec — deprecated; читается только как fallback в UI/старых каталогах.
-	IntervalSec float64 `json:"interval_sec,omitempty"`
 }
 
 // Def — регистрация обработчика (+ опциональный cron-schedule).
-// Две команды с разными опциями = два Register с разными Name/Args (и ByOptions).
+// Разные опции / политики = разные Name (хэндлер ищется по base name).
 type Def struct {
 	Name        string
 	Queue       string // "" → Config.DefaultQueue
 	Cron        string // "*/5 * * * *"; пусто = только вручную/UI
 	Concurrency string // forbid|after|allow
-	ByOptions   bool
-	BypassLock  bool
 	Args        []ArgDef
 	Handle      Handler
-
-	// Interval — deprecated; если Cron пуст и Interval>0 → синтетический "@every".
-	Interval time.Duration
 }
 
 // Invocation — вызов handler из Dispatch.
@@ -122,10 +113,6 @@ func (r *Registry) Register(d Def) error {
 		return fmt.Errorf("tasks: %q empty queue (set Def.Queue or Config.DefaultQueue)", d.Name)
 	}
 	d.Concurrency = normalizeConcurrency(d.Concurrency)
-	if d.Cron == "" && d.Interval > 0 {
-		// совместимость: был Interval → @every
-		d.Cron = "@every " + d.Interval.String()
-	}
 	if d.Cron != "" {
 		if _, err := parseCron(d.Cron); err != nil {
 			return fmt.Errorf("tasks: %q cron: %w", d.Name, err)
@@ -176,8 +163,7 @@ func (r *Registry) SyncCatalog(ctx context.Context) error {
 	for _, d := range r.defs {
 		ent := CatalogEntry{
 			Name: d.Name, Queue: d.Queue, Cron: d.Cron,
-			Concurrency: d.Concurrency, ByOptions: d.ByOptions,
-			BypassLock: d.BypassLock, Args: d.Args,
+			Concurrency: d.Concurrency, Args: d.Args,
 		}
 		b, err := json.Marshal(ent)
 		if err != nil {
@@ -273,10 +259,8 @@ func (r *Registry) flushPendingRerun(ctx context.Context, d *Def) error {
 		return nil
 	}
 	_ = r.rdb.HDel(ctx, key, "pending_rerun").Err()
-	_, err = r.Enqueue(ctx, d.Name, RunOptions{
-		BypassLock: d.BypassLock,
-		ByOptions:  d.ByOptions,
-	})
+	// сразу после окончания текущей — не ждём следующий cron-тик
+	_, err = r.Enqueue(ctx, d.Name, RunOptions{})
 	return err
 }
 
@@ -414,11 +398,9 @@ func (r *Registry) scheduleTick(ctx context.Context, d *Def, now time.Time, next
 	r.setNextRun(ctx, d.Name, next)
 
 	pol := normalizeConcurrency(d.Concurrency)
-	bypass := d.BypassLock || pol == ConcurrencyAllow
 	_, err = r.Enqueue(ctx, d.Name, RunOptions{
 		Args:       defaultArgsMap(d),
-		BypassLock: bypass,
-		ByOptions:  d.ByOptions && !bypass,
+		BypassLock: pol == ConcurrencyAllow, // параллельный тик
 	})
 	if err == nil {
 		return
@@ -427,11 +409,9 @@ func (r *Registry) scheduleTick(ctx context.Context, d *Def, now time.Time, next
 		return
 	}
 	// уже in-flight / в очереди
-	switch pol {
-	case ConcurrencyAfter:
+	if pol == ConcurrencyAfter {
+		// флаг: как только текущий Dispatch закончится → Enqueue сразу (не ждать cron)
 		_ = r.rdb.HSet(ctx, runKey(r.cfg.Namespace, d.Name), "pending_rerun", "1").Err()
-	case ConcurrencyForbid, ConcurrencyAllow:
-		// allow уже ушёл с bypass; forbid — просто ждём следующего cron
 	}
 }
 

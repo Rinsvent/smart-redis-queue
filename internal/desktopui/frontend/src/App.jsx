@@ -2173,11 +2173,9 @@ export default function App() {
                               <TableRow key={`${t.namespace}/${t.name}`} sx={rowSx}>
                                 <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
                                   {t.name}
-                                  {t.byOptions ? ' ~o' : ''}
-                                  {t.bypassLock ? ' ~r' : ''}
                                 </TableCell>
                                 <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 11 }}>
-                                  {t.cron || (t.intervalSec ? `~${t.intervalSec}s` : '—')}
+                                  {t.cron || '—'}
                                 </TableCell>
                                 <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
                                   {formatNextRun(t)}
