@@ -16,7 +16,7 @@ import (
 	"github.com/urfave/cli/v3"
 )
 
-const managerTestDB = 6 // отдельная DB: go test ./... параллелит пакеты с DB 5
+const managerTestDB = 7 // не 5 (queue) и не 6 (journal): go test ./... параллелит пакеты
 
 func testRedis(t *testing.T) *redis.Client {
 	t.Helper()
