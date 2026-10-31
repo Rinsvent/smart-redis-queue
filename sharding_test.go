@@ -211,6 +211,34 @@ func TestShardByPartition_Strategy(t *testing.T) {
 	assert.Equal(t, "!order:1", key)
 }
 
+func TestShardStrategy_String(t *testing.T) {
+	assert.Equal(t, "group", ShardByGroup.String())
+	assert.Equal(t, "queue", ShardByQueue.String())
+	assert.Equal(t, "manual", ShardByManual.String())
+	assert.Equal(t, "partition", ShardByPartition.String())
+	assert.Contains(t, ShardStrategy(99).String(), "99")
+}
+
+func TestShardRouter_AccessorsAndSetShardRouter(t *testing.T) {
+	clients := setupShardClients(t, 10)
+	r, err := NewShardRouter(shardCfgFromClients(ShardByGroup, clients))
+	require.NoError(t, err)
+	defer r.Close()
+
+	require.NotNil(t, r.Config())
+	require.Len(t, r.Shards(), 1)
+	require.NotNil(t, r.Client(0))
+	assert.Nil(t, r.Client(-1))
+
+	prod := NewProducer(clients[0], "router-acc-q")
+	prod.SetShardRouter(r)
+	assert.Equal(t, r, prod.ShardRouter())
+
+	pool := NewConsumerPool(clients[0], "router-acc-q")
+	pool.SetShardRouter(r)
+	assert.Equal(t, r, pool.ShardRouter())
+}
+
 func TestWithJournal_RejectsMultiShardBatch(t *testing.T) {
 	clients := setupShardClients(t, 12, 13)
 	cfg := shardCfgFromClients(ShardByGroup, clients)

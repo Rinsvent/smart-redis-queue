@@ -126,3 +126,13 @@ func TestPublish_Backpressure_InvalidTag(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "forbidden separator")
 }
+
+func TestStripJournalPublishOptions(t *testing.T) {
+	assert.Nil(t, StripJournalPublishOptions(nil))
+	out := StripJournalPublishOptions([]PublishOption{
+		nil,
+		WithJournal("j", "1"),
+		WithCompression(CompressionZstd),
+	})
+	require.Len(t, out, 1)
+}

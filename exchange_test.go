@@ -150,3 +150,31 @@ func TestExchange_InMemoryAtomicWithoutPersist(t *testing.T) {
 		c.Close()
 	}
 }
+
+func TestExchange_LocalBindingsAndOptions(t *testing.T) {
+	_, _, rdb := setupTestQueue(t)
+	ex := NewExchange(rdb, "local-ex")
+	assert.Equal(t, "local-ex", ex.Name())
+
+	ex.Bind("a.*", "q1").Bind("b.*", "q2")
+	ex.Unbind("a.*", "q1")
+	ex.SetBindings([]Binding{{Pattern: "c.*", Queue: "q3"}})
+	bs := ex.Bindings()
+	require.Len(t, bs, 1)
+	assert.Equal(t, "q3", bs[0].Queue)
+
+	ex.SetCompression(CompressionZstd)
+	ex.SetCompressMinBytes(64)
+
+	cfg := &exchangePublishConfig{}
+	cfg.apply([]ExchangePublishOption{
+		WithDeliveryAtomic(),
+		WithDeliveryBestEffort(),
+		WithCheckVersion(),
+		WithExchangeTagBackpressure("t", 10),
+		WithExchangeCompression(CompressionZstd),
+		nil,
+	})
+	opts := cfg.asPublishOptions()
+	assert.NotEmpty(t, opts)
+}

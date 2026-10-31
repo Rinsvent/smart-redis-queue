@@ -48,4 +48,25 @@ func TestHeaders_RequiresBind(t *testing.T) {
 	ctx := context.Background()
 	_, err := (&Task{ID: "x"}).Headers(ctx)
 	require.Error(t, err)
+	require.Error(t, (&Task{ID: "x"}).DeleteHeader(ctx, "k"))
+}
+
+func TestHeaders_DeleteHeader(t *testing.T) {
+	producer, consumer, rdb := setupTestQueue(t)
+	ctx := context.Background()
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "h-del", Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
+	}))
+	tasks, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	task := tasks[0]
+
+	require.NoError(t, task.SetHeader(ctx, "k", "v"))
+	require.NoError(t, task.DeleteHeader(ctx, "k"))
+	m, err := task.Headers(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, m["k"])
+	require.Error(t, task.DeleteHeader(ctx, ""))
+	_ = rdb
 }

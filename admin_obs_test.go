@@ -90,3 +90,21 @@ func TestAdmin_ListRaceLocks(t *testing.T) {
 	assert.Equal(t, "race!x", locks[0].Tag)
 	assert.Equal(t, "task-1", locks[0].TaskID)
 }
+
+func TestAdmin_LockOwner(t *testing.T) {
+	_, _, rdb := setupTestQueue(t)
+	ctx := context.Background()
+	admin := NewAdmin(rdb)
+
+	_, err := admin.LockOwner(ctx, "test-queue", "")
+	require.Error(t, err)
+
+	owner, err := admin.LockOwner(ctx, "test-queue", "p1")
+	require.NoError(t, err)
+	assert.Empty(t, owner)
+
+	require.NoError(t, rdb.Set(ctx, "queue:test-queue:partition:p1:lock", "consumer-9", 0).Err())
+	owner, err = admin.LockOwner(ctx, "test-queue", "p1")
+	require.NoError(t, err)
+	assert.Equal(t, "consumer-9", owner)
+}

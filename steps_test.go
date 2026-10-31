@@ -3,6 +3,7 @@ package redisqueue
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -353,5 +354,128 @@ func TestStepProgressFlushPreservesControl(t *testing.T) {
 	cp := ParseStepCheckpoint(raw)
 	if cp.Curr != 5 || cp.Control != StepControlPause || cp.Cursor != "c1" {
 		t.Fatalf("got %q %+v", raw, cp)
+	}
+}
+
+func TestStepProgress_NilSafe(t *testing.T) {
+	var s *StepRunner
+	if s.Last() != "" || s.LastCursor() != "" {
+		t.Fatal()
+	}
+	if _, _, _, _, ok := s.LastProgress(); ok {
+		t.Fatal()
+	}
+	if err := s.Commit(context.Background(), "x"); err == nil {
+		t.Fatal("nil Commit")
+	}
+	var p *StepProgress
+	if p.Current() != 0 || p.Total() != 0 || p.Cursor() != "" || p.Control() != "" {
+		t.Fatal()
+	}
+	if !p.StartedAt().IsZero() || p.Elapsed() != 0 || p.ETA() != 0 {
+		t.Fatal()
+	}
+	p.SetTotal(1)
+	p.SetCursor("x")
+	if err := p.Advance(context.Background(), 1); err == nil {
+		t.Fatal("nil Advance")
+	}
+	if err := p.Flush(context.Background()); err == nil {
+		t.Fatal("nil Flush")
+	}
+}
+
+func TestSteps_NewStepsPauseStopRelease(t *testing.T) {
+	rdb := stepsTestRedis(t)
+	ctx := context.Background()
+	q := "steps-ctrl"
+	_ = rdb.Del(ctx, stepKey(q, "t1"))
+	_ = rdb.Del(ctx, "queue:"+q+":payload:t1")
+
+	p := NewProducer(rdb, q)
+	if err := p.Publish(ctx, &Task{ID: "t1", Payload: []byte("{}"), Scheduled: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	c := NewConsumer(rdb, q, "c-steps")
+	t.Cleanup(c.Close)
+	c.SetPrefetchCount(1)
+	got, err := c.Get(ctx)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("get: %v len=%d", err, len(got))
+	}
+	task := got[0]
+
+	if _, err := NewSteps(ctx, nil); err == nil {
+		t.Fatal("nil task")
+	}
+	if _, err := NewSteps(ctx, &Task{ID: "x"}); err == nil {
+		t.Fatal("unbound task")
+	}
+
+	s, err := NewSteps(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Do(ctx, "prep", func(ctx context.Context) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if s.Last() != "prep" {
+		t.Fatalf("last=%q", s.Last())
+	}
+
+	err = s.Do(ctx, "import", func(ctx context.Context) error {
+		bar, err := s.Progress(ctx, StepProgressConfig{})
+		if err != nil {
+			return err
+		}
+		if bar.Total() != 0 {
+			t.Fatalf("unknown total: %d", bar.Total())
+		}
+		bar.SetTotal(10)
+		if bar.Total() != 10 {
+			t.Fatal(bar.Total())
+		}
+		bar.SetTotal(0) // снова «?»
+		if err := bar.Advance(ctx, 1); err != nil {
+			return err
+		}
+		if err := SetStepControl(ctx, rdb, q, task.ID, StepControlPause); err != nil {
+			return err
+		}
+		done := make(chan error, 1)
+		go func() { done <- bar.Advance(ctx, 1) }()
+		time.Sleep(50 * time.Millisecond)
+		if err := SetStepControl(ctx, rdb, q, task.ID, ""); err != nil {
+			return err
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				return err
+			}
+		case <-time.After(3 * time.Second):
+			return errors.New("pause wait timeout")
+		}
+		if err := SetStepControl(ctx, rdb, q, task.ID, StepControlStop); err != nil {
+			return err
+		}
+		if err := bar.Advance(ctx, 1); !errors.Is(err, ErrStepStopped) {
+			return fmt.Errorf("stop: %w", err)
+		}
+		return ErrStepStopped
+	})
+	if !errors.Is(err, ErrStepStopped) {
+		t.Fatalf("want ErrStepStopped, got %v", err)
+	}
+
+	s2, err := NewSteps(ctx, task)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.Release(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := rdb.Exists(ctx, stepKey(q, task.ID)).Result(); n != 0 {
+		t.Fatal("step key should be gone after Release")
 	}
 }

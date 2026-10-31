@@ -10,6 +10,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAdmin_HasQueueIndex_AndListQueuesScan(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+
+	ok, err := admin.HasQueueIndex(ctx)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	p := NewProducer(rdb, "idx-scan-q")
+	require.NoError(t, p.Publish(ctx, &Task{
+		ID: "t1", Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
+	}))
+	ok, err = admin.HasQueueIndex(ctx)
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	scan, err := admin.ListQueuesScan(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, scan, "idx-scan-q")
+}
+
 func TestQueueIndex_PublishAckUpdatesDepth(t *testing.T) {
 	producer, consumer, rdb := setupTestQueue(t)
 	ctx := context.Background()

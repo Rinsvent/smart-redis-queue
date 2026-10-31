@@ -57,4 +57,48 @@ func TestAdminListMessages(t *testing.T) {
 	if err != nil || !ti.Exists || ti.Progress == nil {
 		t.Fatalf("inspect: %v %+v", err, ti)
 	}
+	if ti.State != "pending" {
+		t.Fatalf("state=%s want pending", ti.State)
+	}
+
+	// payload без partition → unknown
+	_ = rdb.Set(ctx, prefix+"payload:orphan", "x", 0)
+	ti2, err := admin.InspectTask(ctx, q, "orphan")
+	if err != nil || ti2.State != "unknown" {
+		t.Fatalf("orphan: %v %+v", err, ti2)
+	}
+
+	if err := admin.SetTaskStepControl(ctx, q, "billing", StepControlPause); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := rdb.Get(ctx, prefix+"step:billing").Result()
+	if cp := ParseStepCheckpoint(raw); cp.Control != StepControlPause {
+		t.Fatalf("control after SetTaskStepControl: %q %+v", raw, cp)
+	}
+	if err := admin.SetTaskStepControl(ctx, q, "billing", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestAdmin_MessageStateInProgress(t *testing.T) {
+	rdb := messagesTestRedis(t)
+	ctx := context.Background()
+	_ = rdb.FlushDB(ctx)
+	q := "msg-ip"
+	p := NewProducer(rdb, q)
+	if err := p.Publish(ctx, &Task{ID: "live", Payload: []byte("{}"), Scheduled: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	c := NewConsumer(rdb, q, "c-msg")
+	t.Cleanup(c.Close)
+	c.SetPrefetchCount(1)
+	got, err := c.Get(ctx)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("get: %v", err)
+	}
+	admin := NewAdmin(rdb)
+	ti, err := admin.InspectTask(ctx, q, got[0].ID)
+	if err != nil || ti.State != "in_progress" {
+		t.Fatalf("inspect: %v state=%v", err, ti)
+	}
 }
