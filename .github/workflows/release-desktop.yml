@@ -114,7 +114,8 @@ jobs:
 
   release-macos:
     name: macOS arm64 + amd64
-    runs-on: macos-14
+    # macos-14 retires 2026-11-02 (brownouts already active): https://github.com/actions/runner-images/issues/13518
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -248,8 +249,7 @@ jobs:
       - name: Build Android APK (fat)
         run: |
           set -euxo pipefail
-          # "could not import C (no metadata for C)" в логе bindings — ожидаемо:
-          # generate bindings идёт с CGO=0 (без NDK). На сам APK/libwails.so не влияет.
+          # package:fat → android:generate:android:bindings (CGO=0; import "C" noise OK)
           wails3 task android:package:fat
           ls -la bin/ || true
           find bin -name '*.apk' | head -20
@@ -272,7 +272,8 @@ jobs:
 
   release-ios:
     name: iOS Simulator app (experimental)
-    runs-on: macos-14
+    # macos-14 retires 2026-11-02 (brownouts already active): https://github.com/actions/runner-images/issues/13518
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v5

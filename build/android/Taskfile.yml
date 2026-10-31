@@ -40,13 +40,14 @@ tasks:
     deps:
       - task: common:go:mod:tidy
       # overlay skipped: RegisterAndroidMain lives in cmd/desktop/main_android.go
-      - task: common:build:frontend
-        vars:
-          BUILD_FLAGS:
-            ref: .BUILD_FLAGS
-          PRODUCTION:
-            ref: .PRODUCTION
+      # Не common:build:frontend: его generate:bindings с -clean + CGO падает на
+      # import "C" без NDK ("could not import C") и сносит frontend/bindings.
+      - task: common:install:frontend:deps
+      - task: generate:android:bindings
     cmds:
+      - task: common:frontend:run
+        vars:
+          SCRIPT: '{{if eq .PRODUCTION "true"}}build{{else}}build:dev{{end}}'
       - echo "Building Android app {{.APP_NAME}}..."
       - task: compile:go:shared
         vars:
@@ -266,9 +267,18 @@ tasks:
     generates:
       - frontend/bindings/**/*
     cmds:
-      # Bindings are generated from the Go AST; CGO is disabled so the NDK
-      # is not required for this step
-      - wails3 generate bindings -f '-tags android' -clean=true
+      # AST-only (CGO=0, no NDK). import "C" packages print
+      # "could not import C (no metadata for C)" and may exit≠0 — OK if bindings exist.
+      - |
+        set +e
+        wails3 generate bindings -f '-tags android' -clean=true
+        status=$?
+        set -e
+        if [ ! -d frontend/bindings ]; then
+          echo "android bindings missing after generate (exit $status)"
+          exit 1
+        fi
+        exit 0
     env:
       GOOS: android
       CGO_ENABLED: 0
