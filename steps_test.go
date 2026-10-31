@@ -43,6 +43,9 @@ func TestParseEncodeStepValue(t *testing.T) {
 		{"import#3/?:page_abc@1700000000000", "import", 3, 0, true, "page_abc", true, true},
 		{"import#3/10:offset=42@1700000000000", "import", 3, 10, false, "offset=42", true, true},
 		{"import#3/10:a:b:c@1700000000000", "import", 3, 10, false, "a:b:c", true, true},
+		{"user@host", "user@host", 0, 0, false, "", false, false},
+		{"foo!bar", "foo!bar", 0, 0, false, "", false, false},
+		{"foo@123", "foo@123", 0, 0, false, "", false, false},
 		{"bad#x/y", "bad#x/y", 0, 0, false, "", false, false},
 	}
 	for _, tc := range cases {

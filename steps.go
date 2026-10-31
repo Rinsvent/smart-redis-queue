@@ -162,7 +162,7 @@ func sanitizeCursor(c string) string {
 }
 
 // encodeStepValue — незавершённый прогресс (+ опциональный :cursor и !control).
-// Имя без '#'/'@'/'!'. Cursor без '@'/'!'.
+// Имя без '#' (мета после первого #). Cursor без '@'/'!' (разделители @ms / !control).
 func encodeStepValue(name string, curr, total int, unknownTotal bool, started time.Time, cursor, control string) string {
 	if started.IsZero() {
 		started = time.Now()
@@ -197,40 +197,42 @@ func normalizeStepControl(c string) string {
 }
 
 // parseStepValue: "name" | "name#3/10" | "name#3/?:cur@ms" | "name#3/10:cur@ms!pause"
+// Без '#' — вся строка имя (можно '@', '!' и т.д.). Мета только после первого '#'.
 func parseStepValue(v string) (name string, curr, total int, unknownTotal bool, started time.Time, cursor string, hasProgress bool, control string) {
 	if v == "" {
 		return "", 0, 0, false, time.Time{}, "", false, ""
 	}
-	// control suffix: …@ms!pause
-	bang := strings.LastIndexByte(v, '!')
-	at := strings.LastIndexByte(v, '@')
-	body := v
-	if bang > at && bang > 0 {
-		control = normalizeStepControl(v[bang+1:])
-		body = v[:bang]
+	i := strings.IndexByte(v, '#')
+	if i < 0 {
+		return v, 0, 0, false, time.Time{}, "", false, ""
 	}
-	at = strings.LastIndexByte(body, '@')
-	if at > 0 {
-		if ms, err := strconv.ParseInt(body[at+1:], 10, 64); err == nil && ms > 0 {
+	name = v[:i]
+	rest := v[i+1:]
+	// rest: curr/total[:cursor][@ms][!control]
+	bang := strings.LastIndexByte(rest, '!')
+	at := strings.LastIndexByte(rest, '@')
+	meta := rest
+	if bang > at && bang >= 0 {
+		control = normalizeStepControl(rest[bang+1:])
+		meta = rest[:bang]
+	}
+	at = strings.LastIndexByte(meta, '@')
+	if at >= 0 {
+		if ms, err := strconv.ParseInt(meta[at+1:], 10, 64); err == nil && ms > 0 {
 			started = time.UnixMilli(ms)
-			body = body[:at]
+			meta = meta[:at]
 		}
 	}
-	i := strings.LastIndexByte(body, '#')
-	if i < 0 {
-		return body, 0, 0, false, time.Time{}, "", false, control
-	}
-	rest := body[i+1:]
-	slash := strings.IndexByte(rest, '/')
+	slash := strings.IndexByte(meta, '/')
 	if slash < 0 {
-		return body, 0, 0, false, time.Time{}, "", false, control
+		// «name#something» без curr/total — не progress, целиком как имя
+		return v, 0, 0, false, time.Time{}, "", false, ""
 	}
-	currStr, afterSlash := rest[:slash], rest[slash+1:]
+	currStr, afterSlash := meta[:slash], meta[slash+1:]
 	c, err := strconv.Atoi(currStr)
 	if err != nil || c < 0 {
-		return body, 0, 0, false, time.Time{}, "", false, control
+		return v, 0, 0, false, time.Time{}, "", false, ""
 	}
-	name = body[:i]
 	totStr := afterSlash
 	if colon := strings.IndexByte(afterSlash, ':'); colon >= 0 {
 		totStr = afterSlash[:colon]
@@ -241,7 +243,7 @@ func parseStepValue(v string) (name string, curr, total int, unknownTotal bool, 
 	}
 	t, err := strconv.Atoi(totStr)
 	if err != nil || t < 0 {
-		return body, 0, 0, false, time.Time{}, "", false, control
+		return v, 0, 0, false, time.Time{}, "", false, ""
 	}
 	return name, c, t, false, started, cursor, true, control
 }
@@ -327,6 +329,9 @@ func (s *StepRunner) Commit(ctx context.Context, name string) error {
 	if name == "" {
 		return fmt.Errorf("step: empty name")
 	}
+	if strings.ContainsRune(name, '#') {
+		return fmt.Errorf("step: name must not contain '#'")
+	}
 	if err := s.writeValue(ctx, name); err != nil {
 		return fmt.Errorf("step commit %q: %w", name, err)
 	}
@@ -346,6 +351,9 @@ func (s *StepRunner) Begin(ctx context.Context, name string) (ok bool, err error
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return false, fmt.Errorf("step: empty name")
+	}
+	if strings.ContainsRune(name, '#') {
+		return false, fmt.Errorf("step: name must not contain '#'")
 	}
 	if s.currentName != "" {
 		return false, fmt.Errorf("steps: already in step %q (End first)", s.currentName)
