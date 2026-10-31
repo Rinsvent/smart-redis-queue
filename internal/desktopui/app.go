@@ -118,6 +118,7 @@ type StepProgressUI struct {
 	Curr         int    `json:"curr"`
 	Total        int    `json:"total"`
 	UnknownTotal bool   `json:"unknownTotal,omitempty"`
+	Cursor       string `json:"cursor,omitempty"`
 	StartedMs    int64  `json:"startedMs,omitempty"`
 	Control      string `json:"control,omitempty"`
 }
@@ -1198,8 +1199,8 @@ func (a *App) GetTaskPayload(queue, taskID string, db int) (TaskView, error) {
 	if ti.Progress != nil {
 		tv.Progress = &StepProgressUI{
 			Name: ti.Progress.Name, Curr: ti.Progress.Curr, Total: ti.Progress.Total,
-			UnknownTotal: ti.Progress.UnknownTotal, StartedMs: ti.Progress.StartedMs,
-			Control: ti.Progress.Control,
+			UnknownTotal: ti.Progress.UnknownTotal, Cursor: ti.Progress.Cursor,
+			StartedMs: ti.Progress.StartedMs, Control: ti.Progress.Control,
 		}
 	}
 	return tv, nil
@@ -1228,8 +1229,8 @@ func (a *App) ListMessages(queue string, db int, tag, query string) (MessageList
 		if m.Progress != nil {
 			row.Progress = &StepProgressUI{
 				Name: m.Progress.Name, Curr: m.Progress.Curr, Total: m.Progress.Total,
-				UnknownTotal: m.Progress.UnknownTotal, StartedMs: m.Progress.StartedMs,
-				Control: m.Progress.Control,
+				UnknownTotal: m.Progress.UnknownTotal, Cursor: m.Progress.Cursor,
+				StartedMs: m.Progress.StartedMs, Control: m.Progress.Control,
 			}
 		}
 		out = append(out, row)

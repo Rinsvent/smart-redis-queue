@@ -66,6 +66,11 @@ _ = s.Commit(ctx, "prepared") // то же без Begin
 | `import` | шаг **завершён** (нет маркера `#`) |
 | `import#3/10@1700000000000` | в процессе: 3 из 10, старт unix ms |
 | `import#3/?@1700000000000` | total неизвестен |
+| `import#3/?:page_abc@1700000000000` | + **cursor** продолжения |
+| `import#3/10:offset=42@1700000000000!pause` | cursor + control |
+
+Формат mid-progress: `name#curr/total[:cursor]@startedMs[!control]`.  
+Cursor — opaque-строка (page token / offset / last id); без `@` и `!` (иначе ломают разбор). `:` внутри cursor допустимы.
 
 Есть `#` → шаг **не закончен** (даже `10/10`). Закончен только голое имя после `End` / успешного `Do`.
 
@@ -90,6 +95,44 @@ err := s.Do(ctx, "import", func(ctx context.Context) error {
 })
 ```
 
+### Cursor — продолжить с места остановки
+
+Счётчик `curr` удобен для UI/ETA; для данных нужен **курсор** (следующая страница API, last seen id, offset в файле). Пишется в тот же step-ключ и поднимается при resume:
+
+```go
+err := s.Do(ctx, "import", func(ctx context.Context) error {
+    bar, err := s.Progress(ctx, redisqueue.StepProgressConfig{})
+    if err != nil {
+        return err
+    }
+    cursor := bar.Cursor() // "" на первом заходе; иначе из Redis после Reject/crash
+    for {
+        page, next, err := fetchPage(ctx, cursor) // свой API / SQL / S3
+        if err != nil {
+            return err
+        }
+        for _, row := range page {
+            if err := process(row); err != nil {
+                return err
+            }
+            if err := bar.Advance(ctx, 1); err != nil {
+                return err
+            }
+        }
+        if next == "" {
+            return nil
+        }
+        cursor = next
+        bar.SetCursor(cursor) // попадёт в ключ на следующем Advance/Flush
+        if err := bar.Flush(ctx); err != nil {
+            return err
+        }
+    }
+})
+```
+
+После падения: `import#42/?:page_abc@…` → новый Get → `Progress` вернёт `Current()==42`, `Cursor()=="page_abc"`, тот же `StartedAt`.
+
 Или Begin/End:
 
 ```go
@@ -109,12 +152,13 @@ for _, row := range rows {
 return s.End(ctx)
 ```
 
-- При падении / Reject mid-bar в ключе остаётся прогресс; на следующей попытке `Progress` **продолжит с curr** и тем же `StartedAt` (для ETA / «сколько уже прошло»).
-- `Last()` — имя; `LastProgress()` — curr/total/started при незавершённом баре.
+- При падении / Reject mid-bar в ключе остаётся прогресс (+ cursor); на следующей попытке `Progress` **продолжит с curr/cursor** и тем же `StartedAt`.
+- `Last()` — имя; `LastProgress()` — curr/total/started; `LastCursor()` — cursor.
+- `ParseStepCheckpoint` / Admin peek — поле `Cursor`.
 - `bar.Elapsed()` / `bar.ETA()` — по `StartedAt` и current/total.
 - `bar.Flush(ctx)` — принудительная запись при throttle.
 
-Имена шагов лучше **без** `#` и `@`.
+Имена шагов лучше **без** `#`, `@`, `!`.
 
 ## Release и TTL
 
@@ -191,7 +235,7 @@ pool.Consume(ctx, func(task *redisqueue.Task) error {
 Очередь вроде `{service}-cron`, стабильные ID (`billing`, `import`):
 
 1. Publish с тем же ID — пока жив `payload:{id}` (pending / in-flight / idempotency-stub), повтор режется `SET NX` (`ErrTasksAlreadyExist`). Дубликаты «по расписанию» сами не стартуют.
-2. В handler — `NewSteps` + `Progress` / `Advance`: в Redis видно `import#3/10@startedMs` (и опционально `!pause` / `!stop`).
+2. В handler — `NewSteps` + `Progress` / `Advance` (+ `SetCursor` при пагинации): в Redis `import#3/10:cur@startedMs` (и опционально `!pause` / `!stop`).
 3. Manager UI → режим **messages**: peek до 50 задач, reject count, progress, exact id — без consume.
 4. После Ack `step` удаляется. Долгоживущий last-run / каталог команд / scheduler / `Consume` — пакет [`tasks`](tasks.md), рядом с очередью.
 
@@ -224,4 +268,4 @@ Control (`pause`/`stop`): UI/Admin пишет суффикс в тот же step
 
 ## Ключ Redis
 
-`queue:{name}:step:{taskID}` — STRING: `name` или `name#curr/total@startedMs[!control]`. См. [Ключи Redis](../reference/redis-keys.md).
+`queue:{name}:step:{taskID}` — STRING: `name` или `name#curr/total[:cursor]@startedMs[!control]`. См. [Ключи Redis](../reference/redis-keys.md).

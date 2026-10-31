@@ -33,7 +33,9 @@ type StepProgressConfig struct {
 //
 // Значение ключа:
 //   - "name" — шаг завершён;
-//   - "name#curr/total@startedMs" или "name#curr/?@startedMs" — шаг в процессе (маркер прогресса).
+//   - "name#curr/total@startedMs" / "name#curr/?@startedMs" — прогресс;
+//   - "name#curr/total:cursor@startedMs" — прогресс + курсор продолжения;
+//   - суффикс "!pause" / "!stop" — control.
 type StepRunner struct {
 	last           string
 	skipUntil      string
@@ -43,6 +45,7 @@ type StepRunner struct {
 	resumeTotal    int
 	resumeUnknown  bool
 	resumeStarted  time.Time
+	resumeCursor   string
 
 	currentName string // активный Begin/Do
 	bar         *StepProgress
@@ -97,7 +100,7 @@ func newSteps(ctx context.Context, rdb *redis.Client, queueName, taskID string, 
 		s.active = true
 		return s, nil
 	}
-	name, curr, total, unk, started, hasProg, _ := parseStepValue(raw)
+	name, curr, total, unk, started, cursor, hasProg, _ := parseStepValue(raw)
 	if hasProg {
 		// есть маркер прогресса → шаг не завершён
 		s.skipUntil = name
@@ -107,6 +110,7 @@ func newSteps(ctx context.Context, rdb *redis.Client, queueName, taskID string, 
 		s.resumeTotal = total
 		s.resumeUnknown = unk
 		s.resumeStarted = started
+		s.resumeCursor = cursor
 		s.active = false
 		return s, nil
 	}
@@ -131,32 +135,49 @@ type StepCheckpoint struct {
 	Name         string
 	Curr, Total  int
 	UnknownTotal bool
+	Cursor       string // opaque; продолжение с места остановки
 	Started      time.Time
 	HasProgress  bool
 	Control      string // "", "pause", "stop"
 }
 
-// ParseStepCheckpoint разбирает "name" | "name#3/10@ms" | "name#3/10@ms!pause".
+// ParseStepCheckpoint разбирает "name" | "name#3/10@ms" | "name#3/?:cur@ms!pause".
 func ParseStepCheckpoint(v string) StepCheckpoint {
-	name, curr, total, unk, started, hp, ctrl := parseStepValue(v)
+	name, curr, total, unk, started, cursor, hp, ctrl := parseStepValue(v)
 	return StepCheckpoint{
-		Name: name, Curr: curr, Total: total, UnknownTotal: unk,
+		Name: name, Curr: curr, Total: total, UnknownTotal: unk, Cursor: cursor,
 		Started: started, HasProgress: hp, Control: ctrl,
 	}
 }
 
-// encodeStepValue — незавершённый прогресс (+ опциональный !control). Имя без '#'/'@'/'!'.
-func encodeStepValue(name string, curr, total int, unknownTotal bool, started time.Time, control string) string {
+// sanitizeCursor — cursor в ключе без '@'/'!' (ломают @ms / !control).
+func sanitizeCursor(c string) string {
+	c = strings.TrimSpace(c)
+	if c == "" {
+		return ""
+	}
+	c = strings.ReplaceAll(c, "@", "")
+	c = strings.ReplaceAll(c, "!", "")
+	return c
+}
+
+// encodeStepValue — незавершённый прогресс (+ опциональный :cursor и !control).
+// Имя без '#'/'@'/'!'. Cursor без '@'/'!'.
+func encodeStepValue(name string, curr, total int, unknownTotal bool, started time.Time, cursor, control string) string {
 	if started.IsZero() {
 		started = time.Now()
 	}
 	ms := started.UnixMilli()
-	var base string
+	var mid string
 	if unknownTotal || total <= 0 {
-		base = fmt.Sprintf("%s#%d/?@%d", name, curr, ms)
+		mid = fmt.Sprintf("%d/?", curr)
 	} else {
-		base = fmt.Sprintf("%s#%d/%d@%d", name, curr, total, ms)
+		mid = fmt.Sprintf("%d/%d", curr, total)
 	}
+	if c := sanitizeCursor(cursor); c != "" {
+		mid += ":" + c
+	}
+	base := fmt.Sprintf("%s#%s@%d", name, mid, ms)
 	control = normalizeStepControl(control)
 	if control != "" {
 		return base + "!" + control
@@ -175,10 +196,10 @@ func normalizeStepControl(c string) string {
 	}
 }
 
-// parseStepValue: "name" | "name#3/10" | "name#3/?@ms" | "name#3/10@ms!pause"
-func parseStepValue(v string) (name string, curr, total int, unknownTotal bool, started time.Time, hasProgress bool, control string) {
+// parseStepValue: "name" | "name#3/10" | "name#3/?:cur@ms" | "name#3/10:cur@ms!pause"
+func parseStepValue(v string) (name string, curr, total int, unknownTotal bool, started time.Time, cursor string, hasProgress bool, control string) {
 	if v == "" {
-		return "", 0, 0, false, time.Time{}, false, ""
+		return "", 0, 0, false, time.Time{}, "", false, ""
 	}
 	// control suffix: …@ms!pause
 	bang := strings.LastIndexByte(v, '!')
@@ -197,27 +218,32 @@ func parseStepValue(v string) (name string, curr, total int, unknownTotal bool, 
 	}
 	i := strings.LastIndexByte(body, '#')
 	if i < 0 {
-		return body, 0, 0, false, time.Time{}, false, control
+		return body, 0, 0, false, time.Time{}, "", false, control
 	}
 	rest := body[i+1:]
 	slash := strings.IndexByte(rest, '/')
 	if slash < 0 {
-		return body, 0, 0, false, time.Time{}, false, control
+		return body, 0, 0, false, time.Time{}, "", false, control
 	}
-	currStr, totStr := rest[:slash], rest[slash+1:]
+	currStr, afterSlash := rest[:slash], rest[slash+1:]
 	c, err := strconv.Atoi(currStr)
 	if err != nil || c < 0 {
-		return body, 0, 0, false, time.Time{}, false, control
+		return body, 0, 0, false, time.Time{}, "", false, control
 	}
 	name = body[:i]
+	totStr := afterSlash
+	if colon := strings.IndexByte(afterSlash, ':'); colon >= 0 {
+		totStr = afterSlash[:colon]
+		cursor = afterSlash[colon+1:]
+	}
 	if totStr == "?" {
-		return name, c, 0, true, started, true, control
+		return name, c, 0, true, started, cursor, true, control
 	}
 	t, err := strconv.Atoi(totStr)
 	if err != nil || t < 0 {
-		return body, 0, 0, false, time.Time{}, false, control
+		return body, 0, 0, false, time.Time{}, "", false, control
 	}
-	return name, c, t, false, started, true, control
+	return name, c, t, false, started, cursor, true, control
 }
 
 // Last — имя checkpoint без суффикса прогресса.
@@ -234,6 +260,14 @@ func (s *StepRunner) LastProgress() (curr, total int, unknownTotal bool, started
 		return 0, 0, false, time.Time{}, false
 	}
 	return s.resumeCurr, s.resumeTotal, s.resumeUnknown, s.resumeStarted, true
+}
+
+// LastCursor — cursor из mid-progress checkpoint (пустой если нет).
+func (s *StepRunner) LastCursor() string {
+	if s == nil || !s.resumeProgress {
+		return ""
+	}
+	return s.resumeCursor
 }
 
 func (s *StepRunner) writeValue(ctx context.Context, value string) error {
@@ -365,10 +399,12 @@ func (s *StepRunner) Progress(ctx context.Context, cfg StepProgressConfig) (*Ste
 
 	curr, total, unknown := 0, 0, true
 	started := time.Now()
+	cursor := ""
 	if s.resumeProgress && s.currentName == s.skipUntil {
 		curr = s.resumeCurr
 		unknown = s.resumeUnknown
 		total = s.resumeTotal
+		cursor = s.resumeCursor
 		if !s.resumeStarted.IsZero() {
 			started = s.resumeStarted
 		}
@@ -380,6 +416,7 @@ func (s *StepRunner) Progress(ctx context.Context, cfg StepProgressConfig) (*Ste
 		total:      total,
 		unknown:    unknown,
 		current:    curr,
+		cursor:     cursor,
 		started:    started,
 		flushEvery: cfg.FlushEvery,
 	}
@@ -424,10 +461,11 @@ type StepProgress struct {
 	total      int
 	unknown    bool
 	current    int
+	cursor     string // opaque resume token (page / offset / last id)
 	started    time.Time
 	flushEvery time.Duration
 	lastFlush  time.Time
-	dirty      bool   // SetTotal / смена total — сбросить throttle
+	dirty      bool   // SetTotal / SetCursor — сбросить throttle
 	control    string // из step-ключа (!pause / !stop)
 }
 
@@ -458,6 +496,24 @@ func (p *StepProgress) SetTotal(n int) {
 		p.total = n
 	}
 	p.dirty = true
+}
+
+// SetCursor сохраняет opaque-курсор продолжения (page token / offset / last id).
+// Символы '@' и '!' вырезаются. Запись в Redis — на следующем Advance/Flush.
+func (p *StepProgress) SetCursor(c string) {
+	if p == nil {
+		return
+	}
+	p.cursor = sanitizeCursor(c)
+	p.dirty = true
+}
+
+// Cursor — текущий курсор (в т.ч. после resume из ключа).
+func (p *StepProgress) Cursor() string {
+	if p == nil {
+		return ""
+	}
+	return p.cursor
 }
 
 // StartedAt — время старта бара (сохраняется в ключе при resume).
@@ -530,7 +586,7 @@ func (p *StepProgress) flush(ctx context.Context) error {
 	}
 	key := stepKey(p.runner.queue, p.runner.taskID)
 	// base без control — Lua подставит !pause/!stop из текущего ключа
-	base := encodeStepValue(p.name, p.current, p.total, p.unknown, p.started, StepControlNone)
+	base := encodeStepValue(p.name, p.current, p.total, p.unknown, p.started, p.cursor, StepControlNone)
 	ttlSec := int64(0)
 	if p.runner.ttl > 0 {
 		ttlSec = int64(p.runner.ttl / time.Second)
@@ -549,6 +605,7 @@ func (p *StepProgress) flush(ctx context.Context) error {
 	p.runner.resumeTotal = p.total
 	p.runner.resumeUnknown = p.unknown
 	p.runner.resumeStarted = p.started
+	p.runner.resumeCursor = p.cursor
 	p.lastFlush = time.Now()
 	return p.applyControl(ctx)
 }
@@ -585,7 +642,7 @@ func (p *StepProgress) waitWhilePaused(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("step progress pause poll: %w", err)
 		}
-		_, _, _, _, _, _, ctrl := parseStepValue(raw)
+		_, _, _, _, _, _, _, ctrl := parseStepValue(raw)
 		p.control = ctrl
 		switch ctrl {
 		case StepControlStop:

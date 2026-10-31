@@ -28,7 +28,7 @@
 | `partition:{part}:{prio}` | ZSET | Ожидающие задачи (score = scheduled ms) |
 | `partition:{part}:priorities` | ZSET | Известные priority для партиции |
 | `payload:{id}` | STRING | Тело задачи / маркер идемпотентности |
-| `step:{id}` | STRING | Checkpoint: `name` или `name#curr/total@startedMs[!pause\|!stop]`; чистится на Ack/Remove |
+| `step:{id}` | STRING | Checkpoint: `name` или `name#curr/total[:cursor]@startedMs[!pause\|!stop]`; чистится на Ack/Remove |
 | `headers:{id}` | HASH | Мета между попытками; чистится на Ack/Remove |
 | `consumers` | SET | ID consumer’ов |
 | `consumer:{cid}:tasks` | HASH | In-progress: taskId → score |

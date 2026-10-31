@@ -34,6 +34,7 @@ type StepProgressView struct {
 	Curr         int
 	Total        int
 	UnknownTotal bool
+	Cursor       string
 	StartedMs    int64
 	Control      string
 }
@@ -193,7 +194,8 @@ func stepProgressView(step string) *StepProgressView {
 		return nil
 	}
 	v := &StepProgressView{
-		Name: cp.Name, Curr: cp.Curr, Total: cp.Total, UnknownTotal: cp.UnknownTotal, Control: cp.Control,
+		Name: cp.Name, Curr: cp.Curr, Total: cp.Total, UnknownTotal: cp.UnknownTotal,
+		Cursor: cp.Cursor, Control: cp.Control,
 	}
 	if !cp.Started.IsZero() {
 		v.StartedMs = cp.Started.UnixMilli()

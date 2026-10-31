@@ -31,20 +31,24 @@ func TestParseEncodeStepValue(t *testing.T) {
 		curr    int
 		total   int
 		unk     bool
+		cursor  string
 		hasProg bool
 		hasTime bool
 	}{
-		{"import", "import", 0, 0, false, false, false},
-		{"import#3/10", "import", 3, 10, false, true, false},
-		{"import#3/?", "import", 3, 0, true, true, false},
-		{"import#3/10@1700000000000", "import", 3, 10, false, true, true},
-		{"import#7/?@1700000000000", "import", 7, 0, true, true, true},
-		{"bad#x/y", "bad#x/y", 0, 0, false, false, false},
+		{"import", "import", 0, 0, false, "", false, false},
+		{"import#3/10", "import", 3, 10, false, "", true, false},
+		{"import#3/?", "import", 3, 0, true, "", true, false},
+		{"import#3/10@1700000000000", "import", 3, 10, false, "", true, true},
+		{"import#7/?@1700000000000", "import", 7, 0, true, "", true, true},
+		{"import#3/?:page_abc@1700000000000", "import", 3, 0, true, "page_abc", true, true},
+		{"import#3/10:offset=42@1700000000000", "import", 3, 10, false, "offset=42", true, true},
+		{"import#3/10:a:b:c@1700000000000", "import", 3, 10, false, "a:b:c", true, true},
+		{"bad#x/y", "bad#x/y", 0, 0, false, "", false, false},
 	}
 	for _, tc := range cases {
-		n, c, tot, unk, st, hp, ctrl := parseStepValue(tc.raw)
-		if n != tc.name || c != tc.curr || tot != tc.total || unk != tc.unk || hp != tc.hasProg {
-			t.Fatalf("parse %q: got name=%q %d/%d unk=%v hp=%v", tc.raw, n, c, tot, unk, hp)
+		n, c, tot, unk, st, cur, hp, ctrl := parseStepValue(tc.raw)
+		if n != tc.name || c != tc.curr || tot != tc.total || unk != tc.unk || hp != tc.hasProg || cur != tc.cursor {
+			t.Fatalf("parse %q: got name=%q %d/%d unk=%v cur=%q hp=%v", tc.raw, n, c, tot, unk, cur, hp)
 		}
 		if ctrl != "" {
 			t.Fatalf("parse %q unexpected control %q", tc.raw, ctrl)
@@ -58,20 +62,24 @@ func TestParseEncodeStepValue(t *testing.T) {
 		}
 	}
 
-	enc := encodeStepValue("import", 3, 10, false, started, "")
+	enc := encodeStepValue("import", 3, 10, false, started, "", "")
 	if enc != "import#3/10@1700000000000" {
 		t.Fatalf("encode: %q", enc)
 	}
-	encU := encodeStepValue("import", 3, 0, true, started, "")
+	encU := encodeStepValue("import", 3, 0, true, started, "", "")
 	if encU != "import#3/?@1700000000000" {
 		t.Fatalf("encode unk: %q", encU)
 	}
-	encP := encodeStepValue("import", 3, 10, false, started, StepControlPause)
-	if encP != "import#3/10@1700000000000!pause" {
-		t.Fatalf("encode pause: %q", encP)
+	encC := encodeStepValue("import", 3, 0, true, started, "page_abc", "")
+	if encC != "import#3/?:page_abc@1700000000000" {
+		t.Fatalf("encode cursor: %q", encC)
+	}
+	encP := encodeStepValue("import", 3, 10, false, started, "off=1", StepControlPause)
+	if encP != "import#3/10:off=1@1700000000000!pause" {
+		t.Fatalf("encode pause+cursor: %q", encP)
 	}
 	cp := ParseStepCheckpoint(encP)
-	if !cp.HasProgress || cp.Control != StepControlPause || cp.Curr != 3 {
+	if !cp.HasProgress || cp.Control != StepControlPause || cp.Curr != 3 || cp.Cursor != "off=1" {
 		t.Fatalf("ParseStepCheckpoint: %+v", cp)
 	}
 }
@@ -139,7 +147,7 @@ func TestStepsProgressResume(t *testing.T) {
 		t.Fatalf("want boom, got %v", err)
 	}
 	raw, _ := rdb.Get(ctx, key).Result()
-	name, curr, total, unk, started, hp, _ := parseStepValue(raw)
+	name, curr, total, unk, started, _, hp, _ := parseStepValue(raw)
 	if !hp || name != "import" || curr != 3 || total != 10 || unk {
 		t.Fatalf("mid key %q → %s %d/%d", raw, name, curr, total)
 	}
@@ -196,6 +204,67 @@ func TestStepsProgressResume(t *testing.T) {
 	})
 	if ran {
 		t.Fatal("completed step should skip")
+	}
+}
+
+func TestStepsProgressCursorResume(t *testing.T) {
+	rdb := stepsTestRedis(t)
+	ctx := context.Background()
+	q, id := "steps-cur", "t1"
+	key := stepKey(q, id)
+	_ = rdb.Del(ctx, key)
+
+	s1, err := NewStepsRaw(ctx, rdb, q, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = s1.Do(ctx, "import", func(ctx context.Context) error {
+		bar, err := s1.Progress(ctx, StepProgressConfig{})
+		if err != nil {
+			return err
+		}
+		bar.SetCursor("page=2")
+		if err := bar.Advance(ctx, 1); err != nil {
+			return err
+		}
+		return errors.New("boom")
+	})
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("want boom, got %v", err)
+	}
+	raw, _ := rdb.Get(ctx, key).Result()
+	cp := ParseStepCheckpoint(raw)
+	if !cp.HasProgress || cp.Cursor != "page=2" || cp.Curr != 1 {
+		t.Fatalf("mid key %q → %+v", raw, cp)
+	}
+
+	s2, err := NewStepsRaw(ctx, rdb, q, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s2.LastCursor() != "page=2" {
+		t.Fatalf("LastCursor=%q", s2.LastCursor())
+	}
+	err = s2.Do(ctx, "import", func(ctx context.Context) error {
+		bar, err := s2.Progress(ctx, StepProgressConfig{})
+		if err != nil {
+			return err
+		}
+		if bar.Cursor() != "page=2" {
+			t.Fatalf("resume cursor=%q", bar.Cursor())
+		}
+		bar.SetCursor("page=3")
+		if err := bar.Flush(ctx); err != nil {
+			return err
+		}
+		return errors.New("still going")
+	})
+	if err == nil {
+		t.Fatal("expected error to keep mid-progress")
+	}
+	raw, _ = rdb.Get(ctx, key).Result()
+	if got := ParseStepCheckpoint(raw).Cursor; got != "page=3" {
+		t.Fatalf("want cursor page=3 in %q", raw)
 	}
 }
 
@@ -264,7 +333,7 @@ func TestStepProgressFlushPreservesControl(t *testing.T) {
 	_ = rdb.Del(ctx, key)
 
 	started := time.UnixMilli(1_700_000_000_000)
-	base1 := encodeStepValue("import", 1, 10, false, started, "")
+	base1 := encodeStepValue("import", 1, 10, false, started, "", "")
 	ctrl, err := stepProgressFlushScript.Run(ctx, rdb, []string{key}, base1, 0).Text()
 	if err != nil || ctrl != "" {
 		t.Fatalf("flush1: ctrl=%q err=%v", ctrl, err)
@@ -272,14 +341,14 @@ func TestStepProgressFlushPreservesControl(t *testing.T) {
 	if err := SetStepControl(ctx, rdb, "steps-lua", "t1", StepControlPause); err != nil {
 		t.Fatal(err)
 	}
-	base2 := encodeStepValue("import", 5, 10, false, started, "")
+	base2 := encodeStepValue("import", 5, 10, false, started, "c1", "")
 	ctrl, err = stepProgressFlushScript.Run(ctx, rdb, []string{key}, base2, 0).Text()
 	if err != nil || ctrl != StepControlPause {
 		t.Fatalf("flush2: ctrl=%q err=%v", ctrl, err)
 	}
 	raw, _ := rdb.Get(ctx, key).Result()
 	cp := ParseStepCheckpoint(raw)
-	if cp.Curr != 5 || cp.Control != StepControlPause {
+	if cp.Curr != 5 || cp.Control != StepControlPause || cp.Cursor != "c1" {
 		t.Fatalf("got %q %+v", raw, cp)
 	}
 }
