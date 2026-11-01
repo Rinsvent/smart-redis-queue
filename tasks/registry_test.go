@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -219,14 +220,14 @@ func TestConcurrencyAfterPendingRerunAfterAck(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	reg, _ := New(rdb, Config{Namespace: "svc3", DefaultQueue: "q"})
-	runs := 0
+	var runs atomic.Int32
 	block := make(chan struct{})
 	started := make(chan struct{})
 	_ = reg.Register(Def{
 		Name: "job", Cron: "0 * * * *", Concurrency: ConcurrencyAfter,
 		Handle: func(ctx context.Context, inv Invocation) error {
-			runs++
-			if runs == 1 {
+			n := runs.Add(1)
+			if n == 1 {
 				close(started)
 				<-block // держим in-flight, пока «тик» ставит pending_rerun
 			}
@@ -259,14 +260,14 @@ func TestConcurrencyAfterPendingRerunAfterAck(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if runs >= 2 {
+		if runs.Load() >= 2 {
 			cancel()
 			return
 		}
 		time.Sleep(30 * time.Millisecond)
 	}
 	t.Fatalf("want 2 runs after Ack+pending_rerun, got %d; flag=%q",
-		runs, rdb.HGet(ctx, runKey("svc3", "job"), "pending_rerun").Val())
+		runs.Load(), rdb.HGet(ctx, runKey("svc3", "job"), "pending_rerun").Val())
 }
 
 func TestRegistryConsume(t *testing.T) {
