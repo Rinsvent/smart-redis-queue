@@ -59,10 +59,12 @@ err := reg.Consume(ctx, tasks.ConsumeOptions{Workers: 8})
 | Режим | Поведение |
 |-------|-----------|
 | `forbid` | Пропустить тик |
-| `after` | `pending_rerun=1`; **сразу после** окончания текущего Dispatch — новый Enqueue (не ждём следующий час крона) |
+| `after` | `pending_rerun=1`; новый Enqueue **тем же id** после того, как текущий прогон **Ack**’нут (не ждём следующий cron) |
 | `allow` | Тик с `~r` — параллельный прогон |
 
-Пример `after`: cron раз в час, прогон 1.5ч → в :60 тик ставит `pending_rerun` → в :90 по End сразу стартует следующий (не в :120).
+Пока задача in-flight, `payload:{name}` жив → Enqueue NX не проходит, флаг **не** снимается. `Registry.Consume` вызывает flush в `SetAfterAck`; scheduler тоже пробует каждый тик.
+
+Пример `after`: cron раз в час, прогон 1.5ч → в :60 тик ставит `pending_rerun` → в :90 после Ack сразу стартует следующий (не в :120).
 
 ## UI Run (вручную)
 

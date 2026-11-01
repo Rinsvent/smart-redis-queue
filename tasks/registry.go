@@ -278,10 +278,17 @@ func (r *Registry) flushPendingRerun(ctx context.Context, d *Def) error {
 	if err != nil || v != "1" {
 		return nil
 	}
-	_ = r.rdb.HDel(ctx, key, "pending_rerun").Err()
-	// сразу после окончания текущей — не ждём следующий cron-тик
+	// Enqueue тем же id: пока payload жив (in-flight до Ack) — NX fail, флаг оставляем.
+	// Consume ставит AfterAck → повторный flush после Ack; scheduler тоже пробует каждый тик.
 	_, err = r.Enqueue(ctx, d.Name, RunOptions{})
-	return err
+	if isAlreadyExists(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_ = r.rdb.HDel(ctx, key, "pending_rerun").Err()
+	return nil
 }
 
 func argsFromTask(ctx context.Context, task *redisqueue.Task, schema []ArgDef) map[string]string {
@@ -402,6 +409,10 @@ func (r *Registry) scheduleTick(ctx context.Context, d *Def, now time.Time, next
 	sched, err := parseCron(d.Cron)
 	if err != nil {
 		return
+	}
+	// after: дотянуть pending_rerun, если прошлый flush упёрся в живой payload
+	if normalizeConcurrency(d.Concurrency) == ConcurrencyAfter {
+		_ = r.flushPendingRerun(ctx, d)
 	}
 	due, ok := nextDue[d.Name]
 	if !ok || due.IsZero() {

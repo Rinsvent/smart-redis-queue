@@ -365,6 +365,7 @@ type Consumer struct {
 	stats                       *StatsSink
 	statsOwn                    bool // true — Close останавливает stats loop
 	journalAck                  func(ctx context.Context, taskID string) error
+	afterAck                    func(ctx context.Context, taskID string) error
 	emergencyResume             bool
 	faultAt                     time.Time
 }
@@ -649,6 +650,11 @@ func (c *Consumer) SetJournalAck(fn func(ctx context.Context, taskID string) err
 	c.journalAck = fn
 }
 
+// SetAfterAck вызывается после успешного SRQ Ack (и после journalAck, если задан).
+func (c *Consumer) SetAfterAck(fn func(ctx context.Context, taskID string) error) {
+	c.afterAck = fn
+}
+
 // SetEmergencyResume — ждать srq:resume_after после ошибки Redis, похожей на потерю состояния.
 func (c *Consumer) SetEmergencyResume(on bool) {
 	c.emergencyResume = on
@@ -657,6 +663,11 @@ func (c *Consumer) SetEmergencyResume(on bool) {
 // SetJournalAck — как у Consumer; копируется на воркеры пула при respawn.
 func (p *ConsumerPool) SetJournalAck(fn func(ctx context.Context, taskID string) error) {
 	p.journalAck = fn
+}
+
+// SetAfterAck — как у Consumer; копируется на воркеры пула при respawn.
+func (p *ConsumerPool) SetAfterAck(fn func(ctx context.Context, taskID string) error) {
+	p.afterAck = fn
 }
 
 // SetEmergencyResume — как у Consumer; копируется на воркеры пула.
@@ -800,6 +811,11 @@ func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl time.D
 			return fmt.Errorf("journal ack: %w", err)
 		}
 	}
+	if c.afterAck != nil {
+		if err := c.afterAck(ctx, taskID); err != nil {
+			return fmt.Errorf("after ack: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -878,6 +894,7 @@ type ConsumerPool struct {
 	statsRetention              time.Duration
 	statsTags                   []string
 	journalAck                  func(ctx context.Context, taskID string) error
+	afterAck                    func(ctx context.Context, taskID string) error
 	emergencyResume             bool
 }
 
@@ -1028,6 +1045,7 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c.stats = stats
 		c.statsOwn = false
 		c.journalAck = p.journalAck
+		c.afterAck = p.afterAck
 		c.emergencyResume = p.emergencyResume
 
 		err := c.Consume(ctx, handler)

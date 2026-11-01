@@ -39,6 +39,7 @@ func TestConsumer_JournalAckAndEmergencyResumeSetters(t *testing.T) {
 
 	pool := NewConsumerPool(rdb, "test-queue")
 	pool.SetJournalAck(func(context.Context, string) error { return nil })
+	pool.SetAfterAck(func(context.Context, string) error { return nil })
 	pool.SetEmergencyResume(true)
 	pool.SetSamePartitionBatch(true)
 	pool.SetExtendGroupBlocksOnly(true)

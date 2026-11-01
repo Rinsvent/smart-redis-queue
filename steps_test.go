@@ -290,8 +290,8 @@ func TestStepsProgressBeginEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bar.SetTotal(5)
-	_ = bar.Advance(ctx, 1) // flushEvery hour but first Advance always flushes
+	bar.SetTotal(5) // dirty → следующий Advance сбросит throttle
+	_ = bar.Advance(ctx, 1)
 	raw, _ := rdb.Get(ctx, stepKey(q, id)).Result()
 	if !strings.Contains(raw, "#1/5@") {
 		t.Fatalf("want progress marker, got %q", raw)
@@ -301,6 +301,46 @@ func TestStepsProgressBeginEnd(t *testing.T) {
 	}
 	if got, _ := rdb.Get(ctx, stepKey(q, id)).Result(); got != "import" {
 		t.Fatalf("End: %q", got)
+	}
+}
+
+func TestStepsProgressFlushEveryThrottle(t *testing.T) {
+	rdb := stepsTestRedis(t)
+	ctx := context.Background()
+	q, id := "steps-th", "t1"
+	key := stepKey(q, id)
+	_ = rdb.Del(ctx, key)
+
+	s, err := NewStepsRaw(ctx, rdb, q, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := s.Begin(ctx, "import")
+	if err != nil || !ok {
+		t.Fatal(err, ok)
+	}
+	bar, err := s.Progress(ctx, StepProgressConfig{FlushEvery: time.Hour})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, _ := rdb.Get(ctx, key).Result()
+	// без dirty: Advance внутри окна не пишет Redis
+	if err := bar.Advance(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := rdb.Get(ctx, key).Result()
+	if before != after {
+		t.Fatalf("throttle broken: before=%q after=%q", before, after)
+	}
+	if bar.Current() != 1 {
+		t.Fatalf("current=%d", bar.Current())
+	}
+	if err := bar.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	flushed, _ := rdb.Get(ctx, key).Result()
+	if !strings.Contains(flushed, "#1/") {
+		t.Fatalf("after Flush: %q", flushed)
 	}
 }
 
@@ -439,12 +479,18 @@ func TestSteps_NewStepsPauseStopRelease(t *testing.T) {
 		if err := bar.Advance(ctx, 1); err != nil {
 			return err
 		}
+		// pause должен реально блокировать Advance (flush увидит !pause)
 		if err := SetStepControl(ctx, rdb, q, task.ID, StepControlPause); err != nil {
 			return err
 		}
 		done := make(chan error, 1)
 		go func() { done <- bar.Advance(ctx, 1) }()
-		time.Sleep(50 * time.Millisecond)
+		select {
+		case err := <-done:
+			return fmt.Errorf("Advance returned before resume: %v", err)
+		case <-time.After(300 * time.Millisecond):
+			// ещё ждёт — ок
+		}
 		if err := SetStepControl(ctx, rdb, q, task.ID, ""); err != nil {
 			return err
 		}
@@ -456,11 +502,16 @@ func TestSteps_NewStepsPauseStopRelease(t *testing.T) {
 		case <-time.After(3 * time.Second):
 			return errors.New("pause wait timeout")
 		}
+		currBeforeStop := bar.Current()
 		if err := SetStepControl(ctx, rdb, q, task.ID, StepControlStop); err != nil {
 			return err
 		}
 		if err := bar.Advance(ctx, 1); !errors.Is(err, ErrStepStopped) {
 			return fmt.Errorf("stop: %w", err)
+		}
+		// stop применяется после current+=n в Advance
+		if bar.Current() != currBeforeStop+1 {
+			return fmt.Errorf("stop after increment: curr=%d want %d", bar.Current(), currBeforeStop+1)
 		}
 		return ErrStepStopped
 	})
@@ -477,5 +528,58 @@ func TestSteps_NewStepsPauseStopRelease(t *testing.T) {
 	}
 	if n, _ := rdb.Exists(ctx, stepKey(q, task.ID)).Result(); n != 0 {
 		t.Fatal("step key should be gone after Release")
+	}
+}
+
+func TestSanitizeCursorAndHashNameRejected(t *testing.T) {
+	if got := sanitizeCursor(" a@b!c "); got != "abc" {
+		t.Fatalf("sanitize: %q", got)
+	}
+	started := time.UnixMilli(1_700_000_000_000)
+	enc := encodeStepValue("import", 1, 0, true, started, "x@y!z", "")
+	if enc != "import#1/?:xyz@1700000000000" {
+		t.Fatalf("encode sanitized cursor: %q", enc)
+	}
+
+	rdb := stepsTestRedis(t)
+	ctx := context.Background()
+	s, err := NewStepsRaw(ctx, rdb, "steps-hash", "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Begin(ctx, "bad#name"); err == nil {
+		t.Fatal("Begin must reject '#'")
+	}
+	if err := s.Commit(ctx, "bad#name"); err == nil {
+		t.Fatal("Commit must reject '#'")
+	}
+}
+
+func TestStepsTenOfTenStillIncomplete(t *testing.T) {
+	rdb := stepsTestRedis(t)
+	ctx := context.Background()
+	q, id := "steps-1010", "t1"
+	key := stepKey(q, id)
+	_ = rdb.Del(ctx, key)
+	started := time.UnixMilli(1_700_000_000_000)
+	_ = rdb.Set(ctx, key, encodeStepValue("import", 10, 10, false, started, "", ""), 0).Err()
+
+	s, err := NewStepsRaw(ctx, rdb, q, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, tot, _, _, ok := s.LastProgress()
+	if !ok || c != 10 || tot != 10 {
+		t.Fatalf("LastProgress: %d/%d ok=%v", c, tot, ok)
+	}
+	ran := false
+	if err := s.Do(ctx, "import", func(ctx context.Context) error {
+		ran = true
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !ran {
+		t.Fatal("#10/10 must still re-enter step until End/Commit bare name")
 	}
 }

@@ -52,6 +52,14 @@ func (r *Registry) Consume(ctx context.Context, opts ...ConsumeOptions) error {
 			defer wg.Done()
 			pool := redisqueue.NewConsumerPool(r.rdb, q)
 			pool.SetCount(o.Workers)
+			// pending_rerun: Enqueue тем же id возможен только после Ack (payload снят)
+			pool.SetAfterAck(func(ctx context.Context, taskID string) error {
+				d, ok := r.def(BaseName(taskID))
+				if !ok {
+					return nil
+				}
+				return r.flushPendingRerun(ctx, d)
+			})
 			pool.Consume(ctx, func(task *redisqueue.Task) error {
 				return r.Dispatch(ctx, task)
 			})

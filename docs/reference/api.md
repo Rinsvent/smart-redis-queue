@@ -56,6 +56,7 @@
 | `WithJournal(name, cursor)` | PublishOption: задачи + cursor (иначе `ErrJournalCursorRewind`) |
 | `SetResumeAfter` / `GetResumeAfter` | emergency stamp |
 | `Consumer.SetJournalAck` | после SRQ Ack |
+| `Consumer.SetAfterAck` | после SRQ Ack (после journalAck) |
 | `Consumer.SetEmergencyResume` | ждать stamp после fault |
 | `kafka.Source.Publish` | due→InTopic, far→ScheduleTopic |
 
