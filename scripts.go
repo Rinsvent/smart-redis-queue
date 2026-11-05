@@ -29,11 +29,12 @@ const (
 // ARGV[2] = количество задач
 // ARGV[3] = bpCount (число лимитов backpressure; 0 = выкл)
 // ARGV[4 .. 3+2*bpCount] = пары tag, limit
-// Далее группы по 7 аргументов на задачу (сдвиг taskBase = 4 + 2*bpCount):
+// Далее группы по 8 аргументов на задачу (сдвиг taskBase = 4 + 2*bpCount):
 //
-//	ARGV[taskBase + i*7] = task ID
-//	… partition, priority, scheduled, payload, tags, groups
+//	ARGV[taskBase + i*8] = task ID
+//	… partition, partitionPriority, queuePriority, scheduled, payload, tags, groups
 //
+// QueuePriority==0 → legacy-ключи без qp-префикса; >0 → queue:{q}:qp{N}:…
 // Возвращает:
 //
 //	— список индексов не добавленных (дубликаты NX);
@@ -58,9 +59,15 @@ if bpCount > 0 then
 end
 
 local taskBase = 4 + bpCount * 2
-local partitionsKey = "queue:" .. queueName .. ":partitions"
 -- groups: ZSET score=0|past (свободна) | unlockAt>now (блок). Единственный источник правды для групп.
 local groupsKey = "queue:" .. queueName .. ":groups"
+local queuePrioritiesKey = "queue:" .. queueName .. ":priorities"
+
+local function qpPrefix(qp)
+	qp = tonumber(qp) or 0
+	if qp == 0 then return "" end
+	return "qp" .. tostring(qp) .. ":"
+end
 
 local function ensureGroup(group)
 	if not redis.call('ZSCORE', groupsKey, group) then
@@ -68,8 +75,8 @@ local function ensureGroup(group)
 	end
 end
 
--- Поднять partition в ready всех её групп (после ZADD задачи).
-local function ensurePartitionReady(partitionCode)
+-- Поднять partition в ready всех её групп (после ZADD задачи); pref = "" | "qpN:"
+local function ensurePartitionReady(partitionCode, pref)
 	local partGroupsKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups"
 	local pgroups = redis.call('SMEMBERS', partGroupsKey)
 	if #pgroups == 0 then
@@ -79,7 +86,7 @@ local function ensurePartitionReady(partitionCode)
 	for gi = 1, #pgroups do
 		local g = pgroups[gi]
 		ensureGroup(g)
-		redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, partitionCode)
+		redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", 0, partitionCode)
 	end
 end
 
@@ -87,33 +94,43 @@ local debPrefix = "deb!"
 local notAddedItems = {}
 
 for i = 0, taskCount - 1 do
-    local base = taskBase + i * 7
+    local base = taskBase + i * 8
     local taskId = ARGV[base]
     local partitionCode = ARGV[base + 1]
 	if partitionCode == "" then
         partitionCode = "base"
 	end
     local priority = ARGV[base + 2]
-    local scheduled = tonumber(ARGV[base + 3])
-    local payload = ARGV[base + 4]
-    local tagsStr = ARGV[base + 5] or ""
-    local groupsStr = ARGV[base + 6] or ""
+    local queuePriority = tonumber(ARGV[base + 3]) or 0
+    local scheduled = tonumber(ARGV[base + 4])
+    local payload = ARGV[base + 5]
+    local tagsStr = ARGV[base + 6] or ""
+    local groupsStr = ARGV[base + 7] or ""
+	local pref = qpPrefix(queuePriority)
 
     local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
     local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
     local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
+	local qpriorityKey = "queue:" .. queueName .. ":qpriority:" .. taskId
+	local partitionsKey = "queue:" .. queueName .. ":" .. pref .. "partitions"
 	local isDebounce = taskId:sub(1, #debPrefix) == debPrefix
 
     local ok = redis.call('SET', payloadKey, payload, 'NX')
     if ok then
 		redis.call('SET', partitionKey, partitionCode)
 		redis.call('SET', priorityKey, priority)
+		if queuePriority > 0 then
+			redis.call('SET', qpriorityKey, tostring(queuePriority))
+			redis.call('ZADD', queuePrioritiesKey, queuePriority, tostring(queuePriority))
+		else
+			redis.call('DEL', qpriorityKey)
+		end
 
-		local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. priority
+		local partitionQueueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":" .. priority
 		redis.call('ZADD', partitionQueueKey, scheduled, taskId)
 		redis.call('SADD', partitionsKey, partitionCode)
 
-		local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
+		local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":priorities"
 		redis.call('ZADD', prioritiesKey, priority, priority)
 
 		if tagsStr ~= "" then
@@ -139,14 +156,14 @@ for i = 0, taskCount - 1 do
 				if group ~= "" then
 					hasGroup = true
 					ensureGroup(group)
-					redis.call('ZADD', "queue:" .. queueName .. ":group:" .. group .. ":ready", 0, partitionCode)
+					redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. group .. ":ready", 0, partitionCode)
 					redis.call('SADD', partGroupsKey, group)
 				end
 			end
 		end
 		if not hasGroup then
 			ensureGroup("_default")
-			redis.call('ZADD', "queue:" .. queueName .. ":group:_default:ready", 0, partitionCode)
+			redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:_default:ready", 0, partitionCode)
 			redis.call('SADD', partGroupsKey, "_default")
 		end
     elseif isDebounce then
@@ -160,27 +177,47 @@ for i = 0, taskCount - 1 do
 		if existingPrio == false then
 			existingPrio = "0"
 		end
-		local oldQueueKey = "queue:" .. queueName .. ":partition:" .. existingPart .. ":" .. existingPrio
+		local existingQpVal = redis.call('GET', qpriorityKey)
+		local existingQp = 0
+		if existingQpVal ~= false then
+			existingQp = tonumber(existingQpVal) or 0
+		end
+		local oldPref = qpPrefix(existingQp)
+		local oldQueueKey = "queue:" .. queueName .. ":" .. oldPref .. "partition:" .. existingPart .. ":" .. existingPrio
 		local inQueue = redis.call('ZSCORE', oldQueueKey, taskId)
 
 		redis.call('SET', payloadKey, payload)
 
 		if inQueue ~= false then
-			-- waiting: сдвинуть score; при смене part/prio — перенести member
-			if existingPart ~= partitionCode or tostring(existingPrio) ~= tostring(priority) then
+			-- waiting: сдвинуть score; при смене part/prio/qp — перенести member
+			local moved = existingPart ~= partitionCode or tostring(existingPrio) ~= tostring(priority) or existingQp ~= queuePriority
+			if moved then
 				redis.call('ZREM', oldQueueKey, taskId)
 				redis.call('SET', partitionKey, partitionCode)
 				redis.call('SET', priorityKey, priority)
 			end
-			local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. priority
+			if queuePriority > 0 then
+				redis.call('SET', qpriorityKey, tostring(queuePriority))
+				redis.call('ZADD', queuePrioritiesKey, queuePriority, tostring(queuePriority))
+			else
+				redis.call('DEL', qpriorityKey)
+			end
+			local partitionQueueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":" .. priority
 			redis.call('ZADD', partitionQueueKey, scheduled, taskId)
 			redis.call('SADD', partitionsKey, partitionCode)
-			local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
+			local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":priorities"
 			redis.call('ZADD', prioritiesKey, priority, priority)
-			ensurePartitionReady(partitionCode)
+			ensurePartitionReady(partitionCode, pref)
 			redis.call('DEL', debounceKey)
 		else
-			-- in-flight: только payload + флаг until (без ZADD)
+			-- in-flight: только payload + флаг until (без ZADD); meta part/prio/qp обновим при reactivate
+			redis.call('SET', partitionKey, partitionCode)
+			redis.call('SET', priorityKey, priority)
+			if queuePriority > 0 then
+				redis.call('SET', qpriorityKey, tostring(queuePriority))
+			else
+				redis.call('DEL', qpriorityKey)
+			end
 			redis.call('SET', debounceKey, tostring(scheduled))
 		end
     else
@@ -282,16 +319,23 @@ local now = currentUnix * 1000 + math.floor(currentTime[2] / 1000)
 local nowSec = now / 1000.0
 
 -- Формируем ключи
-local partitionsKey = "queue:" .. queueName .. ":partitions"
 local consumersKey = "queue:" .. queueName .. ":consumers"
 local consumerKey = "queue:" .. queueName .. ":consumer:" .. consumerId
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
+local queuePrioritiesKey = "queue:" .. queueName .. ":priorities"
+
+-- currentPref: "" (legacy qp=0) или "qpN:" — lane для ready/partitions/ZSET задач
+local currentPref = ""
+local function qpPrefix(qp)
+	qp = tonumber(qp) or 0
+	if qp == 0 then return "" end
+	return "qp" .. tostring(qp) .. ":"
+end
 
 local acquiredPartitionLocks = {}
 local partitionHadTask = {}
 -- R4/D4: партиции с головой score>now — не заходим снова до конца этого Get
 local deferredPartitions = {}
-
 local function ensureRaceLocks()
 	if raceLocks ~= nil then
 		return
@@ -528,23 +572,29 @@ local function isAdmissionBlocked(partition)
 end
 
 local function removePartitionFromIndexes(partition)
+	local partitionsKey = "queue:" .. queueName .. ":" .. currentPref .. "partitions"
 	redis.call('SREM', partitionsKey, partition)
 	local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
 	for gi = 1, #pgroups do
 		local g = pgroups[gi]
-		local readyKey = "queue:" .. queueName .. ":group:" .. g .. ":ready"
+		local readyKey = "queue:" .. queueName .. ":" .. currentPref .. "group:" .. g .. ":ready"
 		redis.call('ZREM', readyKey, partition)
 		if redis.call('ZCARD', readyKey) == 0 then
 			redis.call('DEL', readyKey)
-			-- не снимаем rate-limit: ZREM groups только если score <= now
-			local gs = redis.call('ZSCORE', groupsKey, g)
-			if (not gs) or (tonumber(gs) <= now) then
-				redis.call('ZREM', groupsKey, g)
+			-- shared groups: снимаем только в legacy-lane (иначе другие qp ещё могут ссылаться)
+			if currentPref == "" then
+				local gs = redis.call('ZSCORE', groupsKey, g)
+				if (not gs) or (tonumber(gs) <= now) then
+					redis.call('ZREM', groupsKey, g)
+				end
 			end
 		end
 	end
-	redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
-	redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":priorities")
+	-- shared partition:groups удаляем только в legacy; qp-lanes не трогают
+	if currentPref == "" then
+		redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
+	end
+	redis.call('DEL', "queue:" .. queueName .. ":" .. currentPref .. "partition:" .. partition .. ":priorities")
 end
 
 -- Функция для получения одной задачи из партиции
@@ -581,11 +631,11 @@ local function getFromPartition(partition, group)
 	-- :count только для ordered (!): нужен, чтобы снять :lock при prefetch>1
 	local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partition .. ":count"
 	local found = false
-	local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partition .. ":priorities"
+	local prioritiesKey = "queue:" .. queueName .. ":" .. currentPref .. "partition:" .. partition .. ":priorities"
 	local priorities = redis.call('ZREVRANGE', prioritiesKey, 0, -1)
 	for p = 1, #priorities do
 		local maxPriority = priorities[p]
-		local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partition .. ":" .. maxPriority
+		local partitionQueueKey = "queue:" .. queueName .. ":" .. currentPref .. "partition:" .. partition .. ":" .. maxPriority
 		local tasks = redis.call('ZRANGE', partitionQueueKey, 0, 0, 'WITHSCORES')
 
 		if #tasks >= 2 then
@@ -661,7 +711,7 @@ local lastCollectedGroup = nil
 
 -- ready = ZSET (score=0). Random start index → ZRANGE батчами по кругу. Память O(batch).
 local function tryReadyGroup(g)
-	local readyKey = "queue:" .. queueName .. ":group:" .. g .. ":ready"
+	local readyKey = "queue:" .. queueName .. ":" .. currentPref .. "group:" .. g .. ":ready"
 	local n = redis.call('ZCARD', readyKey)
 	if n == 0 then
 		return nil
@@ -694,10 +744,8 @@ local function tryReadyGroup(g)
 	return nil
 end
 
--- Обход свободных групп: ZCOUNT + ZRANGEBYSCORE LIMIT батчами (память O(batch)),
--- random start по кругу — как tryReadyGroup. Если mid-walk F4 сделал ZADD
--- future score, free-set сжался и offset-walk ломается → refresh ZCOUNT и заново.
-local function collectOne()
+-- Обход свободных групп в текущем currentPref: ZCOUNT + ZRANGEBYSCORE LIMIT батчами.
+local function collectOneLane()
 	for _ = 1, 64 do
 		local n = redis.call('ZCOUNT', groupsKey, '-inf', now)
 		if n == 0 then
@@ -746,16 +794,39 @@ local function collectOne()
 	return nil
 end
 
+-- Сначала qp>0 (high→low), затем legacy (qp=0 / пустой queue:priorities).
+local function collectOne()
+	local qpris = redis.call('ZREVRANGE', queuePrioritiesKey, 0, -1)
+	for qi = 1, #qpris do
+		local qp = tonumber(qpris[qi]) or 0
+		if qp > 0 then
+			currentPref = qpPrefix(qp)
+			local taskData = collectOneLane()
+			if taskData then
+				return taskData
+			end
+			-- lane пуста → убрать из индекса
+			if redis.call('SCARD', "queue:" .. queueName .. ":" .. currentPref .. "partitions") == 0 then
+				redis.call('ZREM', queuePrioritiesKey, tostring(qp))
+			end
+		end
+	end
+	currentPref = ""
+	return collectOneLane()
+end
+
 -- Основной цикл: набираем до prefetchCount задач (4 элемента на задачу: id, partition, payload, rejectCount)
--- samePartition: первая задача — обычный честный выбор группы и партиции, остальные — только из её партиции.
+-- samePartition: первая задача — обычный честный выбор группы и партиции, остальные — только из её партиции (+ тот же qp).
 local stickyPartition = nil
 local stickyGroup = nil
+local stickyPref = nil
 while #results / 4 < prefetchCount do
 	if raceBudgetExhausted then
 		break
 	end
 	local taskData
 	if stickyPartition then
+		currentPref = stickyPref or ""
 		taskData = tryCollectFromPartition(stickyPartition, stickyGroup)
 	else
 		taskData = collectOne()
@@ -766,6 +837,7 @@ while #results / 4 < prefetchCount do
 	if samePartition and not stickyPartition then
 		stickyPartition = taskData[2]
 		stickyGroup = lastCollectedGroup
+		stickyPref = currentPref
 	end
 	results[#results + 1] = taskData[1]
 	results[#results + 1] = taskData[2]
@@ -851,7 +923,7 @@ end
 redis.call('HDEL', consumerTasksKey, taskId)
 releaseRaceLocks()
 
--- F2: только deb! id — GET флага/priority и reactivate; иначе нулевой оверхед
+-- F2: только deb! id — GET флага/priority/qpriority и reactivate; иначе нулевой оверхед
 if isDebounce then
 	local debounceKey = "queue:" .. queueName .. ":debounce:" .. taskId
 	local debounceUntil = redis.call('GET', debounceKey)
@@ -861,11 +933,22 @@ if isDebounce then
 		if priorityVal then
 			priority = tonumber(priorityVal) or 0
 		end
+		local qpriorityKey = "queue:" .. queueName .. ":qpriority:" .. taskId
+		local qpVal = redis.call('GET', qpriorityKey)
+		local queuePriority = 0
+		if qpVal ~= false then
+			queuePriority = tonumber(qpVal) or 0
+		end
+		local pref = ""
+		if queuePriority > 0 then
+			pref = "qp" .. tostring(queuePriority) .. ":"
+			redis.call('ZADD', "queue:" .. queueName .. ":priorities", queuePriority, tostring(queuePriority))
+		end
 		local score = tonumber(debounceUntil) or 0
-		local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. tostring(priority)
+		local partitionQueueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":" .. tostring(priority)
 		redis.call('ZADD', partitionQueueKey, score, taskId)
-		redis.call('SADD', "queue:" .. queueName .. ":partitions", partitionCode)
-		redis.call('ZADD', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities", priority, tostring(priority))
+		redis.call('SADD', "queue:" .. queueName .. ":" .. pref .. "partitions", partitionCode)
+		redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":priorities", priority, tostring(priority))
 		local groupsKey = "queue:" .. queueName .. ":groups"
 		local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups")
 		if #pgroups == 0 then
@@ -877,7 +960,7 @@ if isDebounce then
 			if not redis.call('ZSCORE', groupsKey, g) then
 				redis.call('ZADD', groupsKey, 0, g)
 			end
-			redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, partitionCode)
+			redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", 0, partitionCode)
 		end
 		redis.call('DEL', debounceKey)
 		-- race:tags оставляем — задача снова в очереди
@@ -893,6 +976,7 @@ else
 	redis.call('DEL', payloadKey)
 end
 redis.call('DEL', partitionKey, priorityKey,
+	"queue:" .. queueName .. ":qpriority:" .. taskId,
 	"queue:" .. queueName .. ":reject_count:" .. taskId,
 	"queue:" .. queueName .. ":step:" .. taskId,
 	"queue:" .. queueName .. ":headers:" .. taskId,
@@ -950,6 +1034,16 @@ local priority = 0
 if priorityVal then
     priority = tonumber(priorityVal) or 0
 end
+local qpriorityKey = "queue:" .. queueName .. ":qpriority:" .. taskId
+local qpVal = redis.call('GET', qpriorityKey)
+local queuePriority = 0
+if qpVal ~= false then
+	queuePriority = tonumber(qpVal) or 0
+end
+local pref = ""
+if queuePriority > 0 then
+	pref = "qp" .. tostring(queuePriority) .. ":"
+end
 
 local now = redis.call('TIME')
 local nowMs = now[1] * 1000 + math.floor(now[2] / 1000)
@@ -964,14 +1058,17 @@ local needsLockUnlock = partitionCode:sub(1, 1) == "!"
 local rejectCountKey = "queue:" .. queueName .. ":reject_count:" .. taskId
 redis.call('INCR', rejectCountKey)
 
--- Возвращаем задачу обратно в очередь (тот же priority + исходный score)
-local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":" .. priority
+-- Возвращаем задачу обратно в очередь (тот же qp + partitionPriority + исходный score)
+local partitionQueueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":" .. priority
 redis.call('ZADD', partitionQueueKey, score, taskId)
-local partitionsKey = "queue:" .. queueName .. ":partitions"
+local partitionsKey = "queue:" .. queueName .. ":" .. pref .. "partitions"
 local groupsKey = "queue:" .. queueName .. ":groups"
 redis.call('SADD', partitionsKey, partitionCode)
-local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":priorities"
+local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":priorities"
 redis.call('ZADD', prioritiesKey, priority, tostring(priority))
+if queuePriority > 0 then
+	redis.call('ZADD', "queue:" .. queueName .. ":priorities", queuePriority, tostring(queuePriority))
+end
 
 -- ready = «есть/была работа». Блок группы — score в groups (не трогаем, если уже > now).
 local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups")
@@ -984,7 +1081,7 @@ for gi = 1, #pgroups do
 	if not redis.call('ZSCORE', groupsKey, g) then
 		redis.call('ZADD', groupsKey, 0, g)
 	end
-	redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, partitionCode)
+	redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", 0, partitionCode)
 end
 
 -- :count / :lock только для ordered (!)
@@ -1118,7 +1215,6 @@ for i = 1, #consumers do
 		-- Консьюмер мёртв — ZADD задач per-task; индексы partitions/priorities/ready/count — 1× на partition (R5)
 		local lockOwnerTasksKey = "queue:" .. queueName .. ":consumer:" .. lockOwner .. ":tasks"
 		local tasksData = redis.call('HGETALL', lockOwnerTasksKey)
-		local partitionsKey = "queue:" .. queueName .. ":partitions"
 		local restoredParts = {}
 		local partPriorities = {}
 
@@ -1138,9 +1234,19 @@ for i = 1, #consumers do
 				if taskPriorityVal then
 					taskPriority = tonumber(taskPriorityVal) or 0
 				end
+				local taskQpKey = "queue:" .. queueName .. ":qpriority:" .. taskToReturn
+				local taskQpVal = redis.call('GET', taskQpKey)
+				local taskQp = 0
+				if taskQpVal ~= false then
+					taskQp = tonumber(taskQpVal) or 0
+				end
+				local pref = ""
+				if taskQp > 0 then
+					pref = "qp" .. tostring(taskQp) .. ":"
+				end
 
 				local score = tonumber(meta) or now
-				local partitionQueueKey = "queue:" .. queueName .. ":partition:" .. taskPartition .. ":" .. taskPriority
+				local partitionQueueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. taskPartition .. ":" .. taskPriority
 				redis.call('ZADD', partitionQueueKey, score, taskToReturn)
 				-- F2: reclaim → DEL debounce только для deb! id
 				local debPrefix = "deb!"
@@ -1159,18 +1265,25 @@ for i = 1, #consumers do
 					end
 				end
 
-				restoredParts[taskPartition] = true
-				if not partPriorities[taskPartition] then
-					partPriorities[taskPartition] = {}
+				local laneKey = pref .. taskPartition
+				restoredParts[laneKey] = {part = taskPartition, pref = pref, qp = taskQp}
+				if not partPriorities[laneKey] then
+					partPriorities[laneKey] = {}
 				end
-				partPriorities[taskPartition][tostring(taskPriority)] = taskPriority
+				partPriorities[laneKey][tostring(taskPriority)] = taskPriority
 			end
 		end
 
-		for part, _ in pairs(restoredParts) do
-			redis.call('SADD', partitionsKey, part)
-			local prioritiesKey = "queue:" .. queueName .. ":partition:" .. part .. ":priorities"
-			for prioStr, prioNum in pairs(partPriorities[part]) do
+		for laneKey, info in pairs(restoredParts) do
+			local part = info.part
+			local pref = info.pref
+			local qp = info.qp
+			redis.call('SADD', "queue:" .. queueName .. ":" .. pref .. "partitions", part)
+			if qp > 0 then
+				redis.call('ZADD', "queue:" .. queueName .. ":priorities", qp, tostring(qp))
+			end
+			local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. part .. ":priorities"
+			for prioStr, prioNum in pairs(partPriorities[laneKey]) do
 				redis.call('ZADD', prioritiesKey, prioNum, prioStr)
 			end
 
@@ -1184,7 +1297,7 @@ for i = 1, #consumers do
 				if not redis.call('ZSCORE', groupsKey, g) then
 					redis.call('ZADD', groupsKey, 0, g)
 				end
-				redis.call('ZADD', "queue:" .. queueName .. ":group:" .. g .. ":ready", 0, part)
+				redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", 0, part)
 			end
 
 			if part:sub(1, 1) == "!" then
@@ -1213,6 +1326,7 @@ local taskId = ARGV[2]
 local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
 local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
 local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
+local qpriorityKey = "queue:" .. queueName .. ":qpriority:" .. taskId
 local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
 
 local function cleanupTags()
@@ -1235,7 +1349,16 @@ if not partition then
 end
 
 local priority = redis.call('GET', priorityKey) or '0'
-local queueKey = "queue:" .. queueName .. ":partition:" .. partition .. ":" .. priority
+local qpVal = redis.call('GET', qpriorityKey)
+local queuePriority = 0
+if qpVal ~= false then
+	queuePriority = tonumber(qpVal) or 0
+end
+local pref = ""
+if queuePriority > 0 then
+	pref = "qp" .. tostring(queuePriority) .. ":"
+end
+local queueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":" .. priority
 
 if redis.call('ZREM', queueKey, taskId) == 0 then
 	-- Задача взята консьюмером (или уже не в ZSET) — не трогаем.
@@ -1243,7 +1366,7 @@ if redis.call('ZREM', queueKey, taskId) == 0 then
 end
 
 local payload = redis.call('GET', payloadKey) or ''
-redis.call('DEL', payloadKey, partitionKey, priorityKey,
+redis.call('DEL', payloadKey, partitionKey, priorityKey, qpriorityKey,
 	"queue:" .. queueName .. ":reject_count:" .. taskId,
 	"queue:" .. queueName .. ":step:" .. taskId,
 	"queue:" .. queueName .. ":headers:" .. taskId)
@@ -1259,28 +1382,34 @@ for i = 1, #rtags do
 end
 redis.call('DEL', raceTagsKey)
 
-local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partition .. ":priorities"
+local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":priorities"
 if redis.call('ZCARD', queueKey) == 0 then
 	redis.call('ZREM', prioritiesKey, priority)
 	if redis.call('ZCARD', prioritiesKey) == 0 then
-		redis.call('SREM', "queue:" .. queueName .. ":partitions", partition)
+		redis.call('SREM', "queue:" .. queueName .. ":" .. pref .. "partitions", partition)
 		local t = redis.call('TIME')
 		local nowMs = t[1] * 1000 + math.floor(t[2] / 1000)
 		local groupsKey = "queue:" .. queueName .. ":groups"
 		local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
 		for gi = 1, #pgroups do
 			local g = pgroups[gi]
-			local readyKey = "queue:" .. queueName .. ":group:" .. g .. ":ready"
+			local readyKey = "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready"
 			redis.call('ZREM', readyKey, partition)
 			if redis.call('ZCARD', readyKey) == 0 then
 				redis.call('DEL', readyKey)
-				local gs = redis.call('ZSCORE', groupsKey, g)
-				if (not gs) or (tonumber(gs) <= nowMs) then
-					redis.call('ZREM', groupsKey, g)
+				if pref == "" then
+					local gs = redis.call('ZSCORE', groupsKey, g)
+					if (not gs) or (tonumber(gs) <= nowMs) then
+						redis.call('ZREM', groupsKey, g)
+					end
 				end
 			end
 		end
-		redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
+		if pref == "" then
+			redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
+		elseif redis.call('SCARD', "queue:" .. queueName .. ":" .. pref .. "partitions") == 0 then
+			redis.call('ZREM', "queue:" .. queueName .. ":priorities", tostring(queuePriority))
+		end
 	end
 end
 
@@ -1331,6 +1460,7 @@ local function removeOne(taskId)
 	local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
 	local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
 	local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
+	local qpriorityKey = "queue:" .. queueName .. ":qpriority:" .. taskId
 
 	local partition = redis.call('GET', partitionKey)
 	if not partition then
@@ -1339,41 +1469,56 @@ local function removeOne(taskId)
 	end
 
 	local priority = redis.call('GET', priorityKey) or '0'
-	local queueKey = "queue:" .. queueName .. ":partition:" .. partition .. ":" .. priority
+	local qpVal = redis.call('GET', qpriorityKey)
+	local queuePriority = 0
+	if qpVal ~= false then
+		queuePriority = tonumber(qpVal) or 0
+	end
+	local pref = ""
+	if queuePriority > 0 then
+		pref = "qp" .. tostring(queuePriority) .. ":"
+	end
+	local queueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":" .. priority
 
 	if redis.call('ZREM', queueKey, taskId) == 0 then
 		return 'inprogress', ''
 	end
 
 	local payload = redis.call('GET', payloadKey) or ''
-	redis.call('DEL', payloadKey, partitionKey, priorityKey,
+	redis.call('DEL', payloadKey, partitionKey, priorityKey, qpriorityKey,
 		"queue:" .. queueName .. ":reject_count:" .. taskId,
 		"queue:" .. queueName .. ":step:" .. taskId,
 		"queue:" .. queueName .. ":headers:" .. taskId)
 	cleanupTags(taskId)
 
-	local prioritiesKey = "queue:" .. queueName .. ":partition:" .. partition .. ":priorities"
+	local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":priorities"
 	if redis.call('ZCARD', queueKey) == 0 then
 		redis.call('ZREM', prioritiesKey, priority)
 		if redis.call('ZCARD', prioritiesKey) == 0 then
-			redis.call('SREM', "queue:" .. queueName .. ":partitions", partition)
+			redis.call('SREM', "queue:" .. queueName .. ":" .. pref .. "partitions", partition)
 			local t = redis.call('TIME')
 			local nowMs = t[1] * 1000 + math.floor(t[2] / 1000)
 			local groupsKey = "queue:" .. queueName .. ":groups"
 			local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
 			for gi = 1, #pgroups do
 				local g = pgroups[gi]
-				local readyKey = "queue:" .. queueName .. ":group:" .. g .. ":ready"
+				local readyKey = "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready"
 				redis.call('ZREM', readyKey, partition)
 				if redis.call('ZCARD', readyKey) == 0 then
 					redis.call('DEL', readyKey)
-					local gs = redis.call('ZSCORE', groupsKey, g)
-					if (not gs) or (tonumber(gs) <= nowMs) then
-						redis.call('ZREM', groupsKey, g)
+					if pref == "" then
+						local gs = redis.call('ZSCORE', groupsKey, g)
+						if (not gs) or (tonumber(gs) <= nowMs) then
+							redis.call('ZREM', groupsKey, g)
+						end
 					end
 				end
 			end
-			redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
+			if pref == "" then
+				redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
+			elseif redis.call('SCARD', "queue:" .. queueName .. ":" .. pref .. "partitions") == 0 then
+				redis.call('ZREM', "queue:" .. queueName .. ":priorities", tostring(queuePriority))
+			end
 		end
 	end
 

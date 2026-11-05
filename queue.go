@@ -103,14 +103,15 @@ func generateConsumerID() string {
 
 // Task задача в очереди
 type Task struct {
-	ID          string    `json:"id"`
-	Partition   string    `json:"partition,omitempty"`
-	Priority    int       `json:"priority,omitempty"`
-	Payload     []byte    `json:"-"`
-	Scheduled   time.Time `json:"scheduled"`
-	Tags        []string  `json:"tags,omitempty"`        // теги для индексации / массового удаления
-	Groups      []string  `json:"groups,omitempty"`      // rate-limit / обход Get (пустые → DefaultGroup)
-	RejectCount int       `json:"rejectCount,omitempty"` // кол-во reject для расчёта задержки
+	ID                string    `json:"id"`
+	Partition         string    `json:"partition,omitempty"`
+	PartitionPriority int       `json:"partitionPriority,omitempty"` // порядок внутри партиции (больше → раньше)
+	QueuePriority     int       `json:"queuePriority,omitempty"`     // порядок по очереди; 0 = legacy-ключи без qp-префикса
+	Payload           []byte    `json:"-"`
+	Scheduled         time.Time `json:"scheduled"`
+	Tags              []string  `json:"tags,omitempty"`        // теги для индексации / массового удаления
+	Groups            []string  `json:"groups,omitempty"`      // rate-limit / обход Get (пустые → DefaultGroup)
+	RejectCount       int       `json:"rejectCount,omitempty"` // кол-во reject для расчёта задержки
 
 	// bindRedis / bindQueue — клиент и очередь consumer’а после Get (для NewSteps; шард верный).
 	bindRedis *redis.Client
@@ -211,7 +212,7 @@ func (p *Producer) publishLocal(ctx context.Context, opts []PublishOption, tasks
 	}
 
 	bp := cfg.bpArgs()
-	args := make([]interface{}, 0, 2+len(bp)+len(tasks)*7)
+	args := make([]interface{}, 0, 2+len(bp)+len(tasks)*8)
 	args = append(args, p.queueName, len(tasks))
 	args = append(args, bp...)
 
@@ -237,7 +238,7 @@ func (p *Producer) publishLocal(ctx context.Context, opts []PublishOption, tasks
 			return err
 		}
 		// []byte в ARGV — binary-safe RESP bulk string (без string() копирования смысла)
-		args = append(args, task.ID, task.Partition, task.Priority, scheduled, payload, tags, groups)
+		args = append(args, task.ID, task.Partition, task.PartitionPriority, task.QueuePriority, scheduled, payload, tags, groups)
 	}
 
 	script := getAddScript()

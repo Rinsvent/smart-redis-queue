@@ -169,13 +169,13 @@ func runSeed(ctx context.Context, c *cli.Command) error {
 						g = []string{"smtp:1", "smtp:2"}
 					}
 					tasks = append(tasks, &redisqueue.Task{
-						ID:        fmt.Sprintf("mail-db%d-%d", db, i),
-						Partition: fmt.Sprintf("!user:%d", i%5),
-						Priority:  i % 3,
-						Payload:   []byte(fmt.Sprintf(`{"db":%d,"kind":"mail","i":%d,"text":"hello-mail"}`, db, i)),
-						Scheduled: now,
-						Groups:    g,
-						Tags:      []string{"all", "campaign:spring", "channel:email", fmt.Sprintf("batch:%d", i/4)},
+						ID:                fmt.Sprintf("mail-db%d-%d", db, i),
+						Partition:         fmt.Sprintf("!user:%d", i%5),
+						PartitionPriority: i % 3,
+						Payload:           []byte(fmt.Sprintf(`{"db":%d,"kind":"mail","i":%d,"text":"hello-mail"}`, db, i)),
+						Scheduled:         now,
+						Groups:            g,
+						Tags:              []string{"all", "campaign:spring", "channel:email", fmt.Sprintf("batch:%d", i/4)},
 					})
 				}
 				tasks = append(tasks,
@@ -248,7 +248,7 @@ func runSeed(ctx context.Context, c *cli.Command) error {
 						Groups: []string{"conn:west"}, Tags: []string{"all", "region:west", "mix"}},
 					{ID: fmt.Sprintf("mix-c-db%d", db), Partition: "jobs", Payload: []byte(`{"x":3}`), Scheduled: now,
 						Groups: []string{"conn:east", "conn:west"}, Tags: []string{"all", "region:multi", "mix", "race!file:logo"}},
-					{ID: fmt.Sprintf("mix-d-db%d", db), Partition: "!shop:1", Priority: 2, Payload: []byte(`{"x":4,"prio":2}`), Scheduled: now,
+					{ID: fmt.Sprintf("mix-d-db%d", db), Partition: "!shop:1", PartitionPriority: 2, Payload: []byte(`{"x":4,"prio":2}`), Scheduled: now,
 						Groups: []string{"conn:east"}, Tags: []string{"all", "region:east", "mix", "priority"}},
 				}
 				if err := producer.Publish(ctx, tasks...); err != nil {
@@ -389,13 +389,13 @@ func runPublish(ctx context.Context, c *cli.Command) error {
 			idx := published + i
 			part, g := demoPartition(idx, nParts, groups, fixedPart, ordered)
 			tasks = append(tasks, &redisqueue.Task{
-				ID:        fmt.Sprintf("live-%d-%d", time.Now().UnixNano(), idx),
-				Partition: part,
-				Priority:  priority,
-				Payload:   []byte(fmt.Sprintf(`{"i":%d,"ts":%d,"stub":true}`, idx, time.Now().Unix())),
-				Scheduled: now,
-				Groups:    g,
-				Tags:      tags,
+				ID:                fmt.Sprintf("live-%d-%d", time.Now().UnixNano(), idx),
+				Partition:         part,
+				PartitionPriority: priority,
+				Payload:           []byte(fmt.Sprintf(`{"i":%d,"ts":%d,"stub":true}`, idx, time.Now().Unix())),
+				Scheduled:         now,
+				Groups:            g,
+				Tags:              tags,
 			})
 		}
 

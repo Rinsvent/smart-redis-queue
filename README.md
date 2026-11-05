@@ -13,7 +13,7 @@
 - **Гарантия порядка выполнения** — ordered-партиции (префикс `!`) обрабатываются строго последовательно одним консьюмером; reject и reclaim мёртвого consumer возвращают задачу с исходным ZSET score (без `priority+1`)
 - **Отложенные сообщения** — задачи с полем `Scheduled` становятся доступны только после указанного времени
 - **Чистка мёртвых консьюмеров** — heartbeat и автоматическое возвращение задач при падении воркера
-- **Приоритет выполнения** — в рамках партиции задачи с большим `Priority` обрабатываются первыми
+- **Приоритет выполнения** — `QueuePriority` (порядок по очереди) и `PartitionPriority` (внутри партиции; больше → раньше)
 - **Батч-добавление** — атомарная публикация нескольких задач за один вызов `Publish`
 - **Prefetch с сохранением порядка** — для ordered-партиций при reject первой задачи в батче остальные тоже reject'ятся и возвращаются в правильном порядке
 - **Rate limiting** — `RejectWithDelay` / `BlockGroups`: группы через score в `groups`, партиции через `blocked` (`p:`); Get обходит только свободные группы
@@ -98,12 +98,13 @@ producer.Publish(ctx, &redisqueue.Task{
 ### Приоритеты
 
 ```go
-// Задачи с большим Priority обрабатываются первыми
+// PartitionPriority — внутри партиции; QueuePriority — между группами/партициями очереди
 producer.Publish(ctx,
-    &redisqueue.Task{ID: "low", Partition: "p1", Priority: 1, Payload: []byte("low"), Scheduled: time.Now()},
-    &redisqueue.Task{ID: "high", Partition: "p1", Priority: 10, Payload: []byte("high"), Scheduled: time.Now()},
+    &redisqueue.Task{ID: "low", Partition: "p1", PartitionPriority: 1, Payload: []byte("low"), Scheduled: time.Now()},
+    &redisqueue.Task{ID: "high", Partition: "p1", PartitionPriority: 10, Payload: []byte("high"), Scheduled: time.Now()},
+    &redisqueue.Task{ID: "urgent", Partition: "p2", Groups: []string{"other"}, QueuePriority: 5, Payload: []byte("urgent"), Scheduled: time.Now()},
 )
-// Порядок: high, low
+// urgent (qp=5) раньше low/high; внутри p1 — high, затем low
 ```
 
 ### Ordered-партиции (гарантия порядка)
@@ -625,7 +626,7 @@ CI (GitHub Actions) на каждый push/PR в `main`: сборка, `go test 
 | `Consumer` | Один консьюмер (Get/Ack/Reject, Consume, GetChan) |
 | `ConsumerPool` | Пул консьюмеров |
 | `Admin` | Обслуживание: Inspect, Purge, Retry, Remove, RemoveByTag, CountByTag, BlockGroups |
-| `Task` | Задача: ID, Partition, Priority, Payload, Scheduled, Tags, Groups |
+| `Task` | Задача: ID, Partition, PartitionPriority, QueuePriority, Payload, Scheduled, Tags, Groups |
 | `RejectWithDelay` | Ошибка для отложенного reject (`Delay`, `BlockGroups`) |
 | `HandlerPanicError` | Паника в handler/middleware → Reject (процесс жив) |
 | `HandlerMiddleware` / `Use` | Обертка вокруг handler (логи, Sentry) |
@@ -645,16 +646,20 @@ CI (GitHub Actions) на каждый push/PR в `main`: сборка, `go test 
 
 Очередь использует префикс `queue:{queueName}:`:
 
-- `queue:{name}:partitions` — множество партиций
-- `queue:{name}:partition:{code}:{priority}` — ZSET задач по партиции и приоритету
+- `queue:{name}:partitions` — множество партиций (legacy / QueuePriority=0)
+- `queue:{name}:partition:{code}:{pp}` — ZSET задач по партиции и PartitionPriority (legacy)
+- `queue:{name}:priorities` — ZSET активных QueuePriority > 0
+- `queue:{name}:qp{N}:partitions` / `qp{N}:partition:…` / `qp{N}:group:{g}:ready` — lane для QueuePriority=N
+- `queue:{name}:qpriority:{id}` — QueuePriority задачи (только если > 0)
+- `queue:{name}:priority:{id}` — PartitionPriority задачи
 - `queue:{name}:consumers` — множество консьюмеров
 - `queue:{name}:consumer:{id}` — heartbeat консьюмера (TTL 120 сек)
 - `queue:{name}:consumer:{id}:tasks` — in-flight: `taskId → originalScore`
 - `queue:{name}:tag:{tag}` — SET taskId по тегу
 - `queue:{name}:tags:{taskId}` — SET тегов задачи (для точечной чистки)
-- `queue:{name}:groups` — ZSET групп (`≤now` = свободна, `>now` = блок)
-- `queue:{name}:group:{g}:ready` — ZSET партиций группы (score=0; обход ZRANGE с random index)
-- `queue:{name}:partition:{p}:groups` — SET групп партиции
+- `queue:{name}:groups` — ZSET групп (`≤now` = свободна, `>now` = блок); без qp-префикса
+- `queue:{name}:group:{g}:ready` — ZSET партиций группы (legacy)
+- `queue:{name}:partition:{p}:groups` — SET групп партиции (общее)
 - `queue:{name}:blocked` — ZSET блоков партиций (member=partition → unlockAt ms)
 
 ## Contributing

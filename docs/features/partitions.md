@@ -17,17 +17,31 @@ producer.Publish(ctx,
 
 Если воркер упал, heartbeat истекает (~120s) и задача возвращается в очередь с исходным score — порядок не ломается.
 
-## Приоритет
+## Приоритет внутри партиции
 
-Внутри партиции больший `Priority` идёт раньше:
+Больший `PartitionPriority` идёт раньше:
 
 ```go
 producer.Publish(ctx,
-    &redisqueue.Task{ID: "low", Partition: "p1", Priority: 1, Payload: []byte("low"), Scheduled: time.Now()},
-    &redisqueue.Task{ID: "high", Partition: "p1", Priority: 10, Payload: []byte("high"), Scheduled: time.Now()},
+    &redisqueue.Task{ID: "low", Partition: "p1", PartitionPriority: 1, Payload: []byte("low"), Scheduled: time.Now()},
+    &redisqueue.Task{ID: "high", Partition: "p1", PartitionPriority: 10, Payload: []byte("high"), Scheduled: time.Now()},
 )
 // high, затем low
 ```
+
+## Приоритет очереди
+
+`QueuePriority` — верхний слой обхода Get (между группами и партициями). Больший qp обрабатывается раньше; `0` пишет в **legacy-ключи** без префикса `qp` (совместимость rolling deploy). Get: сначала lanes из `queue:priorities` (только qp>0), затем legacy.
+
+```go
+producer.Publish(ctx,
+    &redisqueue.Task{ID: "a", Partition: "p1", Groups: []string{"g1"}, QueuePriority: 0, Payload: []byte("a"), Scheduled: time.Now()},
+    &redisqueue.Task{ID: "b", Partition: "p2", Groups: []string{"g2"}, QueuePriority: 10, Payload: []byte("b"), Scheduled: time.Now()},
+)
+// b раньше a, даже в другой группе
+```
+
+Блокировки `!`-партиций, `groups` / `blocked` / rate-limit — общие (не под qp-префиксом).
 
 ## Отложенный запуск
 
