@@ -122,8 +122,6 @@ for i = 0, taskCount - 1 do
 		if queuePriority > 0 then
 			redis.call('SET', qpriorityKey, tostring(queuePriority))
 			redis.call('ZADD', queuePrioritiesKey, queuePriority, tostring(queuePriority))
-		else
-			redis.call('DEL', qpriorityKey)
 		end
 
 		local partitionQueueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":" .. priority
