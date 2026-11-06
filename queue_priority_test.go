@@ -118,3 +118,70 @@ func TestQueue_QueuePriority_RejectReturnsToSameLane(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, "qp3", got[0].ID)
 }
+
+// Legacy cleanup must not ZREM shared groups while a qp-lane still has ready work
+// for the same group (future/paused bot reply while broadcast partition empties).
+func TestQueue_QueuePriority_LaneTaskSurvivesLegacyGroupCleanup(t *testing.T) {
+	producer, consumer, rdb := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	ctx := context.Background()
+	now := time.Now().Add(-time.Second)
+
+	require.NoError(t, producer.Publish(ctx,
+		&Task{ID: "bcast", Partition: "!c:1", Groups: []string{"conn:1"}, Payload: []byte("b"), Scheduled: now},
+		&Task{ID: "bot", Partition: "!c:2", Groups: []string{"conn:1"}, QueuePriority: 10, Payload: []byte("r"), Scheduled: time.Now().Add(300 * time.Millisecond)},
+	))
+
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Equal(t, "bcast", got[0].ID)
+	require.NoError(t, consumer.Ack(ctx, "bcast", 0))
+
+	empty, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Empty(t, empty)
+
+	// group must stay while qp10 ready still references conn:1
+	score, err := rdb.ZScore(ctx, "queue:test-queue:groups", "conn:1").Result()
+	require.NoError(t, err)
+	_ = score
+
+	time.Sleep(400 * time.Millisecond)
+	again, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, again, 1)
+	require.Equal(t, "bot", again[0].ID)
+}
+
+// Emptying the last legacy task on a partition must keep partition:{p}:groups
+// while a qp-lane still has that partition (Reject must restore into conn:1, not _default).
+func TestQueue_QueuePriority_SharedPartitionGroupsSurviveLegacyCleanup(t *testing.T) {
+	producer, consumer, rdb := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	admin := NewAdmin(rdb)
+	ctx := context.Background()
+	now := time.Now().Add(-time.Second)
+	part := "chat:1"
+
+	require.NoError(t, producer.Publish(ctx,
+		&Task{ID: "legacy", Partition: part, Groups: []string{"conn:1"}, Payload: []byte("l"), Scheduled: now},
+		&Task{ID: "qp10", Partition: part, Groups: []string{"conn:1"}, QueuePriority: 10, Payload: []byte("q"), Scheduled: now},
+	))
+
+	st, err := admin.Remove(ctx, "test-queue", "legacy")
+	require.NoError(t, err)
+	require.Equal(t, RemovalStatusRemoved, st.Status)
+
+	members, err := rdb.SMembers(ctx, "queue:test-queue:partition:"+part+":groups").Result()
+	require.NoError(t, err)
+	assert.Contains(t, members, "conn:1")
+
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "qp10", got[0].ID)
+	require.NoError(t, consumer.Reject(ctx, got[0].ID, 0))
+
+	assert.Equal(t, int64(1), rdb.Exists(ctx, "queue:test-queue:qp10:group:conn:1:ready").Val())
+	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:test-queue:qp10:group:_default:ready").Val())
+}

@@ -321,6 +321,11 @@ local consumersKey = "queue:" .. queueName .. ":consumers"
 local consumerKey = "queue:" .. queueName .. ":consumer:" .. consumerId
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
 local queuePrioritiesKey = "queue:" .. queueName .. ":priorities"
+-- как partition priorities: ZREVRANGE high→low; один снимок на Get
+local queuePriorities = redis.call('ZREVRANGE', queuePrioritiesKey, 0, -1)
+-- qp >= этого уже исчерпаны в этом Get (недоступны сейчас) — на следующем collectOne скипаем
+-- nil = ещё ничего не скипаем; больше число = выше приоритет (как PartitionPriority)
+local skipQueuePriorityAtOrAbove = nil
 
 -- currentPref: "" (legacy qp=0) или "qpN:" — lane для ready/partitions/ZSET задач
 local currentPref = ""
@@ -569,6 +574,37 @@ local function isAdmissionBlocked(partition)
 	return false
 end
 
+-- shared groups / partition:groups: снимать только если ни legacy, ни qp-lane больше не ссылаются
+local function groupReadyAnywhere(g)
+	if redis.call('ZCARD', "queue:" .. queueName .. ":group:" .. g .. ":ready") > 0 then
+		return true
+	end
+	for qi = 1, #queuePriorities do
+		local qp = tonumber(queuePriorities[qi]) or 0
+		if qp > 0 then
+			if redis.call('ZCARD', "queue:" .. queueName .. ":" .. qpPrefix(qp) .. "group:" .. g .. ":ready") > 0 then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function partitionInAnyLane(partition)
+	if redis.call('SISMEMBER', "queue:" .. queueName .. ":partitions", partition) == 1 then
+		return true
+	end
+	for qi = 1, #queuePriorities do
+		local qp = tonumber(queuePriorities[qi]) or 0
+		if qp > 0 then
+			if redis.call('SISMEMBER', "queue:" .. queueName .. ":" .. qpPrefix(qp) .. "partitions", partition) == 1 then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local function removePartitionFromIndexes(partition)
 	local partitionsKey = "queue:" .. queueName .. ":" .. currentPref .. "partitions"
 	redis.call('SREM', partitionsKey, partition)
@@ -579,8 +615,7 @@ local function removePartitionFromIndexes(partition)
 		redis.call('ZREM', readyKey, partition)
 		if redis.call('ZCARD', readyKey) == 0 then
 			redis.call('DEL', readyKey)
-			-- shared groups: снимаем только в legacy-lane (иначе другие qp ещё могут ссылаться)
-			if currentPref == "" then
+			if not groupReadyAnywhere(g) then
 				local gs = redis.call('ZSCORE', groupsKey, g)
 				if (not gs) or (tonumber(gs) <= now) then
 					redis.call('ZREM', groupsKey, g)
@@ -588,8 +623,7 @@ local function removePartitionFromIndexes(partition)
 			end
 		end
 	end
-	-- shared partition:groups удаляем только в legacy; qp-lanes не трогают
-	if currentPref == "" then
+	if not partitionInAnyLane(partition) then
 		redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
 	end
 	redis.call('DEL', "queue:" .. queueName .. ":" .. currentPref .. "partition:" .. partition .. ":priorities")
@@ -792,18 +826,18 @@ local function collectOneLane()
 	return nil
 end
 
--- Сначала qp>0 (high→low), затем legacy (qp=0 / пустой queue:priorities).
+-- Сначала qp>0 (больший раньше, как PartitionPriority), затем legacy.
 local function collectOne()
-	local qpris = redis.call('ZREVRANGE', queuePrioritiesKey, 0, -1)
-	for qi = 1, #qpris do
-		local qp = tonumber(qpris[qi]) or 0
-		if qp > 0 then
+	for qi = 1, #queuePriorities do
+		local qp = tonumber(queuePriorities[qi]) or 0
+		if qp > 0 and (skipQueuePriorityAtOrAbove == nil or qp < skipQueuePriorityAtOrAbove) then
 			currentPref = qpPrefix(qp)
 			local taskData = collectOneLane()
 			if taskData then
 				return taskData
 			end
-			-- lane пуста → убрать из индекса
+			-- этот qp сейчас недоступен → в этом Get больше не пробуем qp >= него
+			skipQueuePriorityAtOrAbove = qp
 			if redis.call('SCARD', "queue:" .. queueName .. ":" .. currentPref .. "partitions") == 0 then
 				redis.call('ZREM', queuePrioritiesKey, tostring(qp))
 			end
@@ -1380,6 +1414,45 @@ for i = 1, #rtags do
 end
 redis.call('DEL', raceTagsKey)
 
+local function qpPrefix(qp)
+	qp = tonumber(qp) or 0
+	if qp == 0 then return "" end
+	return "qp" .. tostring(qp) .. ":"
+end
+
+local queuePrioritiesKey = "queue:" .. queueName .. ":priorities"
+local function groupReadyAnywhere(g)
+	if redis.call('ZCARD', "queue:" .. queueName .. ":group:" .. g .. ":ready") > 0 then
+		return true
+	end
+	local qpris = redis.call('ZRANGE', queuePrioritiesKey, 0, -1)
+	for qi = 1, #qpris do
+		local qp = tonumber(qpris[qi]) or 0
+		if qp > 0 then
+			if redis.call('ZCARD', "queue:" .. queueName .. ":" .. qpPrefix(qp) .. "group:" .. g .. ":ready") > 0 then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function partitionInAnyLane(part)
+	if redis.call('SISMEMBER', "queue:" .. queueName .. ":partitions", part) == 1 then
+		return true
+	end
+	local qpris = redis.call('ZRANGE', queuePrioritiesKey, 0, -1)
+	for qi = 1, #qpris do
+		local qp = tonumber(qpris[qi]) or 0
+		if qp > 0 then
+			if redis.call('SISMEMBER', "queue:" .. queueName .. ":" .. qpPrefix(qp) .. "partitions", part) == 1 then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":priorities"
 if redis.call('ZCARD', queueKey) == 0 then
 	redis.call('ZREM', prioritiesKey, priority)
@@ -1395,7 +1468,7 @@ if redis.call('ZCARD', queueKey) == 0 then
 			redis.call('ZREM', readyKey, partition)
 			if redis.call('ZCARD', readyKey) == 0 then
 				redis.call('DEL', readyKey)
-				if pref == "" then
+				if not groupReadyAnywhere(g) then
 					local gs = redis.call('ZSCORE', groupsKey, g)
 					if (not gs) or (tonumber(gs) <= nowMs) then
 						redis.call('ZREM', groupsKey, g)
@@ -1403,10 +1476,11 @@ if redis.call('ZCARD', queueKey) == 0 then
 				end
 			end
 		end
-		if pref == "" then
+		if not partitionInAnyLane(partition) then
 			redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
-		elseif redis.call('SCARD', "queue:" .. queueName .. ":" .. pref .. "partitions") == 0 then
-			redis.call('ZREM', "queue:" .. queueName .. ":priorities", tostring(queuePriority))
+		end
+		if pref ~= "" and redis.call('SCARD', "queue:" .. queueName .. ":" .. pref .. "partitions") == 0 then
+			redis.call('ZREM', queuePrioritiesKey, tostring(queuePriority))
 		end
 	end
 end
@@ -1454,6 +1528,45 @@ local function cleanupTags(taskId)
 	removeFromTag(tagKey, taskId)
 end
 
+local function qpPrefix(qp)
+	qp = tonumber(qp) or 0
+	if qp == 0 then return "" end
+	return "qp" .. tostring(qp) .. ":"
+end
+
+local queuePrioritiesKey = "queue:" .. queueName .. ":priorities"
+local function groupReadyAnywhere(g)
+	if redis.call('ZCARD', "queue:" .. queueName .. ":group:" .. g .. ":ready") > 0 then
+		return true
+	end
+	local qpris = redis.call('ZRANGE', queuePrioritiesKey, 0, -1)
+	for qi = 1, #qpris do
+		local qp = tonumber(qpris[qi]) or 0
+		if qp > 0 then
+			if redis.call('ZCARD', "queue:" .. queueName .. ":" .. qpPrefix(qp) .. "group:" .. g .. ":ready") > 0 then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function partitionInAnyLane(part)
+	if redis.call('SISMEMBER', "queue:" .. queueName .. ":partitions", part) == 1 then
+		return true
+	end
+	local qpris = redis.call('ZRANGE', queuePrioritiesKey, 0, -1)
+	for qi = 1, #qpris do
+		local qp = tonumber(qpris[qi]) or 0
+		if qp > 0 then
+			if redis.call('SISMEMBER', "queue:" .. queueName .. ":" .. qpPrefix(qp) .. "partitions", part) == 1 then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local function removeOne(taskId)
 	local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
 	local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
@@ -1472,10 +1585,7 @@ local function removeOne(taskId)
 	if qpVal ~= false then
 		queuePriority = tonumber(qpVal) or 0
 	end
-	local pref = ""
-	if queuePriority > 0 then
-		pref = "qp" .. tostring(queuePriority) .. ":"
-	end
+	local pref = qpPrefix(queuePriority)
 	local queueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":" .. priority
 
 	if redis.call('ZREM', queueKey, taskId) == 0 then
@@ -1504,7 +1614,7 @@ local function removeOne(taskId)
 				redis.call('ZREM', readyKey, partition)
 				if redis.call('ZCARD', readyKey) == 0 then
 					redis.call('DEL', readyKey)
-					if pref == "" then
+					if not groupReadyAnywhere(g) then
 						local gs = redis.call('ZSCORE', groupsKey, g)
 						if (not gs) or (tonumber(gs) <= nowMs) then
 							redis.call('ZREM', groupsKey, g)
@@ -1512,10 +1622,11 @@ local function removeOne(taskId)
 					end
 				end
 			end
-			if pref == "" then
+			if not partitionInAnyLane(partition) then
 				redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
-			elseif redis.call('SCARD', "queue:" .. queueName .. ":" .. pref .. "partitions") == 0 then
-				redis.call('ZREM', "queue:" .. queueName .. ":priorities", tostring(queuePriority))
+			end
+			if pref ~= "" and redis.call('SCARD', "queue:" .. queueName .. ":" .. pref .. "partitions") == 0 then
+				redis.call('ZREM', queuePrioritiesKey, tostring(queuePriority))
 			end
 		end
 	end
