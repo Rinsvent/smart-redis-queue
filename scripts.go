@@ -337,8 +337,15 @@ end
 
 local acquiredPartitionLocks = {}
 local partitionHadTask = {}
--- R4/D4: партиции с головой score>now — не заходим снова до конца этого Get
+-- R4/D4: партиции с головой score>now — не заходим снова до конца этого Get.
+-- Ключ = pref..partition: future в qp10 не должен блокировать ready в qp5/legacy той же партиции.
 local deferredPartitions = {}
+local function deferPartition(partition)
+	deferredPartitions[currentPref .. partition] = true
+end
+local function isPartitionDeferred(partition)
+	return deferredPartitions[currentPref .. partition] == true
+end
 local function ensureRaceLocks()
 	if raceLocks ~= nil then
 		return
@@ -368,7 +375,7 @@ local function tryAcquireRace(taskId, partition)
 	ensureRaceLocks()
 	for i = 1, #tags do
 		if raceLocks[tags[i]] then
-			deferredPartitions[partition] = true
+			deferPartition(partition)
 			raceSkips = raceSkips + 1
 			if raceSkips >= maxRaceSkips then
 				raceBudgetExhausted = true
@@ -719,7 +726,7 @@ local function getFromPartition(partition, group)
 
 	-- дошли сюда без return: либо пусто, либо только future head(s)
 	if found then
-		deferredPartitions[partition] = true
+		deferPartition(partition)
 	else
 		removePartitionFromIndexes(partition)
 	end
@@ -729,7 +736,7 @@ end
 
 -- group — текущая группа обхода (из tryReadyGroup); RL group-слой считает/блокирует именно её
 local function tryCollectFromPartition(partition, group)
-	if deferredPartitions[partition] then
+	if isPartitionDeferred(partition) then
 		return nil
 	end
 	if isAdmissionBlocked(partition) then

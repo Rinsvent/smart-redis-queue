@@ -96,6 +96,24 @@ func TestQueue_QueuePriority_SharedOrderedLock(t *testing.T) {
 	assert.Equal(t, "legacy-task", got2[0].ID)
 }
 
+// Future head in a higher qp lane must not defer the same partition name in lower lanes.
+func TestQueue_QueuePriority_LowerLaneNotBlockedByHigherFutureSamePartition(t *testing.T) {
+	producer, consumer, _ := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	ctx := context.Background()
+	part := "same-p"
+
+	require.NoError(t, producer.Publish(ctx,
+		&Task{ID: "hi-future", Partition: part, QueuePriority: 10, Payload: []byte("h"), Scheduled: time.Now().Add(time.Hour)},
+		&Task{ID: "lo-now", Partition: part, QueuePriority: 5, Payload: []byte("l"), Scheduled: time.Now().Add(-time.Second)},
+	))
+
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "lo-now", got[0].ID)
+}
+
 func TestQueue_QueuePriority_RejectReturnsToSameLane(t *testing.T) {
 	producer, consumer, rdb := setupTestQueue(t)
 	consumer.SetPrefetchCount(1)
