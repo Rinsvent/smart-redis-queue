@@ -123,11 +123,11 @@ local function add_tasks_to_queue(queueName, taskCount, taskBase)
 
 		local ok = redis.call('SET', payloadKey, payload, 'NX')
 		if ok then
-			redis.call('SET', partitionKey, partitionCode)
-			redis.call('SET', priorityKey, priority)
 			if queuePriority > 0 then
-				redis.call('SET', qpriorityKey, tostring(queuePriority))
+				redis.call('MSET', partitionKey, partitionCode, priorityKey, priority, qpriorityKey, tostring(queuePriority))
 				redis.call('ZADD', queuePrioritiesKey, queuePriority, tostring(queuePriority))
+			else
+				redis.call('MSET', partitionKey, partitionCode, priorityKey, priority)
 			end
 
 			local partitionQueueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":" .. priority
@@ -172,18 +172,18 @@ local function add_tasks_to_queue(queueName, taskCount, taskBase)
 			addedCount = addedCount + 1
 		elseif isDebounce then
 			local debounceKey = "queue:" .. queueName .. ":debounce:" .. taskId
-			local existingPart = redis.call('GET', partitionKey)
+			local existingMeta = redis.call('MGET', partitionKey, priorityKey, qpriorityKey)
+			local existingPart = existingMeta[1]
 			if existingPart == false then
 				existingPart = "base"
 			end
-			local existingPrio = redis.call('GET', priorityKey)
+			local existingPrio = existingMeta[2]
 			if existingPrio == false then
 				existingPrio = "0"
 			end
-			local existingQpVal = redis.call('GET', qpriorityKey)
 			local existingQp = 0
-			if existingQpVal ~= false then
-				existingQp = tonumber(existingQpVal) or 0
+			if existingMeta[3] ~= false then
+				existingQp = tonumber(existingMeta[3]) or 0
 			end
 			local oldPref = qpPrefix(existingQp)
 			local oldQueueKey = "queue:" .. queueName .. ":" .. oldPref .. "partition:" .. existingPart .. ":" .. existingPrio
@@ -195,13 +195,12 @@ local function add_tasks_to_queue(queueName, taskCount, taskBase)
 				local moved = existingPart ~= partitionCode or tostring(existingPrio) ~= tostring(priority) or existingQp ~= queuePriority
 				if moved then
 					redis.call('ZREM', oldQueueKey, taskId)
-					redis.call('SET', partitionKey, partitionCode)
-					redis.call('SET', priorityKey, priority)
 				end
 				if queuePriority > 0 then
-					redis.call('SET', qpriorityKey, tostring(queuePriority))
+					redis.call('MSET', partitionKey, partitionCode, priorityKey, priority, qpriorityKey, tostring(queuePriority))
 					redis.call('ZADD', queuePrioritiesKey, queuePriority, tostring(queuePriority))
 				else
+					redis.call('MSET', partitionKey, partitionCode, priorityKey, priority)
 					redis.call('DEL', qpriorityKey)
 				end
 				local partitionQueueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":" .. priority
@@ -212,14 +211,12 @@ local function add_tasks_to_queue(queueName, taskCount, taskBase)
 				ensurePartitionReady(partitionCode, pref)
 				redis.call('DEL', debounceKey)
 			else
-				redis.call('SET', partitionKey, partitionCode)
-				redis.call('SET', priorityKey, priority)
 				if queuePriority > 0 then
-					redis.call('SET', qpriorityKey, tostring(queuePriority))
+					redis.call('MSET', partitionKey, partitionCode, priorityKey, priority, qpriorityKey, tostring(queuePriority), debounceKey, tostring(scheduled))
 				else
 					redis.call('DEL', qpriorityKey)
+					redis.call('MSET', partitionKey, partitionCode, priorityKey, priority, debounceKey, tostring(scheduled))
 				end
-				redis.call('SET', debounceKey, tostring(scheduled))
 			end
 		else
 			notAddedItems[#notAddedItems + 1] = i
@@ -714,10 +711,13 @@ local function removePartitionFromIndexes(partition)
 			end
 		end
 	end
+	local partGroupsKey = "queue:" .. queueName .. ":partition:" .. partition .. ":groups"
+	local partPrioKey = "queue:" .. queueName .. ":" .. currentPref .. "partition:" .. partition .. ":priorities"
 	if not partitionInAnyLane(partition) then
-		redis.call('DEL', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
+		redis.call('DEL', partGroupsKey, partPrioKey)
+	else
+		redis.call('DEL', partPrioKey)
 	end
-	redis.call('DEL', "queue:" .. queueName .. ":" .. currentPref .. "partition:" .. partition .. ":priorities")
 end
 
 -- Функция для получения одной задачи из партиции
@@ -797,11 +797,15 @@ local function getFromPartition(partition, group)
 				end
 				partitionHadTask[partition] = true
 				local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
-				local payload = redis.call('GET', payloadKey)
 				local rejectCountKey = "queue:" .. queueName .. ":reject_count:" .. taskId
-				local rejectCount = tonumber(redis.call('GET', rejectCountKey)) or 0
+				local got = redis.call('MGET', payloadKey, rejectCountKey)
+				local payload = got[1]
+				if payload == false then
+					payload = ""
+				end
+				local rejectCount = tonumber(got[2]) or 0
 				-- partition уже известен (мы внутри getFromPartition); GET partition:{id} не нужен
-				return {taskId, partition, payload or "", tostring(rejectCount)}
+				return {taskId, partition, payload, tostring(rejectCount)}
 			end
 		else
 			redis.call('ZREM', prioritiesKey, maxPriority)
@@ -1031,11 +1035,12 @@ if partitionCode:sub(1, 1) == "!" then
 	local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partitionCode .. ":count"
 	local consumerPartitionCount = redis.call('DECR', consumerPartitionCountKey) or 0
 	if consumerPartitionCount <= 0 then
-		redis.call('DEL', consumerPartitionCountKey)
 		local partitionLockKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":lock"
 		local lockOwner = redis.call('GET', partitionLockKey)
 		if lockOwner == consumerId then
-			redis.call('DEL', partitionLockKey)
+			redis.call('DEL', consumerPartitionCountKey, partitionLockKey)
+		else
+			redis.call('DEL', consumerPartitionCountKey)
 		end
 	end
 end
@@ -1043,21 +1048,17 @@ end
 redis.call('HDEL', consumerTasksKey, taskId)
 releaseRaceLocks()
 
--- F2: только deb! id — GET флага/priority/qpriority и reactivate; иначе нулевой оверхед
+-- F2: только deb! id — MGET флага/priority/qpriority и reactivate; иначе нулевой оверхед
 if isDebounce then
 	local debounceKey = "queue:" .. queueName .. ":debounce:" .. taskId
-	local debounceUntil = redis.call('GET', debounceKey)
+	local qpriorityKey = "queue:" .. queueName .. ":qpriority:" .. taskId
+	local debMeta = redis.call('MGET', debounceKey, priorityKey, qpriorityKey)
+	local debounceUntil = debMeta[1]
 	if debounceUntil ~= false then
-		local priorityVal = redis.call('GET', priorityKey)
-		local priority = 0
-		if priorityVal then
-			priority = tonumber(priorityVal) or 0
-		end
-		local qpriorityKey = "queue:" .. queueName .. ":qpriority:" .. taskId
-		local qpVal = redis.call('GET', qpriorityKey)
+		local priority = tonumber(debMeta[2]) or 0
 		local queuePriority = 0
-		if qpVal ~= false then
-			queuePriority = tonumber(qpVal) or 0
+		if debMeta[3] ~= false then
+			queuePriority = tonumber(debMeta[3]) or 0
 		end
 		local pref = ""
 		if queuePriority > 0 then
@@ -1088,19 +1089,23 @@ if isDebounce then
 	end
 end
 
--- Удаляем payload, ключ партиции и reject_count
-if idempotencyTtl > 0 then
-	redis.call('SET', payloadKey, '0')
-	redis.call('EXPIRE', payloadKey, idempotencyTtl)
-else
-	redis.call('DEL', payloadKey)
-end
-redis.call('DEL', partitionKey, priorityKey,
+-- Удаляем meta; payload либо TTL-маркер идемпотентности, либо тоже в DEL
+local keysToDelete = {
+	partitionKey,
+	priorityKey,
 	"queue:" .. queueName .. ":qpriority:" .. taskId,
 	"queue:" .. queueName .. ":reject_count:" .. taskId,
 	"queue:" .. queueName .. ":step:" .. taskId,
 	"queue:" .. queueName .. ":headers:" .. taskId,
-	raceTagsKey)
+	raceTagsKey,
+}
+if idempotencyTtl > 0 then
+	redis.call('SET', payloadKey, '0')
+	redis.call('EXPIRE', payloadKey, idempotencyTtl)
+else
+	keysToDelete[#keysToDelete + 1] = payloadKey
+end
+redis.call('DEL', unpack(keysToDelete))
 
 -- Чистим индексы тегов (если были); пустой SET тега удаляем явно
 local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
@@ -1152,20 +1157,19 @@ if meta == false then
     return 0
 end
 
--- Получаем партицию
+-- Получаем партицию / partitionPriority / queuePriority одним MGET
 local partitionKey = "queue:" .. queueName .. ":partition:" .. taskId
-local partitionCode = redis.call('GET', partitionKey) or "base"
 local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
-local priorityVal = redis.call('GET', priorityKey)
-local priority = 0
-if priorityVal then
-    priority = tonumber(priorityVal) or 0
-end
 local qpriorityKey = "queue:" .. queueName .. ":qpriority:" .. taskId
-local qpVal = redis.call('GET', qpriorityKey)
+local taskMeta = redis.call('MGET', partitionKey, priorityKey, qpriorityKey)
+local partitionCode = taskMeta[1] or "base"
+if partitionCode == false then
+	partitionCode = "base"
+end
+local priority = tonumber(taskMeta[2]) or 0
 local queuePriority = 0
-if qpVal ~= false then
-	queuePriority = tonumber(qpVal) or 0
+if taskMeta[3] ~= false then
+	queuePriority = tonumber(taskMeta[3]) or 0
 end
 local pref = ""
 if queuePriority > 0 then
@@ -1216,11 +1220,12 @@ if needsLockUnlock then
 	local consumerPartitionCountKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":partition:" .. partitionCode .. ":count"
 	local consumerPartitionCount = redis.call('DECR', consumerPartitionCountKey) or 0
 	if consumerPartitionCount <= 0 then
-		redis.call('DEL', consumerPartitionCountKey)
 		local partitionLockKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":lock"
 		local lockOwner = redis.call('GET', partitionLockKey)
 		if lockOwner == consumerId then
-			redis.call('DEL', partitionLockKey)
+			redis.call('DEL', consumerPartitionCountKey, partitionLockKey)
+		else
+			redis.call('DEL', consumerPartitionCountKey)
 		end
 	end
 end
@@ -1349,23 +1354,18 @@ for i = 1, #consumers do
 			local taskToReturn = tasksData[j]
 			local meta = tasksData[j + 1]
 			if taskToReturn then
-				local taskPartitionKey = "queue:" .. queueName .. ":partition:" .. taskToReturn
-				local taskPartition = redis.call('GET', taskPartitionKey)
+				local taskMeta = redis.call('MGET',
+					"queue:" .. queueName .. ":partition:" .. taskToReturn,
+					"queue:" .. queueName .. ":priority:" .. taskToReturn,
+					"queue:" .. queueName .. ":qpriority:" .. taskToReturn)
+				local taskPartition = taskMeta[1]
 				if taskPartition == false then
 					taskPartition = "base"
 				end
-
-				local taskPriorityKey = "queue:" .. queueName .. ":priority:" .. taskToReturn
-				local taskPriorityVal = redis.call('GET', taskPriorityKey)
-				local taskPriority = 0
-				if taskPriorityVal then
-					taskPriority = tonumber(taskPriorityVal) or 0
-				end
-				local taskQpKey = "queue:" .. queueName .. ":qpriority:" .. taskToReturn
-				local taskQpVal = redis.call('GET', taskQpKey)
+				local taskPriority = tonumber(taskMeta[2]) or 0
 				local taskQp = 0
-				if taskQpVal ~= false then
-					taskQp = tonumber(taskQpVal) or 0
+				if taskMeta[3] ~= false then
+					taskQp = tonumber(taskMeta[3]) or 0
 				end
 				local pref = ""
 				if taskQp > 0 then
@@ -1428,8 +1428,9 @@ for i = 1, #consumers do
 			end
 
 			if part:sub(1, 1) == "!" then
-				redis.call('DEL', "queue:" .. queueName .. ":consumer:" .. lockOwner .. ":partition:" .. part .. ":count")
-				redis.call('DEL', "queue:" .. queueName .. ":partition:" .. part .. ":lock")
+				redis.call('DEL',
+					"queue:" .. queueName .. ":consumer:" .. lockOwner .. ":partition:" .. part .. ":count",
+					"queue:" .. queueName .. ":partition:" .. part .. ":lock")
 			end
 		end
 
@@ -1507,17 +1508,20 @@ local function cleanupTags()
 	redis.call('DEL', tagsKey)
 end
 
-local partition = redis.call('GET', partitionKey)
+local meta = redis.call('MGET', partitionKey, priorityKey, qpriorityKey)
+local partition = meta[1]
 if not partition then
 	cleanupTags()
 	return {'missing'}
 end
 
-local priority = redis.call('GET', priorityKey) or '0'
-local qpVal = redis.call('GET', qpriorityKey)
+local priority = meta[2] or '0'
+if priority == false then
+	priority = '0'
+end
 local queuePriority = 0
-if qpVal ~= false then
-	queuePriority = tonumber(qpVal) or 0
+if meta[3] ~= false then
+	queuePriority = tonumber(meta[3]) or 0
 end
 local pref = qpPrefix(queuePriority)
 local queueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":" .. priority
@@ -1527,11 +1531,6 @@ if redis.call('ZREM', queueKey, taskId) == 0 then
 end
 
 local payload = redis.call('GET', payloadKey) or ''
-redis.call('DEL', payloadKey, partitionKey, priorityKey, qpriorityKey,
-	"queue:" .. queueName .. ":reject_count:" .. taskId,
-	"queue:" .. queueName .. ":step:" .. taskId,
-	"queue:" .. queueName .. ":headers:" .. taskId)
-cleanupTags()
 local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
 local raceLocksKey = "queue:" .. queueName .. ":race:locks"
 local rtags = redis.call('SMEMBERS', raceTagsKey)
@@ -1540,7 +1539,12 @@ for i = 1, #rtags do
 		redis.call('HDEL', raceLocksKey, rtags[i])
 	end
 end
-redis.call('DEL', raceTagsKey)
+redis.call('DEL', payloadKey, partitionKey, priorityKey, qpriorityKey,
+	"queue:" .. queueName .. ":reject_count:" .. taskId,
+	"queue:" .. queueName .. ":step:" .. taskId,
+	"queue:" .. queueName .. ":headers:" .. taskId,
+	raceTagsKey)
+cleanupTags()
 
 local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":priorities"
 if redis.call('ZCARD', queueKey) == 0 then
@@ -1668,17 +1672,20 @@ local function removeOne(taskId)
 	local priorityKey = "queue:" .. queueName .. ":priority:" .. taskId
 	local qpriorityKey = "queue:" .. queueName .. ":qpriority:" .. taskId
 
-	local partition = redis.call('GET', partitionKey)
+	local meta = redis.call('MGET', partitionKey, priorityKey, qpriorityKey)
+	local partition = meta[1]
 	if not partition then
 		cleanupTags(taskId)
 		return 'missing', ''
 	end
 
-	local priority = redis.call('GET', priorityKey) or '0'
-	local qpVal = redis.call('GET', qpriorityKey)
+	local priority = meta[2] or '0'
+	if priority == false then
+		priority = '0'
+	end
 	local queuePriority = 0
-	if qpVal ~= false then
-		queuePriority = tonumber(qpVal) or 0
+	if meta[3] ~= false then
+		queuePriority = tonumber(meta[3]) or 0
 	end
 	local pref = qpPrefix(queuePriority)
 	local queueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":" .. priority
