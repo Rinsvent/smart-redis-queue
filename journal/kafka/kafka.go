@@ -86,7 +86,7 @@ func (s *Source) Publish(ctx context.Context, tasks ...*redisqueue.Task) error {
 	for _, t := range tasks {
 		sch := journal.ScheduledOrNow(t.Scheduled)
 		env := envelope{
-			ID: t.ID, Partition: t.Partition, Priority: t.Priority,
+			ID: t.ID, Partition: t.Partition, Priority: t.PartitionPriority,
 			Payload: t.Payload, Tags: t.Tags, Groups: t.Groups,
 			Scheduled: sch.UnixMilli(),
 		}
@@ -206,7 +206,7 @@ func recordFromMsg(topic string, msg *sarama.ConsumerMessage) (journal.Record, e
 	}
 	return journal.Record{
 		Task: &redisqueue.Task{
-			ID: id, Partition: env.Partition, Priority: env.Priority,
+			ID: id, Partition: env.Partition, PartitionPriority: env.Priority,
 			Payload: env.Payload, Tags: env.Tags, Groups: env.Groups, Scheduled: sch,
 		},
 		Cursor: journal.KafkaCursor(msg.Partition, msg.Offset),
@@ -319,7 +319,7 @@ func (s *Source) PromoteDue(ctx context.Context, limit int) (int, error) {
 				return moved, s.persistSchedOff(ctx, s.schedOff)
 			}
 			body, _ := json.Marshal(envelope{
-				ID: rec.Task.ID, Partition: rec.Task.Partition, Priority: rec.Task.Priority,
+				ID: rec.Task.ID, Partition: rec.Task.Partition, Priority: rec.Task.PartitionPriority,
 				Payload: rec.Task.Payload, Tags: rec.Task.Tags, Groups: rec.Task.Groups,
 				Scheduled: rec.Task.Scheduled.UnixMilli(),
 			})

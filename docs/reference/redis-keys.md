@@ -24,9 +24,16 @@
 
 | Ключ | Тип | Назначение |
 |------|-----|------------|
-| `partitions` | SET | Известные партиции |
-| `partition:{part}:{prio}` | ZSET | Ожидающие задачи (score = scheduled ms) |
-| `partition:{part}:priorities` | ZSET | Известные priority для партиции |
+| `partitions` | SET | Партиции legacy (QueuePriority=0) |
+| `priorities` | ZSET | Активные QueuePriority > 0 |
+| `qp{N}:partitions` | SET | Партиции lane qp=N |
+| `qp{N}:partition:{part}:{pp}` | ZSET | Задачи lane qp=N |
+| `qp{N}:partition:{part}:priorities` | ZSET | PartitionPriority в lane |
+| `qp{N}:group:{g}:ready` | ZSET | Ready партиции группы в lane |
+| `partition:{part}:{pp}` | ZSET | Ожидающие задачи (legacy; score = scheduled ms) |
+| `partition:{part}:priorities` | ZSET | PartitionPriority для партиции (legacy) |
+| `priority:{id}` | STRING | PartitionPriority задачи |
+| `qpriority:{id}` | STRING | QueuePriority задачи (только если > 0) |
 | `payload:{id}` | STRING | Тело задачи / маркер идемпотентности |
 | `step:{id}` | STRING | Checkpoint: `name` или `name#curr/total[:cursor]@startedMs[!pause\|!stop]`; чистится на Ack/Remove |
 | `headers:{id}` | HASH | Мета между попытками; чистится на Ack/Remove |

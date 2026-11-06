@@ -118,9 +118,9 @@ func TestBusiness_PriorityAndPrefetchOrderInPartition(t *testing.T) {
 	ctx := context.Background()
 
 	require.NoError(t, producer.Publish(ctx,
-		&Task{ID: "p1", Partition: "!ord", Priority: 1, Payload: []byte("1"), Scheduled: time.Now().Add(-time.Second)},
-		&Task{ID: "p10", Partition: "!ord", Priority: 10, Payload: []byte("10"), Scheduled: time.Now().Add(-time.Second)},
-		&Task{ID: "p5", Partition: "!ord", Priority: 5, Payload: []byte("5"), Scheduled: time.Now().Add(-time.Second)},
+		&Task{ID: "p1", Partition: "!ord", PartitionPriority: 1, Payload: []byte("1"), Scheduled: time.Now().Add(-time.Second)},
+		&Task{ID: "p10", Partition: "!ord", PartitionPriority: 10, Payload: []byte("10"), Scheduled: time.Now().Add(-time.Second)},
+		&Task{ID: "p5", Partition: "!ord", PartitionPriority: 5, Payload: []byte("5"), Scheduled: time.Now().Add(-time.Second)},
 	))
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)

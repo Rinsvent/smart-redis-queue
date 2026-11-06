@@ -389,11 +389,11 @@ func TestQueue_Get_DeferredPartition_LowerPriorityReady(t *testing.T) {
 	part := "mixed-prio"
 
 	require.NoError(t, producer.Publish(ctx, &Task{
-		ID: "hi-future", Partition: part, Priority: 10,
+		ID: "hi-future", Partition: part, PartitionPriority: 10,
 		Payload: []byte("f"), Scheduled: time.Now().Add(10 * time.Minute),
 	}))
 	require.NoError(t, producer.Publish(ctx, &Task{
-		ID: "lo-ready", Partition: part, Priority: 0,
+		ID: "lo-ready", Partition: part, PartitionPriority: 0,
 		Payload: []byte("r"), Scheduled: time.Now().Add(-time.Second),
 	}))
 
@@ -1964,9 +1964,9 @@ func TestQueue_Priority_HigherFirst(t *testing.T) {
 	ctx := context.Background()
 
 	tasks := []*Task{
-		{ID: "task-low", Partition: "p1", Priority: 1, Payload: []byte("low"), Scheduled: time.Now().Add(-time.Second)},
-		{ID: "task-high", Partition: "p1", Priority: 10, Payload: []byte("high"), Scheduled: time.Now().Add(-time.Second)},
-		{ID: "task-mid", Partition: "p1", Priority: 5, Payload: []byte("mid"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-low", Partition: "p1", PartitionPriority: 1, Payload: []byte("low"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-high", Partition: "p1", PartitionPriority: 10, Payload: []byte("high"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-mid", Partition: "p1", PartitionPriority: 5, Payload: []byte("mid"), Scheduled: time.Now().Add(-time.Second)},
 	}
 	err := producer.Publish(ctx, tasks...)
 	require.NoError(t, err)
@@ -1993,11 +1993,11 @@ func TestQueue_Ack_Idempotency(t *testing.T) {
 	ctx := context.Background()
 
 	duplicateTask := &Task{
-		ID:        "task-low",
-		Partition: "p1",
-		Priority:  1,
-		Payload:   []byte("low"),
-		Scheduled: time.Now().Add(-time.Second),
+		ID:                "task-low",
+		Partition:         "p1",
+		PartitionPriority: 1,
+		Payload:           []byte("low"),
+		Scheduled:         time.Now().Add(-time.Second),
 	}
 
 	err := producer.Publish(ctx, duplicateTask)
@@ -2035,19 +2035,19 @@ func TestQueue_Check_DeduplicationId(t *testing.T) {
 	ctx := context.Background()
 
 	tasks := []*Task{
-		{ID: "task-2", Partition: "p1", Priority: 1, Payload: []byte("low"), Scheduled: time.Now().Add(-time.Second)},
-		{ID: "task-3", Partition: "p1", Priority: 10, Payload: []byte("high"), Scheduled: time.Now().Add(-time.Second)},
-		{ID: "task-4", Partition: "p1", Priority: 5, Payload: []byte("mid"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-2", Partition: "p1", PartitionPriority: 1, Payload: []byte("low"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-3", Partition: "p1", PartitionPriority: 10, Payload: []byte("high"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-4", Partition: "p1", PartitionPriority: 5, Payload: []byte("mid"), Scheduled: time.Now().Add(-time.Second)},
 	}
 
 	err := producer.Publish(ctx, tasks...)
 	require.NoError(t, err)
 
 	tasks2 := []*Task{
-		{ID: "task-1", Partition: "p1", Priority: 10, Payload: []byte("high"), Scheduled: time.Now().Add(-time.Second)},
-		{ID: "task-3", Partition: "p1", Priority: 10, Payload: []byte("high"), Scheduled: time.Now().Add(-time.Second)},
-		{ID: "task-4", Partition: "p1", Priority: 5, Payload: []byte("mid"), Scheduled: time.Now().Add(-time.Second)},
-		{ID: "task-5", Partition: "p1", Priority: 5, Payload: []byte("mid"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-1", Partition: "p1", PartitionPriority: 10, Payload: []byte("high"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-3", Partition: "p1", PartitionPriority: 10, Payload: []byte("high"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-4", Partition: "p1", PartitionPriority: 5, Payload: []byte("mid"), Scheduled: time.Now().Add(-time.Second)},
+		{ID: "task-5", Partition: "p1", PartitionPriority: 5, Payload: []byte("mid"), Scheduled: time.Now().Add(-time.Second)},
 	}
 
 	err = producer.Publish(ctx, tasks2...)

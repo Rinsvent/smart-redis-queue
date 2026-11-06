@@ -134,7 +134,7 @@ func (s *Source) Insert(ctx context.Context, tasks ...*redisqueue.Task) error {
 			ID:        primitive.NewObjectID(),
 			TaskID:    it.t.ID,
 			Partition: it.t.Partition,
-			Priority:  it.t.Priority,
+			Priority:  it.t.PartitionPriority,
 			Payload:   it.t.Payload,
 			Tags:      tags,
 			Groups:    groups,
@@ -204,7 +204,7 @@ func toRec(d doc) journal.Record {
 	}
 	return journal.Record{
 		Task: &redisqueue.Task{
-			ID: d.TaskID, Partition: d.Partition, Priority: d.Priority,
+			ID: d.TaskID, Partition: d.Partition, PartitionPriority: d.Priority,
 			Payload: d.Payload, Tags: d.Tags, Groups: d.Groups, Scheduled: d.Scheduled,
 		},
 		Cursor: journal.OffsetCursor(off),

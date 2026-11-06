@@ -937,41 +937,51 @@ func (a *Admin) purgeQueue(ctx context.Context, queueName string) (int, error) {
 func (a *Admin) purgePartition(ctx context.Context, queueName, partition string) (int, error) {
 	var keysToDel []string
 	var removedTasks int64
-	prioritiesKey := "queue:" + queueName + ":partition:" + partition + ":priorities"
-	priorities, err := a.redis.ZRevRange(ctx, prioritiesKey, 0, -1).Result()
-	if err != nil && err != redis.Nil {
-		return 0, err
-	}
-
-	for _, prio := range priorities {
-		queueKey := "queue:" + queueName + ":partition:" + partition + ":" + prio
-		taskIds, _ := a.redis.ZRange(ctx, queueKey, 0, -1).Result()
-		for _, tid := range taskIds {
-			removedTasks++
-			tagsKey := "queue:" + queueName + ":tags:" + tid
-			tags, _ := a.redis.SMembers(ctx, tagsKey).Result()
-			for _, tag := range tags {
-				tagKey := "queue:" + queueName + ":tag:" + tag
-				a.redis.SRem(ctx, tagKey, tid)
-				if a.redis.SCard(ctx, tagKey).Val() == 0 {
-					a.redis.Del(ctx, tagKey)
-				}
+	prefs := []string{""}
+	if qpris, err := a.redis.ZRevRange(ctx, "queue:"+queueName+":priorities", 0, -1).Result(); err == nil {
+		for _, qp := range qpris {
+			if qp != "" && qp != "0" {
+				prefs = append(prefs, "qp"+qp+":")
 			}
-			keysToDel = append(keysToDel,
-				"queue:"+queueName+":payload:"+tid,
-				"queue:"+queueName+":partition:"+tid,
-				"queue:"+queueName+":priority:"+tid,
-				"queue:"+queueName+":reject_count:"+tid,
-				tagsKey,
-			)
 		}
-		keysToDel = append(keysToDel, queueKey)
 	}
-	keysToDel = append(keysToDel, prioritiesKey)
-	keysToDel = append(keysToDel, "queue:"+queueName+":partition:"+partition+":lock", "queue:"+queueName+":partition:"+partition+":block")
 
-	partitionsKey := "queue:" + queueName + ":partitions"
-	a.redis.SRem(ctx, partitionsKey, partition)
+	for _, pref := range prefs {
+		prioritiesKey := "queue:" + queueName + ":" + pref + "partition:" + partition + ":priorities"
+		priorities, err := a.redis.ZRevRange(ctx, prioritiesKey, 0, -1).Result()
+		if err != nil && err != redis.Nil {
+			return 0, err
+		}
+
+		for _, prio := range priorities {
+			queueKey := "queue:" + queueName + ":" + pref + "partition:" + partition + ":" + prio
+			taskIds, _ := a.redis.ZRange(ctx, queueKey, 0, -1).Result()
+			for _, tid := range taskIds {
+				removedTasks++
+				tagsKey := "queue:" + queueName + ":tags:" + tid
+				tags, _ := a.redis.SMembers(ctx, tagsKey).Result()
+				for _, tag := range tags {
+					tagKey := "queue:" + queueName + ":tag:" + tag
+					a.redis.SRem(ctx, tagKey, tid)
+					if a.redis.SCard(ctx, tagKey).Val() == 0 {
+						a.redis.Del(ctx, tagKey)
+					}
+				}
+				keysToDel = append(keysToDel,
+					"queue:"+queueName+":payload:"+tid,
+					"queue:"+queueName+":partition:"+tid,
+					"queue:"+queueName+":priority:"+tid,
+					"queue:"+queueName+":qpriority:"+tid,
+					"queue:"+queueName+":reject_count:"+tid,
+					tagsKey,
+				)
+			}
+			keysToDel = append(keysToDel, queueKey)
+		}
+		keysToDel = append(keysToDel, prioritiesKey)
+		a.redis.SRem(ctx, "queue:"+queueName+":"+pref+"partitions", partition)
+	}
+	keysToDel = append(keysToDel, "queue:"+queueName+":partition:"+partition+":lock", "queue:"+queueName+":partition:"+partition+":block")
 
 	if len(keysToDel) > 0 {
 		if err := a.redis.Del(ctx, keysToDel...).Err(); err != nil {
@@ -1030,6 +1040,15 @@ func (a *Admin) returnTaskToQueue(ctx context.Context, queueName, taskID, consum
 	}
 	priorityNum, _ := strconv.ParseFloat(priorityStr, 64)
 
+	pref := ""
+	qpStr, _ := a.redis.Get(ctx, "queue:"+queueName+":qpriority:"+taskID).Result()
+	if qpStr != "" && qpStr != "0" {
+		if qpNum, err := strconv.ParseFloat(qpStr, 64); err == nil && qpNum > 0 {
+			pref = "qp" + qpStr + ":"
+			a.redis.ZAdd(ctx, "queue:"+queueName+":priorities", redis.Z{Score: qpNum, Member: qpStr})
+		}
+	}
+
 	now, _ := a.redis.Time(ctx).Result()
 	score := float64(now.UnixMilli())
 	// meta = original ZSET score (после Get); иначе now
@@ -1039,11 +1058,11 @@ func (a *Admin) returnTaskToQueue(ctx context.Context, queueName, taskID, consum
 		}
 	}
 
-	partitionQueueKey := "queue:" + queueName + ":partition:" + partition + ":" + priorityStr
+	partitionQueueKey := "queue:" + queueName + ":" + pref + "partition:" + partition + ":" + priorityStr
 	a.redis.ZAdd(ctx, partitionQueueKey, redis.Z{Score: score, Member: taskID})
-	prioritiesKey := "queue:" + queueName + ":partition:" + partition + ":priorities"
+	prioritiesKey := "queue:" + queueName + ":" + pref + "partition:" + partition + ":priorities"
 	a.redis.ZAdd(ctx, prioritiesKey, redis.Z{Score: priorityNum, Member: priorityStr})
-	a.redis.SAdd(ctx, "queue:"+queueName+":partitions", partition)
+	a.redis.SAdd(ctx, "queue:"+queueName+":"+pref+"partitions", partition)
 
 	// Get мог снять пустую партицию с groups/ready — восстанавливаем.
 	groupsKey := "queue:" + queueName + ":groups"
@@ -1057,7 +1076,7 @@ func (a *Admin) returnTaskToQueue(ctx context.Context, queueName, taskID, consum
 		if _, err := a.redis.ZScore(ctx, groupsKey, g).Result(); err == redis.Nil {
 			a.redis.ZAdd(ctx, groupsKey, redis.Z{Score: 0, Member: g})
 		}
-		a.redis.ZAdd(ctx, "queue:"+queueName+":group:"+g+":ready", redis.Z{Score: 0, Member: partition})
+		a.redis.ZAdd(ctx, "queue:"+queueName+":"+pref+"group:"+g+":ready", redis.Z{Score: 0, Member: partition})
 	}
 
 	if len(partition) > 0 && partition[0] == '!' {

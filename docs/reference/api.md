@@ -4,7 +4,7 @@
 
 ## Типы
 
-`Task` — `ID`, `Partition`, `Priority`, `Payload`, `Scheduled`, `Tags`, `Groups`, `RejectCount`.
+`Task` — `ID`, `Partition`, `PartitionPriority`, `QueuePriority`, `Payload`, `Scheduled`, `Tags`, `Groups`, `RejectCount`.
 
 Основные объекты: `Producer`, `Consumer`, `ConsumerPool`, `Exchange`, `Admin`.
 

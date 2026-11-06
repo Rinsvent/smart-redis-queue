@@ -143,7 +143,7 @@ func (s *Source) Insert(ctx context.Context, tasks ...*redisqueue.Task) error {
 			off = v
 			state = journal.StateReady
 		}
-		b.Queue(q, off, state, it.t.ID, it.t.Partition, it.t.Priority, it.t.Payload, tags, groups, it.sch)
+		b.Queue(q, off, state, it.t.ID, it.t.Partition, it.t.PartitionPriority, it.t.Payload, tags, groups, it.sch)
 	}
 	return s.pool.SendBatch(ctx, b).Close()
 }
@@ -209,7 +209,7 @@ func scanRow(row scannable) (journal.Record, error) {
 	}
 	return journal.Record{
 		Task: &redisqueue.Task{
-			ID: id, Partition: part, Priority: prio, Payload: payload,
+			ID: id, Partition: part, PartitionPriority: prio, Payload: payload,
 			Tags: tags, Groups: groups, Scheduled: sch,
 		},
 		Cursor: journal.OffsetCursor(off),

@@ -281,7 +281,7 @@ func (e *Exchange) evalExchange(ctx context.Context, wantVer string, dests []str
 		if err != nil {
 			return err
 		}
-		args = append(args, task.ID, task.Partition, task.Priority, scheduled, payload, tags, groups)
+		args = append(args, task.ID, task.Partition, task.PartitionPriority, task.QueuePriority, scheduled, payload, tags, groups)
 	}
 
 	result, err := getAddScript().Run(ctx, e.rdb, []string{}, args...).Result()
