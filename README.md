@@ -270,7 +270,7 @@ for task := range ch {
         consumer.Reject(ctx, task.ID, 0) // вернуть в очередь
     } else {
         // idempotencyTtl>0: после успеха payload:{id} остаётся на TTL — повторный Publish с тем же ID отклоняется (NX)
-        consumer.Ack(ctx, task.ID, 2*time.Second)
+        consumer.Ack(ctx, task.ID, redisqueue.WithIdempotency(2*time.Second))
     }
 }
 ```

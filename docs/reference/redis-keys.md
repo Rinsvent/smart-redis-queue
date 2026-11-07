@@ -43,8 +43,9 @@
 | `group:{g}:ready` | ZSET / SET | Ready партиции группы |
 | `blocked` | ZSET | Заблокированные партиции |
 | `debounce:{id}` | STRING | Флаг in-flight debounce |
-| `race:tags:{id}` | SET | `race!` теги задачи |
+| `race:tags:{id}` | SET | `race!` / `race!s!` теги задачи |
 | `race:locks` | HASH | Активные concurrency locks |
+| `shared:{id}` | STRING | Prepare-once blob для `race!s!{id}` (+ EXPIRE) |
 | `rl:g:*` / `rl:p:*` | — | Состояние rate limit на Get |
 | `tag:{tag}` | SET | Индекс задач по тегу |
 | `stats:{sec}` | HASH | get/ack/reject (+ теги) |

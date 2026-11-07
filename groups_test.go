@@ -27,7 +27,7 @@ func TestQueue_Groups_BlockGroupsSkipsWholeGroup(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b1", got[0].ID, "должна взяться только свободная группа")
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 
 	got2, err := consumer.Get(ctx)
 	require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestQueue_Groups_RejectWithBlockGroups(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, gotB, 1)
 	assert.Equal(t, "b1", gotB[0].ID, "после BlockGroups(connA) доступен только connB")
-	require.NoError(t, consumer.Ack(ctx, gotB[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, gotB[0].ID))
 
 	got2, err := consumer.Get(ctx)
 	require.NoError(t, err)
@@ -87,7 +87,7 @@ func TestQueue_Groups_MultiGroupAdmission(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "only-g1", got[0].ID, "shared в g2 не должен выдаваться")
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 
 	got2, err := consumer.Get(ctx)
 	require.NoError(t, err)
@@ -193,7 +193,7 @@ func TestQueue_Get_CleansEmptyPartitionIndexes(t *testing.T) {
 	assert.Equal(t, int64(0), n)
 	assert.False(t, rdb.SIsMember(ctx, "queue:"+q+":partitions", "!c:1").Val())
 
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestQueue_Ping_RestoresDeadConsumerTaskWithGroups(t *testing.T) {
@@ -226,7 +226,7 @@ func TestQueue_Ping_RestoresDeadConsumerTaskWithGroups(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got2, 1)
 	assert.Equal(t, "t1", got2[0].ID)
-	require.NoError(t, c2.Ack(ctx, "t1", 0))
+	require.NoError(t, c2.Ack(ctx, "t1"))
 }
 
 func TestAdmin_BlockGroups(t *testing.T) {
@@ -296,7 +296,7 @@ func TestQueue_Groups_ScaleBlockedGroup(t *testing.T) {
 	assert.Equal(t, "needle", got[0].ID)
 	t.Logf("Get with %d partitions in blocked group took %s", blockedN, elapsed)
 	assert.Less(t, elapsed, 2*time.Second, "Get не должен сканировать заблокированную группу")
-	require.NoError(t, consumer.Ack(ctx, "needle", 0))
+	require.NoError(t, consumer.Ack(ctx, "needle"))
 }
 
 func TestQueue_Groups_GetSpeedVsLegacyScan(t *testing.T) {
@@ -347,7 +347,7 @@ func TestQueue_Groups_GetSpeedVsLegacyScan(t *testing.T) {
 		total += time.Since(start)
 		require.NoError(t, err)
 		require.NotEmpty(t, got)
-		require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+		require.NoError(t, consumer.Ack(ctx, got[0].ID))
 	}
 	avg := total / rounds
 	t.Logf("avg Get over %d rounds with %d parked partitions: %s", rounds, n, avg)

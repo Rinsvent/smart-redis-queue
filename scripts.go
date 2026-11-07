@@ -392,6 +392,8 @@ local raceLocks = nil
 local raceSkips = 0
 local maxRaceSkips = 64
 local raceBudgetExhausted = false
+local raceSharedPrefix = "race!s!"
+local busyRaceTags = {}
 
 -- Вычисляем текущее время
 local currentTime = redis.call('TIME')
@@ -439,38 +441,89 @@ local function ensureRaceLocks()
 	end
 end
 
--- true = можно брать; false = race busy (partition deferred).
+-- true, sharedPairs|nil; false, nil при race busy (partition deferred).
+-- race!s!{id}: если queue:{q}:shared:{id} есть — lock не берём, blob в ответ.
 -- EVAL атомарный: между проверкой map и HSET другой клиент не вклинится.
 -- HSET (не HSETNX): снимок raceLocks уже полный для этого скрипта.
 local function tryAcquireRace(taskId, partition)
 	if not concurrencyTags then
-		return true
+		return true, nil
 	end
 	local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
 	if redis.call('EXISTS', raceTagsKey) == 0 then
-		return true
+		return true, nil
 	end
 	local tags = redis.call('SMEMBERS', raceTagsKey)
 	if #tags == 0 then
-		return true
+		return true, nil
 	end
-	ensureRaceLocks()
+
+	local needLock = {}
+	local sharedIds = {}
+	local sharedKeys = {}
 	for i = 1, #tags do
-		if raceLocks[tags[i]] then
+		local t = tags[i]
+		if busyRaceTags[t] then
 			deferPartition(partition)
 			raceSkips = raceSkips + 1
 			if raceSkips >= maxRaceSkips then
 				raceBudgetExhausted = true
 			end
-			return false
+			return false, nil
+		end
+		if t:sub(1, #raceSharedPrefix) == raceSharedPrefix then
+			local id = t:sub(#raceSharedPrefix + 1)
+			if id ~= "" then
+				sharedIds[#sharedIds + 1] = id
+				sharedKeys[#sharedKeys + 1] = "queue:" .. queueName .. ":shared:" .. id
+			end
+		else
+			needLock[#needLock + 1] = t
 		end
 	end
-	for i = 1, #tags do
-		local t = tags[i]
+
+	local sharedPairs = {}
+	if #sharedKeys > 0 then
+		local got = redis.call('MGET', unpack(sharedKeys))
+		for i = 1, #sharedKeys do
+			if got[i] ~= false then
+				sharedPairs[#sharedPairs + 1] = sharedIds[i]
+				sharedPairs[#sharedPairs + 1] = got[i]
+			else
+				needLock[#needLock + 1] = raceSharedPrefix .. sharedIds[i]
+			end
+		end
+	end
+
+	if #needLock == 0 then
+		if #sharedPairs == 0 then
+			return true, nil
+		end
+		return true, sharedPairs
+	end
+
+	ensureRaceLocks()
+	for i = 1, #needLock do
+		local t = needLock[i]
+		if raceLocks[t] then
+			busyRaceTags[t] = true
+			deferPartition(partition)
+			raceSkips = raceSkips + 1
+			if raceSkips >= maxRaceSkips then
+				raceBudgetExhausted = true
+			end
+			return false, nil
+		end
+	end
+	for i = 1, #needLock do
+		local t = needLock[i]
 		redis.call('HSET', raceLocksKey, t, taskId)
 		raceLocks[t] = taskId
 	end
-	return true
+	if #sharedPairs == 0 then
+		return true, nil
+	end
+	return true, sharedPairs
 end
 
 -- Регистрируем/обновляем консьюмера
@@ -785,8 +838,9 @@ local function getFromPartition(partition, group)
 						return nil
 					end
 				end
-				-- F5: race! locks (opt-in) до ZREM
-				if not tryAcquireRace(taskId, partition) then
+				-- F5: race! / race!s! locks (opt-in) до ZREM
+				local raceOk, sharedPairs = tryAcquireRace(taskId, partition)
+				if not raceOk then
 					return nil
 				end
 				redis.call('ZREM', partitionQueueKey, taskId)
@@ -804,8 +858,11 @@ local function getFromPartition(partition, group)
 					payload = ""
 				end
 				local rejectCount = tonumber(got[2]) or 0
+				if sharedPairs == nil then
+					sharedPairs = {}
+				end
 				-- partition уже известен (мы внутри getFromPartition); GET partition:{id} не нужен
-				return {taskId, partition, payload, tostring(rejectCount)}
+				return {taskId, partition, payload, tostring(rejectCount), sharedPairs}
 			end
 		else
 			redis.call('ZREM', prioritiesKey, maxPriority)
@@ -944,7 +1001,7 @@ end
 local stickyPartition = nil
 local stickyGroup = nil
 local stickyPref = nil
-while #results / 4 < prefetchCount do
+while #results / 5 < prefetchCount do
 	if raceBudgetExhausted then
 		break
 	end
@@ -967,6 +1024,11 @@ while #results / 4 < prefetchCount do
 	results[#results + 1] = taskData[2]
 	results[#results + 1] = taskData[3]
 	results[#results + 1] = taskData[4]
+	local sharedPairs = taskData[5]
+	if sharedPairs == nil then
+		sharedPairs = {}
+	end
+	results[#results + 1] = sharedPairs
 end
 
 -- Если мы залочили партицию в рамках этого GET, но не взяли из неё ни одной задачи,
@@ -987,12 +1049,20 @@ return results
 // ARGV[3] = consumer ID
 // ARGV[4] = idempotencyTtl seconds
 // ARGV[5] = concurrencyTags ("1" / "0") — F5 release race locks
+// ARGV[6] = sharedTTL seconds
+// ARGV[7] = nShared
+// ARGV[8..] = id, blob pairs — race!s! prepare-once (overwrite + unlock)
 var ackScript = redis.NewScript(`
 local queueName = ARGV[1]
 local taskId = ARGV[2]
 local consumerId = ARGV[3]
 local idempotencyTtl = tonumber(ARGV[4])
 local concurrencyTags = (ARGV[5] or "") == "1"
+local sharedTtl = tonumber(ARGV[6]) or 86400
+local nShared = tonumber(ARGV[7]) or 0
+if sharedTtl < 1 then
+	sharedTtl = 86400
+end
 
 -- Формируем ключи
 local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
@@ -1002,6 +1072,7 @@ local debPrefix = "deb!"
 local isDebounce = taskId:sub(1, #debPrefix) == debPrefix
 local raceLocksKey = "queue:" .. queueName .. ":race:locks"
 local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
+local raceSharedPrefix = "race!s!"
 
 -- F5: снять локи только если consumer включил concurrency (acquire был только тогда)
 local function releaseRaceLocks()
@@ -1015,6 +1086,30 @@ local function releaseRaceLocks()
 	for i = 1, #tags do
 		if redis.call('HGET', raceLocksKey, tags[i]) == taskId then
 			redis.call('HDEL', raceLocksKey, tags[i])
+		end
+	end
+end
+
+-- race!s! Shared: SET+EXPIRE (overwrite) и снять лок этого id
+local function applyShared()
+	if nShared <= 0 then
+		return
+	end
+	local argi = 8
+	for _ = 1, nShared do
+		local id = ARGV[argi]
+		local blob = ARGV[argi + 1]
+		argi = argi + 2
+		if id ~= nil and id ~= "" and blob ~= nil then
+			local sk = "queue:" .. queueName .. ":shared:" .. id
+			redis.call('SET', sk, blob)
+			redis.call('EXPIRE', sk, math.floor(sharedTtl))
+			if concurrencyTags then
+				local tag = raceSharedPrefix .. id
+				if redis.call('HGET', raceLocksKey, tag) == taskId then
+					redis.call('HDEL', raceLocksKey, tag)
+				end
+			end
 		end
 	end
 end
@@ -1046,6 +1141,7 @@ if partitionCode:sub(1, 1) == "!" then
 end
 
 redis.call('HDEL', consumerTasksKey, taskId)
+applyShared()
 releaseRaceLocks()
 
 -- F2: только deb! id — MGET флага/priority/qpriority и reactivate; иначе нулевой оверхед
@@ -1817,6 +1913,54 @@ func getGetScript() *redis.Script {
 
 func getAckScript() *redis.Script {
 	return ackScript
+}
+
+// shareScript — mid-handler prepare-once: SET shared:{id}+EXPIRE, unlock race!s!{id}.
+// ARGV[1]=queue ARGV[2]=taskId ARGV[3]=consumerId ARGV[4]=sharedTTL
+// ARGV[5]=concurrencyTags ARGV[6]=nShared ARGV[7..]=id,blob pairs
+var shareScript = redis.NewScript(`
+local queueName = ARGV[1]
+local taskId = ARGV[2]
+local consumerId = ARGV[3]
+local sharedTtl = tonumber(ARGV[4]) or 86400
+local concurrencyTags = (ARGV[5] or "") == "1"
+local nShared = tonumber(ARGV[6]) or 0
+if sharedTtl < 1 then
+	sharedTtl = 86400
+end
+if nShared <= 0 then
+	return 1
+end
+
+local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
+if redis.call('HGET', consumerTasksKey, taskId) == false then
+	return 0
+end
+
+local raceLocksKey = "queue:" .. queueName .. ":race:locks"
+local raceSharedPrefix = "race!s!"
+local argi = 7
+for _ = 1, nShared do
+	local id = ARGV[argi]
+	local blob = ARGV[argi + 1]
+	argi = argi + 2
+	if id ~= nil and id ~= "" and blob ~= nil then
+		local sk = "queue:" .. queueName .. ":shared:" .. id
+		redis.call('SET', sk, blob)
+		redis.call('EXPIRE', sk, math.floor(sharedTtl))
+		if concurrencyTags then
+			local tag = raceSharedPrefix .. id
+			if redis.call('HGET', raceLocksKey, tag) == taskId then
+				redis.call('HDEL', raceLocksKey, tag)
+			end
+		end
+	end
+end
+return 1
+`)
+
+func getShareScript() *redis.Script {
+	return shareScript
 }
 
 func getRejectScript() *redis.Script {

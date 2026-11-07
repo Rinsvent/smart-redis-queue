@@ -351,7 +351,7 @@ func TestAdmin_Remove_InProgress(t *testing.T) {
 	assert.Equal(t, int64(1), rdb.Exists(ctx, payloadKey("remove-ip-queue", "t1")).Val())
 	assert.Equal(t, int64(1), rdb.SCard(ctx, "queue:remove-ip-queue:tag:tag-ip").Val())
 
-	require.NoError(t, consumer.Ack(ctx, "t1", 0))
+	require.NoError(t, consumer.Ack(ctx, "t1"))
 	assert.Equal(t, int64(0), rdb.SCard(ctx, "queue:remove-ip-queue:tag:tag-ip").Val())
 	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:remove-ip-queue:tags:t1").Val())
 }

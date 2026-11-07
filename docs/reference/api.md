@@ -84,7 +84,10 @@
 | `SetExtendGroupBlocksOnly` | Пауза группы только продлевается (`ZADD GT`) |
 | `SetIdempotencyTtl` | Окно после Ack |
 | `SetRateLimit` | Rate limit на Get |
-| `SetConcurrencyTags` | `race!` |
+| `SetConcurrencyTags` | `race!` / `race!s!` |
+| `Ack` / `WithIdempotency` / `WithShared` / `WithSharedTTL` | завершение + optional Shared |
+| `Share` | mid-handler prepare-once blob + unlock `race!s!` |
+| `RaceSharedTag` / `Task.Shared` / `Task.SetAckShared` | shared id / Get blob / Consume→Ack |
 | `NewSteps` / `NewStepsRaw` / `Do` / `Begin` / `End` / `Progress` / `Commit` / `Last` / `LastProgress` / `LastCursor` / `Release` / `SetStepControl` / `ParseStepCheckpoint` | Step recovery + progress (`name#3/?:cur@ms[!pause]`); см. [доку](../features/step-recovery.md) |
 | `Task.Headers` / `SetHeader` / `SetHeaders` | Мета между попытками |
 | `SetStatsRetention` / `SetTagsStats` | Метрики |

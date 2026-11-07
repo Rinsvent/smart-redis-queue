@@ -50,7 +50,7 @@ func TestDebounce_Waiting_OverridePayloadAndScore(t *testing.T) {
 	}, 3*time.Second, 50*time.Millisecond)
 	require.Equal(t, id, got[0].ID)
 	assert.Equal(t, []byte("v2"), got[0].Payload)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestDebounce_InFlight_AckReactivates(t *testing.T) {
@@ -86,7 +86,7 @@ func TestDebounce_InFlight_AckReactivates(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got2)
 
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 
 	// флаг снят, задача снова в ZSET
 	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:test-queue:debounce:"+id).Val())
@@ -99,7 +99,7 @@ func TestDebounce_InFlight_AckReactivates(t *testing.T) {
 		return err == nil && len(got2) == 1
 	}, 2*time.Second, 50*time.Millisecond)
 	assert.Equal(t, []byte("last"), got2[0].Payload)
-	require.NoError(t, consumer.Ack(ctx, got2[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got2[0].ID))
 }
 
 func TestDebounce_InFlight_AckWithIdempotencyTtl_NoMarker(t *testing.T) {
@@ -118,7 +118,7 @@ func TestDebounce_InFlight_AckWithIdempotencyTtl_NoMarker(t *testing.T) {
 	require.NoError(t, producer.Publish(ctx, &Task{
 		ID: id, Payload: []byte("b"), Scheduled: time.Now().Add(-time.Second),
 	}))
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 30*time.Second))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID, WithIdempotency(30*time.Second)))
 
 	// reactivate: payload живой с данными, не F1-маркер "0"
 	raw, err := rdb.Get(ctx, "queue:test-queue:payload:"+id).Bytes()
@@ -131,7 +131,7 @@ func TestDebounce_InFlight_AckWithIdempotencyTtl_NoMarker(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got2, 1)
 	assert.Equal(t, []byte("b"), got2[0].Payload)
-	require.NoError(t, consumer.Ack(ctx, got2[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got2[0].ID))
 }
 
 func TestDebounce_Reject_ClearsFlagKeepsPayload(t *testing.T) {
@@ -163,7 +163,7 @@ func TestDebounce_Reject_ClearsFlagKeepsPayload(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got2, 1)
 	assert.Equal(t, []byte("b"), got2[0].Payload)
-	require.NoError(t, consumer.Ack(ctx, got2[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got2[0].ID))
 }
 
 func TestDebounce_WithoutPrefix_DuplicateNX(t *testing.T) {
@@ -201,5 +201,5 @@ func TestDebounce_WithoutPrefix_DuplicateNX(t *testing.T) {
 		}
 	}
 	assert.False(t, found)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }

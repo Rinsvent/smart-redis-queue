@@ -122,7 +122,7 @@ func TestAck_IdempotencyViaSetter(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, consumer.idempotencyTtl))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID, WithIdempotency(consumer.idempotencyTtl)))
 	err = producer.Publish(ctx, &Task{ID: "ttl-set", Payload: []byte("x"), Scheduled: time.Now()})
 	var exists *ErrTasksAlreadyExist
 	require.ErrorAs(t, err, &exists)
@@ -179,7 +179,7 @@ func TestPublish_ZeroScheduledUsesNow(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestBlockGroups_InvalidGroup(t *testing.T) {
@@ -212,5 +212,5 @@ func TestRemove_MissingAndScriptStatuses(t *testing.T) {
 	res, err := admin.Remove(ctx, q, "alive")
 	require.NoError(t, err)
 	assert.Equal(t, RemovalStatusInProgress, res.Status)
-	require.NoError(t, c.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, c.Ack(ctx, got[0].ID))
 }

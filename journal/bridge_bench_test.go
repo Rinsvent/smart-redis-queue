@@ -77,7 +77,7 @@ func BenchmarkBridge_PumpGetAck(b *testing.B) {
 		}
 		empty = 0
 		for _, t := range tasks {
-			if err := c.Ack(ctx, t.ID, 0); err != nil {
+			if err := c.Ack(ctx, t.ID); err != nil {
 				b.Fatal(err)
 			}
 			acked++

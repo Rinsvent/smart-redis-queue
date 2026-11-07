@@ -114,7 +114,7 @@ func TestMongo_RecoverAfterRedisNoAckedDup(t *testing.T) {
 	acked := 4
 	for i := 0; i < acked; i++ {
 		require.NoError(t, src.Ack(ctx, got[i].ID, nil))
-		require.NoError(t, c.Ack(ctx, got[i].ID, 0))
+		require.NoError(t, c.Ack(ctx, got[i].ID))
 	}
 
 	require.NoError(t, rdb.FlushDB(ctx).Err())

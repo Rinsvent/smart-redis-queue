@@ -30,7 +30,7 @@ func TestQueue_QueuePriority_CrossGroupWins(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "high-g2", got[0].ID)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 
 	got, err = consumer.Get(ctx)
 	require.NoError(t, err)
@@ -53,7 +53,7 @@ func TestQueue_QueuePriority_FallbackToLegacy(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "qp5", got[0].ID)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 
 	// lane empty → member removed from queue:priorities on next Get miss or after SCARD==0
 	got, err = consumer.Get(ctx)
@@ -88,7 +88,7 @@ func TestQueue_QueuePriority_SharedOrderedLock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got2)
 
-	require.NoError(t, consumer1.Ack(ctx, got1[0].ID, 0))
+	require.NoError(t, consumer1.Ack(ctx, got1[0].ID))
 
 	got2, err = consumer2.Get(ctx)
 	require.NoError(t, err)
@@ -153,7 +153,7 @@ func TestQueue_QueuePriority_LaneTaskSurvivesLegacyGroupCleanup(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Equal(t, "bcast", got[0].ID)
-	require.NoError(t, consumer.Ack(ctx, "bcast", 0))
+	require.NoError(t, consumer.Ack(ctx, "bcast"))
 
 	empty, err := consumer.Get(ctx)
 	require.NoError(t, err)

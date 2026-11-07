@@ -40,7 +40,7 @@ func TestHeaders_SetGetAckClears(t *testing.T) {
 	assert.Equal(t, "timeout", m2["last_error"], "headers survive Reject")
 
 	require.NoError(t, tasks2[0].SetHeaders(ctx, map[string]string{"last_error": "ok-retry"}))
-	require.NoError(t, consumer.Ack(ctx, tasks2[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, tasks2[0].ID))
 	assert.Equal(t, int64(0), rdb.Exists(ctx, headersKey("test-queue", "h1")).Val())
 }
 

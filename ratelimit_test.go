@@ -57,7 +57,7 @@ func TestRateLimit_AllAlgorithms_GroupLimit(t *testing.T) {
 			score, err := rdb.ZScore(ctx, "queue:test-queue:groups", "tok").Result()
 			require.NoError(t, err)
 			assert.Greater(t, score, float64(time.Now().UnixMilli()), algo)
-			require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+			require.NoError(t, consumer.Ack(ctx, got[0].ID))
 		})
 	}
 }
@@ -90,7 +90,7 @@ func TestRateLimit_GroupLayer_BlocksGroup(t *testing.T) {
 	require.NoError(t, err)
 	assert.Greater(t, score, float64(time.Now().UnixMilli()))
 
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestRateLimit_PartitionLayer_BlocksPartition(t *testing.T) {
@@ -110,7 +110,7 @@ func TestRateLimit_PartitionLayer_BlocksPartition(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 
 	require.NoError(t, producer.Publish(ctx, &Task{
 		ID: "p2", Partition: part, Payload: []byte("2"), Scheduled: time.Now().Add(-time.Second),
@@ -155,7 +155,7 @@ func TestRateLimit_BothLayers_GroupFirst(t *testing.T) {
 	require.NoError(t, err)
 	assert.Greater(t, gScore, float64(time.Now().UnixMilli()))
 
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestRateLimit_Disabled_NoExtraKeys(t *testing.T) {
@@ -183,7 +183,7 @@ func TestRateLimit_Disabled_NoExtraKeys(t *testing.T) {
 		}
 	}
 	assert.Empty(t, rlKeys)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestRateLimit_PoolInherits(t *testing.T) {
@@ -273,8 +273,8 @@ func TestRateLimit_BurstThenDeny_AllAlgorithms(t *testing.T) {
 			require.NoError(t, err)
 			assert.Greater(t, score, float64(time.Now().UnixMilli()))
 
-			require.NoError(t, consumer.Ack(ctx, got1[0].ID, 0))
-			require.NoError(t, consumer.Ack(ctx, got2[0].ID, 0))
+			require.NoError(t, consumer.Ack(ctx, got1[0].ID))
+			require.NoError(t, consumer.Ack(ctx, got2[0].ID))
 		})
 	}
 }
@@ -302,7 +302,7 @@ func TestRateLimit_PartitionBurstThenDeny_AllAlgorithms(t *testing.T) {
 				require.NoError(t, err)
 				require.Len(t, got, 1)
 				taken = append(taken, got[0].ID)
-				require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+				require.NoError(t, consumer.Ack(ctx, got[0].ID))
 			}
 			got3, err := consumer.Get(ctx)
 			require.NoError(t, err)
@@ -343,7 +343,7 @@ func TestRateLimit_MultiRate_AND(t *testing.T) {
 	score, err := rdb.ZScore(ctx, "queue:test-queue:groups", "tok").Result()
 	require.NoError(t, err)
 	assert.Greater(t, score, float64(time.Now().UnixMilli()))
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestRateLimit_GroupIsolation_OtherGroupOk(t *testing.T) {
@@ -367,7 +367,7 @@ func TestRateLimit_GroupIsolation_OtherGroupOk(t *testing.T) {
 			continue
 		}
 		ids = append(ids, got[0].ID)
-		require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+		require.NoError(t, consumer.Ack(ctx, got[0].ID))
 	}
 	assert.Contains(t, ids, "g2a")
 	assert.Len(t, ids, 2) // g1×1 + g2×1; второй из g1 не берём
@@ -403,7 +403,7 @@ func TestRateLimit_PartitionIsolation_OtherPartitionOk(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Equal(t, "user-a", got[0].Partition)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 
 	gotBlocked, err := consumer.Get(ctx)
 	require.NoError(t, err)
@@ -414,7 +414,7 @@ func TestRateLimit_PartitionIsolation_OtherPartitionOk(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, gotOther, 1)
 	assert.Equal(t, "user-b", gotOther[0].Partition)
-	require.NoError(t, consumer.Ack(ctx, gotOther[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, gotOther[0].ID))
 }
 
 func TestRateLimit_BothLayers_PartitionDeny(t *testing.T) {
@@ -432,7 +432,7 @@ func TestRateLimit_BothLayers_PartitionDeny(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 
 	publishReady(t, producer,
 		&Task{ID: "bp2", Partition: part, Groups: []string{"tok"}},
@@ -471,7 +471,7 @@ func TestRateLimit_PrefetchRespectsLimit(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, got, 2)
 	for _, tm := range got {
-		require.NoError(t, consumer.Ack(ctx, tm.ID, 0))
+		require.NoError(t, consumer.Ack(ctx, tm.ID))
 	}
 }
 
@@ -491,7 +491,7 @@ func TestRateLimit_ResumeAfterShortWindow(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 
 	got2, err := consumer.Get(ctx)
 	require.NoError(t, err)
@@ -508,7 +508,7 @@ func TestRateLimit_ResumeAfterShortWindow(t *testing.T) {
 		}
 	}
 	require.Len(t, got3, 1, "после окна token-bucket должен снова отдавать")
-	require.NoError(t, consumer.Ack(ctx, got3[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got3[0].ID))
 }
 
 func TestRateLimit_DefaultAlgorithm_WritesTokenBucketKeys(t *testing.T) {
@@ -541,7 +541,7 @@ func TestRateLimit_DefaultAlgorithm_WritesTokenBucketKeys(t *testing.T) {
 		}
 	}
 	assert.True(t, found, "ожидали ключи rl:g:…:token-bucket:…")
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestRateLimit_NoBurnOnLockedPartition(t *testing.T) {
@@ -570,8 +570,8 @@ func TestRateLimit_NoBurnOnLockedPartition(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, gotB, 1, "B берёт !other; обход locked !same не жжёт квоту")
 	assert.Equal(t, "other1", gotB[0].ID)
-	require.NoError(t, consumerA.Ack(ctx, gotA[0].ID, 0))
-	require.NoError(t, consumerB.Ack(ctx, gotB[0].ID, 0))
+	require.NoError(t, consumerA.Ack(ctx, gotA[0].ID))
+	require.NoError(t, consumerB.Ack(ctx, gotB[0].ID))
 }
 
 func TestRateLimit_EmptyConfigDisables(t *testing.T) {

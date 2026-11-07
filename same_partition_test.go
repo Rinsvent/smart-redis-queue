@@ -110,7 +110,7 @@ func TestQueue_SamePartitionBatch_OrderedPartitionKeepsOrder(t *testing.T) {
 
 	ctx := context.Background()
 	for _, task := range got {
-		require.NoError(t, consumer.Ack(ctx, task.ID, 0))
+		require.NoError(t, consumer.Ack(ctx, task.ID))
 	}
 	exists, err := rdb.Exists(ctx, "queue:test-queue:partition:"+got[0].Partition+":lock").Result()
 	require.NoError(t, err)

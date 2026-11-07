@@ -112,10 +112,27 @@ type Task struct {
 	Tags              []string  `json:"tags,omitempty"`        // теги для индексации / массового удаления
 	Groups            []string  `json:"groups,omitempty"`      // rate-limit / обход Get (пустые → DefaultGroup)
 	RejectCount       int       `json:"rejectCount,omitempty"` // кол-во reject для расчёта задержки
+	// Shared — prepare-once blob’ы с Get (ключ = id из race!s!{id}). Нил/пусто = вы лидер prepare.
+	Shared map[string][]byte `json:"-"`
 
 	// bindRedis / bindQueue — клиент и очередь consumer’а после Get (для NewSteps; шард верный).
 	bindRedis *redis.Client
 	bindQueue string
+
+	// ackShared / ackSharedTTL — что Consume передаст в Ack (SetAckShared).
+	ackShared    map[string][]byte
+	ackSharedTTL time.Duration
+}
+
+// SetAckShared — Shared, который Consume приложит к авто-Ack (ключ = id race!s!).
+// ttl опционален (один аргумент); 0/нет → DefaultSharedTTL на стороне Ack.
+func (t *Task) SetAckShared(shared map[string][]byte, ttl ...time.Duration) {
+	t.ackShared = shared
+	if len(ttl) > 0 {
+		t.ackSharedTTL = ttl[0]
+	} else {
+		t.ackSharedTTL = 0
+	}
 }
 
 // encodeTags сериализует теги в строку для Lua add-скрипта.
@@ -614,7 +631,17 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 					return ackErr
 				}
 			} else {
-				if ackErr := c.Ack(opCtx, task.ID, c.idempotencyTtl); ackErr != nil {
+				ackOpts := make([]AckOption, 0, 3)
+				if c.idempotencyTtl > 0 {
+					ackOpts = append(ackOpts, WithIdempotency(c.idempotencyTtl))
+				}
+				if len(task.ackShared) > 0 {
+					ackOpts = append(ackOpts, WithShared(task.ackShared))
+					if task.ackSharedTTL > 0 {
+						ackOpts = append(ackOpts, WithSharedTTL(task.ackSharedTTL))
+					}
+				}
+				if ackErr := c.Ack(opCtx, task.ID, ackOpts...); ackErr != nil {
 					return ackErr
 				}
 			}
@@ -740,9 +767,10 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 		return nil, nil
 	}
 
-	// Результат: {taskId1, partition1, payload1, rejectCount1, taskId2, ...}
-	tasks := make([]*Task, 0, len(results)/4)
-	for i := 0; i+3 < len(results); i += 4 {
+	// Результат: {taskId, partition, payload, rejectCount, sharedPairs, ...}
+	// sharedPairs — плоский массив [id, blob, id, blob, ...] или пустой.
+	tasks := make([]*Task, 0, len(results)/5)
+	for i := 0; i+4 < len(results); i += 5 {
 		if results[i] == nil {
 			continue
 		}
@@ -761,6 +789,7 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 				rejectCount = n
 			}
 		}
+		shared := parseSharedPairs(results[i+4])
 
 		raw := []byte(payload)
 		decoded, err := decodePayloadFromRedis(raw)
@@ -773,6 +802,7 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 			Payload:     decoded,
 			Scheduled:   time.Now(),
 			RejectCount: rejectCount,
+			Shared:      shared,
 			bindRedis:   c.redis,
 			bindQueue:   c.queueName,
 		})
@@ -784,18 +814,21 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 	return tasks, nil
 }
 
-// Ack подтверждает обработку задачи
-func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl time.Duration) error {
-	script := getAckScript()
-
-	result, err := script.Run(ctx, c.redis, []string{},
+// Ack подтверждает обработку задачи.
+// Опции: WithIdempotency, WithShared, WithSharedTTL — по одной, когда нужны.
+func (c *Consumer) Ack(ctx context.Context, taskID string, opts ...AckOption) error {
+	cfg := applyAckOptions(opts)
+	args := []interface{}{
 		c.queueName,
 		taskID,
 		c.consumerID,
-		idempotencyTtl.Seconds(),
+		cfg.idempotencyTTL.Seconds(),
 		bool01(c.concurrencyTags),
-	).Result()
+		sharedTTLSeconds(cfg.sharedTTL),
+	}
+	args = appendSharedArgs(args, cfg.shared)
 
+	result, err := getAckScript().Run(ctx, c.redis, []string{}, args...).Result()
 	if err != nil {
 		return fmt.Errorf("failed to ack task: %w", err)
 	}
@@ -818,6 +851,69 @@ func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl time.D
 		}
 	}
 	return nil
+}
+
+// Share публикует prepare-once blob’ы mid-handler (до Ack): пишет shared:{id},
+// снимает race!s! локи этой задачи, перезаписывает уже лежащие значения.
+// Для Consume — основной способ разблокировать тег не дожидаясь конца хэндлера.
+// TTL: WithSharedTTL (те же AckOption).
+func (c *Consumer) Share(ctx context.Context, taskID string, shared map[string][]byte, opts ...AckOption) error {
+	if len(shared) == 0 {
+		return nil
+	}
+	cfg := applyAckOptions(opts)
+	args := []interface{}{
+		c.queueName,
+		taskID,
+		c.consumerID,
+		sharedTTLSeconds(cfg.sharedTTL),
+		bool01(c.concurrencyTags),
+	}
+	args = appendSharedArgs(args, shared)
+
+	result, err := getShareScript().Run(ctx, c.redis, []string{}, args...).Result()
+	if err != nil {
+		return fmt.Errorf("failed to share: %w", err)
+	}
+	if result.(int64) == 0 {
+		return fmt.Errorf("task not found in processing or not owned by this consumer")
+	}
+	return nil
+}
+
+// appendSharedArgs: n, id1, blob1, ...
+func appendSharedArgs(args []interface{}, shared map[string][]byte) []interface{} {
+	if len(shared) == 0 {
+		return append(args, 0)
+	}
+	args = append(args, len(shared))
+	for id, blob := range shared {
+		args = append(args, id, string(blob))
+	}
+	return args
+}
+
+func parseSharedPairs(v interface{}) map[string][]byte {
+	arr, ok := v.([]interface{})
+	if !ok || len(arr) < 2 {
+		return nil
+	}
+	out := make(map[string][]byte, len(arr)/2)
+	for i := 0; i+1 < len(arr); i += 2 {
+		if arr[i] == nil || arr[i+1] == nil {
+			continue
+		}
+		id, okID := arr[i].(string)
+		blob, okBlob := arr[i+1].(string)
+		if !okID || !okBlob || id == "" {
+			continue
+		}
+		out[id] = []byte(blob)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // Reject отклоняет задачу и возвращает её обратно в очередь.

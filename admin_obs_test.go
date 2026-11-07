@@ -29,7 +29,7 @@ func TestAdmin_ListLockedPartitions(t *testing.T) {
 	assert.Equal(t, "!ord", locked[0].Partition)
 	assert.True(t, locked[0].Locked)
 
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 	locked, err = admin.ListLockedPartitions(ctx, "test-queue")
 	require.NoError(t, err)
 	assert.Empty(t, locked)

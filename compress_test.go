@@ -65,7 +65,7 @@ func TestCompression_PublishGet(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, body, got[0].Payload)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestCompression_WithOptionOverridesProducer(t *testing.T) {
@@ -87,7 +87,7 @@ func TestCompression_WithOptionOverridesProducer(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, body, got[0].Payload)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestCompression_Disabled_NoMagic(t *testing.T) {
@@ -105,5 +105,5 @@ func TestCompression_Disabled_NoMagic(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, body, got[0].Payload)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }

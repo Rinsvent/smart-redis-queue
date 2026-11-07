@@ -65,7 +65,7 @@ func TestAdmin_QueueOverviewAndStatsBounds(t *testing.T) {
 	assert.Equal(t, sec1, from)
 	assert.Equal(t, sec2, to)
 
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestConsumer_StatsRetentionLoopAndReject(t *testing.T) {
@@ -92,7 +92,7 @@ func TestConsumer_StatsRetentionLoopAndReject(t *testing.T) {
 	got, err = consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 
 	// дать loop сделать tick/flush (ensureLoop уже запущен SetStatsRetention)
 	time.Sleep(1100 * time.Millisecond)

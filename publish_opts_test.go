@@ -42,7 +42,7 @@ func TestPublish_Backpressure_WithTagBackpressure(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 
 	require.NoError(t, producer.PublishWith(ctx, []PublishOption{
 		WithTagBackpressure(tag, 3),

@@ -32,7 +32,7 @@ func TestExchange_DirectFanoutAtomic(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "t1", got[0].ID)
-		_ = c.Ack(ctx, got[0].ID, 0)
+		_ = c.Ack(ctx, got[0].ID)
 		c.Close()
 	}
 
@@ -46,7 +46,7 @@ func TestExchange_DirectFanoutAtomic(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, got, 1, "queue %s", q)
 		assert.Equal(t, "t2", got[0].ID)
-		_ = c.Ack(ctx, got[0].ID, 0)
+		_ = c.Ack(ctx, got[0].ID)
 		c.Close()
 	}
 }

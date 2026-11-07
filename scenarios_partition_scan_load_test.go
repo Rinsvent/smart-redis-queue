@@ -110,7 +110,7 @@ func TestPartitionScanLoad_S1000(t *testing.T) {
 				}
 				for _, task := range got {
 					if lim.allow() {
-						if err := c.Ack(runCtx, task.ID, 0); err != nil && runCtx.Err() == nil {
+						if err := c.Ack(runCtx, task.ID); err != nil && runCtx.Err() == nil {
 							t.Errorf("ack: %v", err)
 						}
 						acks.Add(1)

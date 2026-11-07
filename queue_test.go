@@ -252,7 +252,7 @@ func TestQueue_Get_PartitionOrdering(t *testing.T) {
 		require.NoError(t, err)
 		require.NotEmpty(t, got)
 		assert.Equal(t, fmt.Sprintf("task-%d", i), got[0].ID)
-		err = consumer.Ack(ctx, got[0].ID, 0)
+		err = consumer.Ack(ctx, got[0].ID)
 		require.NoError(t, err)
 	}
 }
@@ -283,7 +283,7 @@ func TestQueue_Get_PrefetchMultiple(t *testing.T) {
 	firstBatchSize := len(got1)
 
 	for _, task := range got1 {
-		err = consumer.Ack(ctx, task.ID, 0)
+		err = consumer.Ack(ctx, task.ID)
 		require.NoError(t, err)
 	}
 
@@ -292,7 +292,7 @@ func TestQueue_Get_PrefetchMultiple(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 7-firstBatchSize, len(got2))
 	for _, task := range got2 {
-		err = consumer.Ack(ctx, task.ID, 0)
+		err = consumer.Ack(ctx, task.ID)
 		require.NoError(t, err)
 	}
 
@@ -401,7 +401,7 @@ func TestQueue_Get_DeferredPartition_LowerPriorityReady(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "lo-ready", got[0].ID)
-	require.NoError(t, consumer.Ack(ctx, "lo-ready", 0))
+	require.NoError(t, consumer.Ack(ctx, "lo-ready"))
 }
 
 func TestQueue_Ack(t *testing.T) {
@@ -420,7 +420,7 @@ func TestQueue_Ack(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.NotEmpty(t, got)
-	err = consumer.Ack(ctx, "task-1", 0)
+	err = consumer.Ack(ctx, "task-1")
 	require.NoError(t, err)
 
 	// Проверяем что задача удалена
@@ -457,7 +457,7 @@ func TestQueue_Ack_PartitionUnlock(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, consumer.ConsumerID(), lockOwner)
 
-	err = consumer.Ack(ctx, "task-1", 0)
+	err = consumer.Ack(ctx, "task-1")
 	require.NoError(t, err)
 
 	// Проверяем что партиция разблокирована
@@ -572,7 +572,7 @@ func TestQueue_Reject_OrderedPartition_WithWaitTime(t *testing.T) {
 	require.NotEmpty(t, got3)
 	assert.Equal(t, "task-1", got3[0].ID)
 
-	require.NoError(t, consumer.Ack(ctx, "task-1", 0))
+	require.NoError(t, consumer.Ack(ctx, "task-1"))
 }
 
 // TestQueue_Consume_RejectWithDelay проверяет, что handler может вернуть RejectWithDelay
@@ -648,7 +648,7 @@ func TestQueue_Reject_FractionalWaitTime(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, got3, "после unlockAt задача доступна")
 	assert.Equal(t, "task-1", got3[0].ID)
-	require.NoError(t, consumer.Ack(ctx, "task-1", 0))
+	require.NoError(t, consumer.Ack(ctx, "task-1"))
 }
 
 // TestQueue_Reject_NonOrderedPartition_WaitTimeIgnored проверяет, что для не-ordered партиции
@@ -751,7 +751,7 @@ func TestQueue_MultipleConsumers(t *testing.T) {
 		require.NoError(t, err)
 		for _, task := range tasks {
 			got1 = append(got1, task.ID)
-			consumer1.Ack(ctx, task.ID, 0)
+			consumer1.Ack(ctx, task.ID)
 		}
 		if len(got1)+len(got2) >= 5 {
 			break
@@ -760,7 +760,7 @@ func TestQueue_MultipleConsumers(t *testing.T) {
 		require.NoError(t, err)
 		for _, task := range tasks2 {
 			got2 = append(got2, task.ID)
-			consumer2.Ack(ctx, task.ID, 0)
+			consumer2.Ack(ctx, task.ID)
 		}
 	}
 
@@ -855,7 +855,7 @@ func TestQueue_Publish_MultipleTasks(t *testing.T) {
 		}
 		for _, task := range got {
 			received = append(received, task)
-			err = consumer.Ack(ctx, task.ID, 0)
+			err = consumer.Ack(ctx, task.ID)
 			require.NoError(t, err)
 		}
 	}
@@ -913,7 +913,7 @@ func TestQueue_Consume(t *testing.T) {
 		case task := <-ch:
 			require.NotNil(t, task)
 			received = append(received, task.ID)
-			err := consumer.Ack(ctx, task.ID, 0)
+			err := consumer.Ack(ctx, task.ID)
 			require.NoError(t, err)
 		case <-time.After(2 * time.Second):
 			t.Fatal("timeout waiting for task from Consume channel")
@@ -1288,7 +1288,7 @@ func TestQueue_Consume_HandlerPanic_RejectsAndContinues(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, "panic-1", got[0].ID)
 	assert.GreaterOrEqual(t, got[0].RejectCount, 1)
-	require.NoError(t, consumer.Ack(context.Background(), got[0].ID, 0))
+	require.NoError(t, consumer.Ack(context.Background(), got[0].ID))
 }
 
 func TestQueue_Consume_MiddlewareSeesHandlerPanic(t *testing.T) {
@@ -1378,7 +1378,7 @@ func TestQueue_ConsumerPool_HandlerPanicIsolated(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Equal(t, "pool-panic", got[0].ID)
 	assert.GreaterOrEqual(t, got[0].RejectCount, 1)
-	require.NoError(t, c.Ack(context.Background(), got[0].ID, 0))
+	require.NoError(t, c.Ack(context.Background(), got[0].ID))
 }
 
 // TestQueue_CountKey_OnlyForOrderedPartition: :count создаётся только для !-партиций.
@@ -1402,7 +1402,7 @@ func TestQueue_CountKey_OnlyForOrderedPartition(t *testing.T) {
 		"non-ordered не должен создавать :count")
 
 	for _, task := range got {
-		require.NoError(t, consumer.Ack(ctx, task.ID, 0))
+		require.NoError(t, consumer.Ack(ctx, task.ID))
 	}
 	assert.Equal(t, int64(0), rdb.Exists(ctx, consumerPartitionCountKey("test-queue", cid, "plain")).Val())
 }
@@ -1429,12 +1429,12 @@ func TestQueue_CountKey_OrderedPrefetchUnlock(t *testing.T) {
 	assert.Equal(t, "2", rdb.Get(ctx, countKey).Val())
 	assert.Equal(t, int64(1), rdb.Exists(ctx, partitionLockKey("test-queue", part)).Val())
 
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 	assert.Equal(t, "1", rdb.Get(ctx, countKey).Val())
 	assert.Equal(t, int64(1), rdb.Exists(ctx, partitionLockKey("test-queue", part)).Val(),
 		"lock жив, пока есть in-flight")
 
-	require.NoError(t, consumer.Ack(ctx, got[1].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[1].ID))
 	// DECR→0 сразу DEL: ключа нет (не value "0")
 	_, err = rdb.Get(ctx, countKey).Result()
 	assert.ErrorIs(t, err, redis.Nil)
@@ -1489,7 +1489,7 @@ func TestQueue_Reject_OrderedPartition_PreservesOrder(t *testing.T) {
 		}
 		for _, task := range got {
 			order = append(order, task.ID)
-			require.NoError(t, consumer.Ack(ctx, task.ID, 0))
+			require.NoError(t, consumer.Ack(ctx, task.ID))
 		}
 	}
 
@@ -1534,9 +1534,9 @@ func TestQueue_Reject_Ordered_RestoresBeforeRemaining(t *testing.T) {
 	assert.Equal(t, "t1", got2[0].ID, "t1 с original score раньше t3/t4")
 	assert.Equal(t, "t3", got2[1].ID)
 
-	require.NoError(t, consumer.Ack(ctx, "t2", 0))
+	require.NoError(t, consumer.Ack(ctx, "t2"))
 	for _, task := range got2 {
-		require.NoError(t, consumer.Ack(ctx, task.ID, 0))
+		require.NoError(t, consumer.Ack(ctx, task.ID))
 	}
 
 	// осталась только t4
@@ -1552,7 +1552,7 @@ func TestQueue_Reject_Ordered_RestoresBeforeRemaining(t *testing.T) {
 		}
 		for _, task := range g {
 			rest = append(rest, task.ID)
-			require.NoError(t, consumer.Ack(ctx, task.ID, 0))
+			require.NoError(t, consumer.Ack(ctx, task.ID))
 		}
 	}
 	assert.Equal(t, []string{"t4"}, rest)
@@ -1607,7 +1607,7 @@ func TestQueue_Ping_DeadConsumer_ReclaimsAllOrdered(t *testing.T) {
 		}
 		for _, task := range g {
 			order = append(order, task.ID)
-			require.NoError(t, c2.Ack(ctx, task.ID, 0))
+			require.NoError(t, c2.Ack(ctx, task.ID))
 		}
 	}
 	assert.Equal(t, []string{"d1", "d2", "d3"}, order)
@@ -1719,7 +1719,7 @@ func TestQueue_Reject_OrderedPartition_RepeatedRejects(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "task-1", got[0].ID)
-	require.NoError(t, consumer.Ack(ctx, "task-1", 0))
+	require.NoError(t, consumer.Ack(ctx, "task-1"))
 
 	// Очередь пуста
 	got2, err := consumer.Get(ctx)
@@ -1758,7 +1758,7 @@ func TestQueue_PartitionStrictOrdering(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got2)
 
-	err = consumer1.Ack(ctx, "task-1", 0)
+	err = consumer1.Ack(ctx, "task-1")
 	require.NoError(t, err)
 
 	// Теперь второй консьюмер может получить следующую задачу
@@ -1807,14 +1807,14 @@ func TestQueue_PartitionWithLock_ExclusiveToWorker(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, consumer1.ConsumerID(), lockOwner)
 
-	consumer1.Ack(ctx, "task-1", 0)
+	consumer1.Ack(ctx, "task-1")
 
 	// После ack блокировка снята — consumer2 получает task-2
 	got2, err = consumer2.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got2, 1)
 	assert.Equal(t, "task-2", got2[0].ID)
-	consumer2.Ack(ctx, "task-2", 0)
+	consumer2.Ack(ctx, "task-2")
 }
 
 // TestQueue_PartitionWithoutLock_SharedByWorkers проверяет, что партиции без префикса "!"
@@ -1862,8 +1862,8 @@ func TestQueue_PartitionWithoutLock_SharedByWorkers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), exists, "партиция без ! не должна иметь блокировку")
 
-	consumer1.Ack(ctx, got1[0].ID, 0)
-	consumer2.Ack(ctx, got2[0].ID, 0)
+	consumer1.Ack(ctx, got1[0].ID)
+	consumer2.Ack(ctx, got2[0].ID)
 }
 
 // TestQueue_Get_PartitionNoLock проверяет, что для партиции без "!" блокировка не создаётся.
@@ -1937,8 +1937,8 @@ func TestQueue_LockedPartition_SameWorkerMultipleTasks(t *testing.T) {
 	assert.Empty(t, gotOther, "другой воркер не должен получить задачу из заблокированной партиции")
 
 	// consumer1 акнит все 3 — блокировка снимается после последнего ack
-	require.NoError(t, consumer1.Ack(ctx, "task-1", 0))
-	require.NoError(t, consumer1.Ack(ctx, "task-2", 0))
+	require.NoError(t, consumer1.Ack(ctx, "task-1"))
+	require.NoError(t, consumer1.Ack(ctx, "task-2"))
 
 	// consumer2 не может взять задачу — партиция заблокирована
 	gotOther2, err := consumer2.Get(ctx)
@@ -1946,14 +1946,14 @@ func TestQueue_LockedPartition_SameWorkerMultipleTasks(t *testing.T) {
 	assert.Empty(t, gotOther2, "другой воркер не должен получить задачу из заблокированной партиции")
 
 	// снимется блокировка
-	require.NoError(t, consumer1.Ack(ctx, "task-3", 0))
+	require.NoError(t, consumer1.Ack(ctx, "task-3"))
 
 	// Теперь consumer2 может взять оставшуюся задачу
 	got4, err := consumer2.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got4, 1)
 	assert.Equal(t, "task-4", got4[0].ID)
-	require.NoError(t, consumer2.Ack(ctx, "task-4", 0))
+	require.NoError(t, consumer2.Ack(ctx, "task-4"))
 }
 
 // TestQueue_Priority_HigherFirst проверяет, что в одной партиции сообщения с большим приоритетом
@@ -1979,7 +1979,7 @@ func TestQueue_Priority_HigherFirst(t *testing.T) {
 		require.NoError(t, err)
 		require.NotEmpty(t, got)
 		received = append(received, got[0].ID)
-		err = consumer.Ack(ctx, got[0].ID, 0)
+		err = consumer.Ack(ctx, got[0].ID)
 		require.NoError(t, err)
 	}
 	assert.Equal(t, expectedOrder, received)
@@ -2007,7 +2007,7 @@ func TestQueue_Ack_Idempotency(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, got)
 	require.Equal(t, "task-low", got[0].ID)
-	err = consumer.Ack(ctx, got[0].ID, 1*time.Second)
+	err = consumer.Ack(ctx, got[0].ID, WithIdempotency(1*time.Second))
 	require.NoError(t, err)
 
 	err = producer.Publish(ctx, duplicateTask)
@@ -2165,7 +2165,7 @@ func BenchmarkConsume(b *testing.B) {
 		tasks, _ := consumer.Get(ctx)
 		for _, task := range tasks {
 			if task != nil {
-				consumer.Ack(ctx, task.ID, 0)
+				consumer.Ack(ctx, task.ID)
 				consumed++
 			}
 		}
@@ -2202,7 +2202,7 @@ func BenchmarkConsumePrefetch(b *testing.B) {
 				tasks, _ := consumer.Get(ctx)
 				for _, task := range tasks {
 					if task != nil {
-						consumer.Ack(ctx, task.ID, 0)
+						consumer.Ack(ctx, task.ID)
 						consumed++
 					}
 				}
@@ -2261,7 +2261,7 @@ func BenchmarkConsumeParallel(b *testing.B) {
 						}
 						for _, task := range tasks {
 							if task != nil {
-								c.Ack(ctx, task.ID, 0)
+								c.Ack(ctx, task.ID)
 								consumed.Add(1)
 							}
 						}

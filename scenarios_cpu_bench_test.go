@@ -422,7 +422,7 @@ func TestConnectorRateLimitLoad_Head(t *testing.T) {
 					}
 					for _, task := range got {
 						if lim.allow() {
-							_ = c.Ack(runCtx, task.ID, 0)
+							_ = c.Ack(runCtx, task.ID)
 							acks.Add(1)
 						} else if blockGroup {
 							_ = c.Reject(runCtx, task.ID, rejectDelaySec, group)

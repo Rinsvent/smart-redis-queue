@@ -109,7 +109,7 @@ func TestBusiness_DelayedMessageNotVisibleUntilDue(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "future", got[0].ID)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestBusiness_PriorityAndPrefetchOrderInPartition(t *testing.T) {
@@ -127,7 +127,7 @@ func TestBusiness_PriorityAndPrefetchOrderInPartition(t *testing.T) {
 	require.Len(t, got, 3)
 	assert.Equal(t, []string{"p10", "p5", "p1"}, []string{got[0].ID, got[1].ID, got[2].ID})
 	for _, task := range got {
-		require.NoError(t, consumer.Ack(ctx, task.ID, 0))
+		require.NoError(t, consumer.Ack(ctx, task.ID))
 	}
 }
 
@@ -149,7 +149,7 @@ func TestBusiness_StrictOrderAcrossPrefetchBatches(t *testing.T) {
 		require.NotEmpty(t, got)
 		for _, task := range got {
 			order = append(order, task.ID)
-			require.NoError(t, consumer.Ack(ctx, task.ID, 0))
+			require.NoError(t, consumer.Ack(ctx, task.ID))
 		}
 	}
 	assert.Equal(t, []string{"o-1", "o-2", "o-3", "o-4", "o-5"}, order)
@@ -210,7 +210,7 @@ func TestBusiness_DefaultGroupWhenGroupsEmpty(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestBusiness_PartitionBlockedInInspect(t *testing.T) {
@@ -271,7 +271,7 @@ func TestBusiness_CheckDeadConsumerLocksOnGet(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got2, 1)
 	assert.Equal(t, "after", got2[0].ID)
-	require.NoError(t, cOn.Ack(ctx, got2[0].ID, 0))
+	require.NoError(t, cOn.Ack(ctx, got2[0].ID))
 }
 
 // --- Idempotency via SetIdempotencyTtl on Consume ---
@@ -333,7 +333,7 @@ func TestBusiness_TagsLifecycleAndRemoveMissing(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 	n, err = admin.CountByTag(ctx, q, "camp")
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), n, "Ack чистит tag index")
@@ -381,10 +381,10 @@ func TestBusiness_AckReject_WrongOwner(t *testing.T) {
 	require.Len(t, got, 1)
 
 	other := newConsumer(rdb, "test-queue", "other", false)
-	require.Error(t, other.Ack(ctx, got[0].ID, 0))
+	require.Error(t, other.Ack(ctx, got[0].ID))
 	require.Error(t, other.Reject(ctx, got[0].ID, 0))
 	require.Error(t, consumer.Reject(ctx, "missing-id", 0))
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
 func TestBusiness_Reject_InvalidBlockGroup(t *testing.T) {
@@ -439,7 +439,7 @@ func TestBusiness_MiddlewarePanicRecovered(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.GreaterOrEqual(t, got[0].RejectCount, 1)
-	require.NoError(t, consumer.Ack(context.Background(), got[0].ID, 0))
+	require.NoError(t, consumer.Ack(context.Background(), got[0].ID))
 }
 
 func TestBusiness_PoolUse_PropagatesMiddleware(t *testing.T) {
@@ -490,7 +490,7 @@ func TestBusiness_GetChan_StopsOnCancel(t *testing.T) {
 	select {
 	case task := <-ch:
 		require.NotNil(t, task)
-		require.NoError(t, consumer.Ack(context.Background(), task.ID, 0))
+		require.NoError(t, consumer.Ack(context.Background(), task.ID))
 	case <-time.After(3 * time.Second):
 		t.Fatal("no task")
 	}
@@ -526,7 +526,7 @@ func TestBusiness_BatchPublish_PartialDuplicates(t *testing.T) {
 	ids := map[string]bool{}
 	for _, task := range got {
 		ids[task.ID] = true
-		require.NoError(t, consumer.Ack(ctx, task.ID, 0))
+		require.NoError(t, consumer.Ack(ctx, task.ID))
 	}
 	// dup уже был + new1/new2 добавлены (add не откатывает весь батч)
 	assert.True(t, ids["dup"] || ids["new1"] || ids["new2"])
@@ -580,7 +580,7 @@ func TestBusiness_Retry_RestoresGroupsReady(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got2, 1)
 	assert.Equal(t, "t1", got2[0].ID)
-	require.NoError(t, consumer.Ack(ctx, got2[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got2[0].ID))
 }
 
 func TestBusiness_ListQueues_AndPurgeAll(t *testing.T) {
@@ -642,7 +642,7 @@ func TestBusiness_Consume_OrderedRejectCascadeWithDelay(t *testing.T) {
 	require.Len(t, got, 3)
 	assert.Equal(t, []string{"1", "2", "3"}, []string{got[0].ID, got[1].ID, got[2].ID})
 	for _, task := range got {
-		require.NoError(t, consumer2.Ack(context.Background(), task.ID, 0))
+		require.NoError(t, consumer2.Ack(context.Background(), task.ID))
 	}
 }
 
@@ -661,7 +661,7 @@ func TestBusiness_MultiGroup_BlockedSecondGroup(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "g1only", got[0].ID)
-	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 	empty, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, empty)

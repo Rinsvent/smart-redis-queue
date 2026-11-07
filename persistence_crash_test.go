@@ -254,7 +254,7 @@ func TestPersist_AckThenKill9(t *testing.T) {
 			}
 			require.NotNil(t, got)
 			require.Equal(t, id, got.ID)
-			require.NoError(t, consumer.Ack(ctx, id, 0))
+			require.NoError(t, consumer.Ack(ctx, id))
 			require.False(t, payloadExists(ctx, rdb, queue, id), "payload should be gone after Ack")
 
 			killPersistRedis9(t, p)

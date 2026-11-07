@@ -64,7 +64,7 @@ func BenchmarkPayloadFullCycle(b *testing.B) {
 					if len(tasks) == 0 {
 						continue
 					}
-					_ = consumer.Ack(ctx, tasks[0].ID, 0)
+					_ = consumer.Ack(ctx, tasks[0].ID)
 					break
 				}
 			}
@@ -131,7 +131,7 @@ func BenchmarkCompressFullCycle(b *testing.B) {
 						if len(tasks) == 0 {
 							continue
 						}
-						_ = consumer.Ack(ctx, tasks[0].ID, 0)
+						_ = consumer.Ack(ctx, tasks[0].ID)
 						break
 					}
 				}
@@ -172,7 +172,7 @@ func BenchmarkOrderedPartitions(b *testing.B) {
 						b.Fatal("empty Get before drain")
 					}
 					for _, t := range got {
-						_ = consumer.Ack(ctx, t.ID, 0)
+						_ = consumer.Ack(ctx, t.ID)
 						consumed++
 					}
 				}
