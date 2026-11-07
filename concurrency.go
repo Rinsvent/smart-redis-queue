@@ -9,14 +9,24 @@ import (
 // такие теги в race:tags:{id}; проверка/локи в Get — только при SetConcurrencyTags(true).
 const RaceTagPrefix = "race!"
 
-// RaceSharedTagPrefix — prepare-once поверх race: после Share/Ack+Shared лок не нужен,
-// Get отдаёт blob в Task.Shared. Полный тег: RaceSharedTagPrefix + id.
+// RaceSharedTagPrefix — prepare-once: после Shared.Publish / Ack+WithShared лок не нужен,
+// Get отдаёт blob в Task.Shared. Ключ: queue:{q}:shared:{id}.
 const RaceSharedTagPrefix = "race!s!"
 
-// DefaultSharedTTL — TTL ключа queue:{q}:shared:{id}, если не задан WithSharedTTL.
+// RaceBlockTagPrefix — wait-gate: block:{id} отсутствует → mutex (один probe);
+// значение не ready → Get skip; ready → parallel без лока. Ключ: queue:{q}:block:{id}.
+const RaceBlockTagPrefix = "race!b!"
+
+// BlockWaitValue / BlockReadyValue — значения ключа block:{id}.
+const (
+	BlockWaitValue  = "1"
+	BlockReadyValue = "ready"
+)
+
+// DefaultSharedTTL — TTL shared:{id} / block:{id} ready, если не задан WithSharedTTL.
 const DefaultSharedTTL = 24 * time.Hour
 
-// HasRaceTagPrefix — тег является concurrency-ресурсом (включая race!s!).
+// HasRaceTagPrefix — concurrency-ресурс (race! / race!s! / race!b!).
 func HasRaceTagPrefix(tag string) bool {
 	return strings.HasPrefix(tag, RaceTagPrefix)
 }
@@ -26,9 +36,19 @@ func IsRaceSharedTag(tag string) bool {
 	return strings.HasPrefix(tag, RaceSharedTagPrefix)
 }
 
+// IsRaceBlockTag — wait-gate тег race!b!{id}.
+func IsRaceBlockTag(tag string) bool {
+	return strings.HasPrefix(tag, RaceBlockTagPrefix)
+}
+
 // RaceSharedTag собирает тег race!s!{id}.
 func RaceSharedTag(id string) string {
 	return RaceSharedTagPrefix + id
+}
+
+// RaceBlockTag собирает тег race!b!{id}.
+func RaceBlockTag(id string) string {
+	return RaceBlockTagPrefix + id
 }
 
 // RaceSharedID возвращает id из race!s!{id}; ok=false если не shared-тег.
@@ -37,6 +57,22 @@ func RaceSharedID(tag string) (id string, ok bool) {
 		return "", false
 	}
 	return tag[len(RaceSharedTagPrefix):], true
+}
+
+// RaceBlockID возвращает id из race!b!{id}; ok=false если не block-тег.
+func RaceBlockID(tag string) (id string, ok bool) {
+	if !strings.HasPrefix(tag, RaceBlockTagPrefix) {
+		return "", false
+	}
+	return tag[len(RaceBlockTagPrefix):], true
+}
+
+// NormalizeRaceBlockID — id или полный race!b!{id} → id.
+func NormalizeRaceBlockID(idOrTag string) string {
+	if id, ok := RaceBlockID(idOrTag); ok {
+		return id
+	}
+	return idOrTag
 }
 
 // SetConcurrencyTags включает проверку race!-тегов в Get (и release в Ack/Reject/Share).
@@ -56,6 +92,7 @@ type ackConfig struct {
 	idempotencyTTL time.Duration
 	shared         map[string][]byte
 	sharedTTL      time.Duration
+	openBlocks     []string // race!b! ids → SET block:{id} ready
 }
 
 // AckOption — опция Ack (WithIdempotency, WithShared, WithSharedTTL).
@@ -79,13 +116,24 @@ func WithShared(shared map[string][]byte) AckOption {
 	}
 }
 
-// WithSharedTTL — TTL для ключей shared при этом Ack/Share; 0 → DefaultSharedTTL.
+// WithSharedTTL — TTL для shared / Open(block ready) при Ack/Shared; 0 → DefaultSharedTTL.
 func WithSharedTTL(ttl time.Duration) AckOption {
 	return func(c *ackConfig) {
 		if ttl < 0 {
 			ttl = 0
 		}
 		c.sharedTTL = ttl
+	}
+}
+
+// WithOpenBlocks помечает race!b!{id} как ready (parallel без лока) на TTL.
+// ids — суффиксы или полные race!b!… теги.
+func WithOpenBlocks(ids ...string) AckOption {
+	return func(c *ackConfig) {
+		if len(ids) == 0 {
+			return
+		}
+		c.openBlocks = append([]string(nil), ids...)
 	}
 }
 

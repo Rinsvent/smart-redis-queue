@@ -393,6 +393,8 @@ local raceSkips = 0
 local maxRaceSkips = 64
 local raceBudgetExhausted = false
 local raceSharedPrefix = "race!s!"
+local raceBlockPrefix = "race!b!"
+local blockReadyValue = "ready"
 local busyRaceTags = {}
 
 -- Вычисляем текущее время
@@ -458,6 +460,9 @@ local function tryAcquireRace(taskId, partition)
 	local needLock = {}
 	local sharedIds = {}
 	local sharedKeys = {}
+	local blockIds = {}
+	local blockKeys = {}
+	local blockTags = {}
 	for i = 1, #tags do
 		local t = tags[i]
 		if busyRaceTags[t] then
@@ -474,8 +479,35 @@ local function tryAcquireRace(taskId, partition)
 				sharedIds[#sharedIds + 1] = id
 				sharedKeys[#sharedKeys + 1] = "queue:" .. queueName .. ":shared:" .. id
 			end
+		elseif t:sub(1, #raceBlockPrefix) == raceBlockPrefix then
+			local id = t:sub(#raceBlockPrefix + 1)
+			if id ~= "" then
+				blockIds[#blockIds + 1] = id
+				blockKeys[#blockKeys + 1] = "queue:" .. queueName .. ":block:" .. id
+				blockTags[#blockTags + 1] = t
+			end
 		else
 			needLock[#needLock + 1] = t
+		end
+	end
+
+	-- race!b!: wait (не ready) → skip; ready → без лока; нет ключа → mutex
+	if #blockKeys > 0 then
+		local bgot = redis.call('MGET', unpack(blockKeys))
+		for i = 1, #blockKeys do
+			local v = bgot[i]
+			if v == false then
+				needLock[#needLock + 1] = blockTags[i]
+			elseif v ~= blockReadyValue then
+				busyRaceTags[blockTags[i]] = true
+				deferPartition(partition)
+				raceSkips = raceSkips + 1
+				if raceSkips >= maxRaceSkips then
+					raceBudgetExhausted = true
+				end
+				return false, nil
+			end
+			-- v == ready: gate open, без лока
 		end
 	end
 
@@ -1048,7 +1080,7 @@ return results
 // ARGV[5] = concurrencyTags ("1" / "0") — F5 release race locks
 // ARGV[6] = sharedTTL seconds
 // ARGV[7] = nShared
-// ARGV[8..] = id, blob pairs — race!s! prepare-once (overwrite + unlock)
+// ARGV[8..] = id, blob pairs; затем nOpen, openId...
 var ackScript = redis.NewScript(`
 local queueName = ARGV[1]
 local taskId = ARGV[2]
@@ -1060,6 +1092,7 @@ local nShared = tonumber(ARGV[7]) or 0
 if sharedTtl < 1 then
 	sharedTtl = 86400
 end
+local argi = 8
 
 -- Формируем ключи
 local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
@@ -1070,6 +1103,7 @@ local isDebounce = taskId:sub(1, #debPrefix) == debPrefix
 local raceLocksKey = "queue:" .. queueName .. ":race:locks"
 local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
 local raceSharedPrefix = "race!s!"
+local raceBlockPrefix = "race!b!"
 
 -- F5: снять локи только если consumer включил concurrency (acquire был только тогда)
 local function releaseRaceLocks()
@@ -1096,7 +1130,6 @@ local function applyShared()
 	if nShared <= 0 then
 		return
 	end
-	local argi = 8
 	local toDel = {}
 	for _ = 1, nShared do
 		local id = ARGV[argi]
@@ -1106,6 +1139,32 @@ local function applyShared()
 			redis.call('SET', "queue:" .. queueName .. ":shared:" .. id, blob, 'EX', math.floor(sharedTtl))
 			if concurrencyTags then
 				local tag = raceSharedPrefix .. id
+				if redis.call('HGET', raceLocksKey, tag) == taskId then
+					toDel[#toDel + 1] = tag
+				end
+			end
+		end
+	end
+	if #toDel > 0 then
+		redis.call('HDEL', raceLocksKey, unpack(toDel))
+	end
+end
+
+-- race!b! open: SET block:{id} ready + unlock
+local function applyOpenBlocks()
+	local nOpen = tonumber(ARGV[argi]) or 0
+	argi = argi + 1
+	if nOpen <= 0 then
+		return
+	end
+	local toDel = {}
+	for _ = 1, nOpen do
+		local id = ARGV[argi]
+		argi = argi + 1
+		if id ~= nil and id ~= "" then
+			redis.call('SET', "queue:" .. queueName .. ":block:" .. id, "ready", 'EX', math.floor(sharedTtl))
+			if concurrencyTags then
+				local tag = raceBlockPrefix .. id
 				if redis.call('HGET', raceLocksKey, tag) == taskId then
 					toDel[#toDel + 1] = tag
 				end
@@ -1145,6 +1204,7 @@ end
 
 redis.call('HDEL', consumerTasksKey, taskId)
 applyShared()
+applyOpenBlocks()
 releaseRaceLocks()
 
 -- F2: только deb! id — MGET флага/priority/qpriority и reactivate; иначе нулевой оверхед
@@ -1246,6 +1306,7 @@ local waitTime = tonumber(ARGV[4]) or 0
 local blockGroupsStr = ARGV[5] or ""
 local concurrencyTags = (ARGV[6] or "") == "1"
 local extendGroupBlocksOnly = (ARGV[7] or "") == "1"
+local blockTagsStr = ARGV[8] or ""
 
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
 
@@ -1343,6 +1404,19 @@ if waitTime > 0 then
 					redis.call('ZADD', groupsKey, unlockAt, group)
 				end
 			end
+		end
+	end
+end
+
+-- race!b! park: SET block:{id} wait + TTL (до release locks)
+if blockTagsStr ~= "" and waitTime > 0 then
+	local ttl = math.ceil(waitTime)
+	if ttl < 1 then
+		ttl = 1
+	end
+	for id in string.gmatch(blockTagsStr, "[^#]+") do
+		if id ~= "" then
+			redis.call('SET', "queue:" .. queueName .. ":block:" .. id, "1", 'EX', ttl)
 		end
 	end
 end
@@ -1927,9 +2001,9 @@ func getAckScript() *redis.Script {
 	return ackScript
 }
 
-// shareScript — mid-handler prepare-once: SET shared:{id}+EXPIRE, unlock race!s!{id}.
+// shareScript — mid-handler: shared:{id} blobs и/или block:{id}=ready.
 // ARGV[1]=queue ARGV[2]=taskId ARGV[3]=consumerId ARGV[4]=sharedTTL
-// ARGV[5]=concurrencyTags ARGV[6]=nShared ARGV[7..]=id,blob pairs
+// ARGV[5]=concurrencyTags ARGV[6]=nShared ARGV[7..]=pairs; затем nOpen, ids...
 var shareScript = redis.NewScript(`
 local queueName = ARGV[1]
 local taskId = ARGV[2]
@@ -1940,9 +2014,6 @@ local nShared = tonumber(ARGV[6]) or 0
 if sharedTtl < 1 then
 	sharedTtl = 86400
 end
-if nShared <= 0 then
-	return 1
-end
 
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
 if redis.call('HGET', consumerTasksKey, taskId) == false then
@@ -1951,6 +2022,7 @@ end
 
 local raceLocksKey = "queue:" .. queueName .. ":race:locks"
 local raceSharedPrefix = "race!s!"
+local raceBlockPrefix = "race!b!"
 local argi = 7
 local toDel = {}
 for _ = 1, nShared do
@@ -1961,6 +2033,21 @@ for _ = 1, nShared do
 		redis.call('SET', "queue:" .. queueName .. ":shared:" .. id, blob, 'EX', math.floor(sharedTtl))
 		if concurrencyTags then
 			local tag = raceSharedPrefix .. id
+			if redis.call('HGET', raceLocksKey, tag) == taskId then
+				toDel[#toDel + 1] = tag
+			end
+		end
+	end
+end
+local nOpen = tonumber(ARGV[argi]) or 0
+argi = argi + 1
+for _ = 1, nOpen do
+	local id = ARGV[argi]
+	argi = argi + 1
+	if id ~= nil and id ~= "" then
+		redis.call('SET', "queue:" .. queueName .. ":block:" .. id, "ready", 'EX', math.floor(sharedTtl))
+		if concurrencyTags then
+			local tag = raceBlockPrefix .. id
 			if redis.call('HGET', raceLocksKey, tag) == taskId then
 				toDel[#toDel + 1] = tag
 			end

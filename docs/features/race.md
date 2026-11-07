@@ -1,89 +1,88 @@
-# Concurrency tags (`race!` / `race!s!`)
+# Concurrency tags (`race!` / `race!s!` / `race!b!`)
 
-Mutex на ресурс **между** партициями. Пока задача in-flight держит лок, другая партиция с тем же тегом не выдаётся.
+Mutex и prepare/wait-gate **между** партициями. Проверка — только после `SetConcurrencyTags(true)` (индекс тегов на Publish пишется всегда).
 
-Для prepare-once (подготовить общий артефакт один раз, дальше обработать N задач параллельно) — префикс `race!s!`: после `NewShared(...).Publish` / `Ack(WithShared(...))` лок больше не нужен, а blob приходит в `Task.Shared` на Get.
+| Префикс | Ключ Redis | Поведение Get |
+|---------|------------|---------------|
+| `race!{id}` | `race:locks` | Mutex на весь in-flight |
+| `race!s!{id}` | `shared:{id}` | Нет ключа → mutex; есть → parallel + blob в `Task.Shared` |
+| `race!b!{id}` | `block:{id}` | Нет ключа → mutex (один probe); value ≠ `ready` → **skip**; `ready` → parallel без лока |
 
 ## Зачем
 
-Порядок внутри партиции (`!`) не мешает двум разным ключам параллельно трогать один и тот же внешний объект.
+- `race!` — один wallet / document id, эксклюзив на время обработки.
+- `race!s!` — один тяжёлый артефакт на пачку задач (prepare-once → parallel).
+- `race!b!` — внешний ресурс «ещё не готов»: парковать Get на TTL (Reject), один probe после expiry, после успеха — `ready` и parallel.
 
-Примеры:
-
-- один wallet / document id — классический `race!` (mutex на весь processing);
-- один тяжёлый артефакт (файл, кэш, внешний upload) на пачку задач — `race!s!` (один prepare, потом parallel).
-
-## Как пользоваться
-
-На Publish кладёте тег с префиксом `race!` или `race!s!`. Проверка и локи — только после `SetConcurrencyTags(true)`:
+## Классический mutex (`race!`)
 
 ```go
-consumer.SetConcurrencyTags(true)
-
-_ = producer.Publish(ctx, &redisqueue.Task{
-    ID:        "job-1",
-    Partition: "!acct_a:batch_1",
-    Tags:      []string{redisqueue.RaceSharedTag("file:" + fileHash)},
-    Payload:   payload,
-    Scheduled: time.Now(),
-})
+Tags: []string{redisqueue.RaceTagPrefix + "doc:" + docID}
 ```
 
-### Классический mutex (`race!`)
+Ack / Reject снимают лок.
 
-Ack и Reject снимают лок. Без `SetConcurrencyTags` Get ничего лишнего не делает (индекс на Publish всё равно пишется).
-
-### Prepare-once (`race!s!{id}`)
-
-| Момент | Поведение |
-|--------|-----------|
-| Shared ещё нет | как `race!`: один in-flight, остальные ждут |
-| `Shared.Publish` или `Ack(WithShared(...))` | `SET queue:{q}:shared:{id}` + TTL, лок снят |
-| Shared уже есть | Get **без** лока, `task.Shared[id]` = blob; полный параллелизм |
-| Поздний Publish с тем же тегом | сразу parallel + Shared |
-
-Ключ Shared — **отдельная** строка `queue:{q}:shared:{id}` с `EXPIRE` (Redis 6+, без HEXPIRE на hash-field).
+## Prepare-once (`race!s!`)
 
 ```go
-// Get / Consume: Shared уже на задаче
+Tags: []string{redisqueue.RaceSharedTag("file:" + hash)}
+
 if len(task.Shared["file:"+hash]) == 0 {
-    artifact := prepareOnce(...) // лидер
-    // быстрее разблокировать тег до конца хэндлера:
+    artifact := prepareOnce(...)
     sh, err := redisqueue.NewShared(ctx, task)
     if err != nil { return err }
     if err := sh.Publish(ctx, map[string][]byte{"file:" + hash: artifact},
         redisqueue.WithSharedTTL(24*time.Hour)); err != nil {
         return err
     }
-    // или отложить на Ack / Consume:
-    // task.SetAckShared(map[string][]byte{"file:" + hash: artifact})
 }
 useArtifact(task.Payload, task.Shared["file:"+hash])
 ```
 
-`Publish` и `WithShared` **перезаписывают** blob (удобно обновить артефакт).
+Либо `task.SetAckShared(...)` / `Ack(..., WithShared(...))`.
 
-`Ack` — variadic options, только нужные:
+## Wait-gate (`race!b!`)
+
+Пока внешняя обработка не готова — не выдавать задачи с тегом; после успеха — открыть parallel без лока в handler’е.
 
 ```go
-_ = consumer.Ack(ctx, task.ID,
-    redisqueue.WithIdempotency(time.Minute),
-    redisqueue.WithShared(map[string][]byte{"file:" + hash: artifact}),
-)
+Tags: []string{
+    redisqueue.RaceSharedTag("file:" + hash),
+    redisqueue.RaceBlockTag("batch:" + batchID),
+}
+
+// not ready → парк Get на Delay (block:{id}=wait), потом Reject
+return redisqueue.NewRejectWithDelay(err, 30).WithBlockTags("batch:" + batchID)
+
+// успех → артефакт + open gate
+sh, _ := redisqueue.NewShared(ctx, task)
+_ = sh.Publish(ctx, map[string][]byte{"file:" + hash: artifact},
+    redisqueue.WithOpenBlocks("batch:"+batchID),
+    redisqueue.WithSharedTTL(24*time.Hour))
 ```
 
-В `Consume` авто-Ack подхватит `task.SetAckShared(...)`; mid-handler `NewShared` + `Publish` разблокирует раньше.
+Эквивалент open на Ack: `WithOpenBlocks(...)`.
+
+Типичный поток batch + внешний processor:
+
+1. Нет `shared` / нет `block` → один лидер (mutex), готовит артефакт, `Publish` shared.
+2. Send → not ready → `RejectWithDelay.WithBlockTags` → все с `race!b!` skip, пока жив TTL.
+3. TTL истёк → снова один probe (mutex на `race!b!`).
+4. Успех → `Open` / `WithOpenBlocks` (`block:{id}=ready`) → остальные parallel; `shared` отдаёт blob.
+
+Окно «сдаться через N минут» / backoff 1s→5s→30s — в handler (например по `RejectCount`).
 
 ## Без фичи очереди
 
-Можно вынести prepare в отдельную задачу / app Redis и публиковать follow-up без race-тегов. Обвязки больше — для простого кейса удобнее `race!s!`.
+Prepare/wait можно держать в app Redis + отдельные задачи. Обвязки больше — для простого кейса удобнее теги выше.
 
 ## Вместе с ordered
 
 | Механизм | Граница |
 |----------|---------|
 | `!partition` | Порядок и эксклюзив внутри партиции |
-| `race!tag` | Mutex между партициями на весь in-flight |
-| `race!s!id` | Mutex только до Shared; дальше parallel + blob на Get |
+| `race!` | Mutex in-flight |
+| `race!s!` | Mutex до Shared, потом parallel + blob |
+| `race!b!` | Skip пока wait; mutex probe; ready → parallel |
 
-Во время prepare Get может skip’ать занятые партиции (бюджет `maxRaceSkips`) — это ожидаемо, пока лидер не сделал `Publish`/`WithShared`.
+Во время wait/prepare Get может skip’ать занятые партиции (бюджет `maxRaceSkips`) — ожидаемо.

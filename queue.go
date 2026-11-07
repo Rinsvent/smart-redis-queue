@@ -17,11 +17,13 @@ import (
 
 // RejectWithDelay — ошибка, при которой задача возвращается в очередь с задержкой.
 // Delay — секунды (дробные OK). BlockGroups — группы для парковки (score unlockAt в groups).
+// BlockTags — ids race!b! (или полные теги): SET block:{id} wait на Delay (парк Get).
 // Для ordered-партиций (!) дополнительно ставится partition в blocked.
 type RejectWithDelay struct {
 	Err         error
 	Delay       float64  // секунды (можно дробные)
 	BlockGroups []string // опционально: заблокировать группы на Delay
+	BlockTags   []string // опционально: race!b! park на Delay
 }
 
 func (e *RejectWithDelay) Error() string {
@@ -33,6 +35,15 @@ func (e *RejectWithDelay) Error() string {
 
 func (e *RejectWithDelay) Unwrap() error {
 	return e.Err
+}
+
+// WithBlockTags — race!b! ids (или полные теги) для парковки на Delay при Consume Reject.
+func (e *RejectWithDelay) WithBlockTags(ids ...string) *RejectWithDelay {
+	if e == nil {
+		return nil
+	}
+	e.BlockTags = append([]string(nil), ids...)
+	return e
 }
 
 // NewRejectWithDelay создаёт ошибку с задержкой для Reject.
@@ -121,8 +132,9 @@ type Task struct {
 	bindConsumerID      string
 	bindConcurrencyTags bool
 
-	// ackShared / ackSharedTTL — что Consume передаст в Ack (SetAckShared).
+	// ackShared / ackOpen / ackSharedTTL — что Consume передаст в Ack.
 	ackShared    map[string][]byte
+	ackOpen      []string
 	ackSharedTTL time.Duration
 }
 
@@ -135,6 +147,11 @@ func (t *Task) SetAckShared(shared map[string][]byte, ttl ...time.Duration) {
 	} else {
 		t.ackSharedTTL = 0
 	}
+}
+
+// SetAckOpenBlocks — race!b! ids, которые Consume откроет (ready) на авто-Ack.
+func (t *Task) SetAckOpenBlocks(ids ...string) {
+	t.ackOpen = append([]string(nil), ids...)
 }
 
 // encodeTags сериализует теги в строку для Lua add-скрипта.
@@ -620,6 +637,7 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 				if isOrderedPartition(task.Partition) {
 					rejectedPartitions[task.Partition] = true
 				}
+				var blockTags []string
 				var rejectErr *RejectWithDelay
 				if errors.As(err, &rejectErr) {
 					if rejectErr.Delay > 0 {
@@ -628,8 +646,14 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 					if len(rejectErr.BlockGroups) > 0 {
 						blockGroups = rejectErr.BlockGroups
 					}
+					if len(rejectErr.BlockTags) > 0 {
+						blockTags = rejectErr.BlockTags
+					}
 				}
-				if ackErr := c.Reject(opCtx, task.ID, waitTime, blockGroups...); ackErr != nil {
+				if ackErr := c.RejectWith(opCtx, task.ID, waitTime, RejectOpts{
+					BlockGroups: blockGroups,
+					BlockTags:   blockTags,
+				}); ackErr != nil {
 					return ackErr
 				}
 			} else {
@@ -639,9 +663,12 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 				}
 				if len(task.ackShared) > 0 {
 					ackOpts = append(ackOpts, WithShared(task.ackShared))
-					if task.ackSharedTTL > 0 {
-						ackOpts = append(ackOpts, WithSharedTTL(task.ackSharedTTL))
-					}
+				}
+				if len(task.ackOpen) > 0 {
+					ackOpts = append(ackOpts, WithOpenBlocks(task.ackOpen...))
+				}
+				if task.ackSharedTTL > 0 && (len(task.ackShared) > 0 || len(task.ackOpen) > 0) {
+					ackOpts = append(ackOpts, WithSharedTTL(task.ackSharedTTL))
 				}
 				if ackErr := c.Ack(opCtx, task.ID, ackOpts...); ackErr != nil {
 					return ackErr
@@ -819,7 +846,7 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 }
 
 // Ack подтверждает обработку задачи.
-// Опции: WithIdempotency, WithShared, WithSharedTTL — по одной, когда нужны.
+// Опции: WithIdempotency, WithShared, WithSharedTTL, WithOpenBlocks.
 func (c *Consumer) Ack(ctx context.Context, taskID string, opts ...AckOption) error {
 	cfg := applyAckOptions(opts)
 	args := []interface{}{
@@ -831,6 +858,7 @@ func (c *Consumer) Ack(ctx context.Context, taskID string, opts ...AckOption) er
 		sharedTTLSeconds(cfg.sharedTTL),
 	}
 	args = appendSharedArgs(args, cfg.shared)
+	args = appendOpenBlockArgs(args, cfg.openBlocks)
 
 	result, err := getAckScript().Run(ctx, c.redis, []string{}, args...).Result()
 	if err != nil {
@@ -892,11 +920,30 @@ func parseSharedPairs(v interface{}) map[string][]byte {
 	return out
 }
 
+// RejectOpts — доп. поля RejectWith (группы и/или race!b! park).
+type RejectOpts struct {
+	BlockGroups []string
+	BlockTags   []string // race!b! ids или полные теги; TTL = waitTime
+}
+
 // Reject отклоняет задачу и возвращает её обратно в очередь.
 // waitTime — секунды (дробные OK). При waitTime > 0 для ordered-партиций (!) в
 // queue:{name}:blocked пишется partition; blockGroups — score unlockAt в groups.
 func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, blockGroups ...string) error {
+	return c.reject(ctx, taskID, waitTime, blockGroups, nil)
+}
+
+// RejectWith — Reject с BlockGroups и/или BlockTags (race!b! park на waitTime).
+func (c *Consumer) RejectWith(ctx context.Context, taskID string, waitTime float64, opts RejectOpts) error {
+	return c.reject(ctx, taskID, waitTime, opts.BlockGroups, opts.BlockTags)
+}
+
+func (c *Consumer) reject(ctx context.Context, taskID string, waitTime float64, blockGroups, blockTags []string) error {
 	groupsStr, err := encodeGroups(blockGroups)
+	if err != nil {
+		return err
+	}
+	blockTagsStr, err := encodeBlockTagIDs(blockTags)
 	if err != nil {
 		return err
 	}
@@ -909,6 +956,7 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, 
 		groupsStr,
 		bool01(c.concurrencyTags),
 		bool01(c.extendGroupBlocksOnly),
+		blockTagsStr,
 	).Result()
 
 	if err != nil {
@@ -923,6 +971,53 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, 
 		c.stats.addReject(1)
 	}
 	return nil
+}
+
+func encodeBlockTagIDs(ids []string) (string, error) {
+	if len(ids) == 0 {
+		return "", nil
+	}
+	parts := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, raw := range ids {
+		id := NormalizeRaceBlockID(raw)
+		if id == "" {
+			continue
+		}
+		if strings.Contains(id, TagSeparator) {
+			return "", fmt.Errorf("block tag id %q contains forbidden separator %q", id, TagSeparator)
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		parts = append(parts, id)
+	}
+	return strings.Join(parts, TagSeparator), nil
+}
+
+func appendOpenBlockArgs(args []interface{}, ids []string) []interface{} {
+	if len(ids) == 0 {
+		return append(args, 0)
+	}
+	norm := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, raw := range ids {
+		id := NormalizeRaceBlockID(raw)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		norm = append(norm, id)
+	}
+	args = append(args, len(norm))
+	for _, id := range norm {
+		args = append(args, id)
+	}
+	return args
 }
 
 // BlockGroups паркует группы на waitTime секунд (без задачи): ZADD group → unlockAt в groups.

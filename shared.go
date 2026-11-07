@@ -54,15 +54,33 @@ func NewSharedRaw(rdb *redis.Client, queueName, taskID, consumerID string, concu
 }
 
 // Publish пишет Shared blob’ы (ключ = id из race!s!{id}) и снимает соответствующие локи.
-// TTL: WithSharedTTL; иначе DefaultSharedTTL.
+// TTL: WithSharedTTL; иначе DefaultSharedTTL. Можно сразу WithOpenBlocks.
 func (s *Shared) Publish(ctx context.Context, data map[string][]byte, opts ...AckOption) error {
 	if s == nil {
 		return fmt.Errorf("shared: nil receiver")
 	}
-	if len(data) == 0 {
+	cfg := applyAckOptions(opts)
+	if len(data) == 0 && len(cfg.openBlocks) == 0 {
+		return nil
+	}
+	return s.runShare(ctx, data, cfg)
+}
+
+// Open помечает race!b!{id} как ready (parallel Get без лока) на TTL.
+// ids — суффиксы или полные race!b!… теги.
+func (s *Shared) Open(ctx context.Context, ids []string, opts ...AckOption) error {
+	if s == nil {
+		return fmt.Errorf("shared: nil receiver")
+	}
+	if len(ids) == 0 {
 		return nil
 	}
 	cfg := applyAckOptions(opts)
+	cfg.openBlocks = append(append([]string(nil), cfg.openBlocks...), ids...)
+	return s.runShare(ctx, nil, cfg)
+}
+
+func (s *Shared) runShare(ctx context.Context, data map[string][]byte, cfg ackConfig) error {
 	args := []interface{}{
 		s.queue,
 		s.taskID,
@@ -71,6 +89,7 @@ func (s *Shared) Publish(ctx context.Context, data map[string][]byte, opts ...Ac
 		bool01(s.concurrencyTags),
 	}
 	args = appendSharedArgs(args, data)
+	args = appendOpenBlockArgs(args, cfg.openBlocks)
 
 	result, err := getShareScript().Run(ctx, s.rdb, []string{}, args...).Result()
 	if err != nil {
@@ -79,7 +98,7 @@ func (s *Shared) Publish(ctx context.Context, data map[string][]byte, opts ...Ac
 	if result.(int64) == 0 {
 		return fmt.Errorf("shared: task not found in processing or not owned by this consumer")
 	}
-	if s.task != nil {
+	if s.task != nil && len(data) > 0 {
 		if s.task.Shared == nil {
 			s.task.Shared = make(map[string][]byte, len(data))
 		}

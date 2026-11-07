@@ -84,10 +84,11 @@
 | `SetExtendGroupBlocksOnly` | Пауза группы только продлевается (`ZADD GT`) |
 | `SetIdempotencyTtl` | Окно после Ack |
 | `SetRateLimit` | Rate limit на Get |
-| `SetConcurrencyTags` | `race!` / `race!s!` |
-| `Ack` / `WithIdempotency` / `WithShared` / `WithSharedTTL` | завершение + optional Shared |
-| `NewShared` / `Shared.Publish` | mid-handler prepare-once blob + unlock `race!s!` |
-| `RaceSharedTag` / `Task.Shared` / `Task.SetAckShared` | shared id / Get blob / Consume→Ack |
+| `SetConcurrencyTags` | `race!` / `race!s!` / `race!b!` |
+| `Ack` / `WithIdempotency` / `WithShared` / `WithOpenBlocks` / `WithSharedTTL` | завершение + Shared / open gate |
+| `NewShared` / `Shared.Publish` / `Shared.Open` | mid-handler shared blob / `race!b!` ready |
+| `Reject` / `RejectWithDelay.WithBlockTags` | парк `race!b!` на Delay |
+| `RaceSharedTag` / `RaceBlockTag` / `Task.Shared` / `SetAckShared` / `SetAckOpenBlocks` | теги / Get blob / Consume→Ack |
 | `NewSteps` / `NewStepsRaw` / `Do` / `Begin` / `End` / `Progress` / `Commit` / `Last` / `LastProgress` / `LastCursor` / `Release` / `SetStepControl` / `ParseStepCheckpoint` | Step recovery + progress (`name#3/?:cur@ms[!pause]`); см. [доку](../features/step-recovery.md) |
 | `Task.Headers` / `SetHeader` / `SetHeaders` | Мета между попытками |
 | `SetStatsRetention` / `SetTagsStats` | Метрики |

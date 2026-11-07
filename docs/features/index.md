@@ -12,7 +12,7 @@
 | Rate limit на Get | Два слоя лимитов до выдачи задачи | [Rate limit](rate-limit.md) |
 | Idempotency TTL | Не принимать тот же ID после успешного Ack | [Debounce / идемпотентность](debounce-idempotency.md) |
 | Debounce (`deb!`) | В очереди всегда последний payload | [Debounce / идемпотентность](debounce-idempotency.md) |
-| Concurrency tags (`race!` / `race!s!`) | Mutex in-flight или prepare-once + Shared на Get | [race!](race.md) |
+| Concurrency tags (`race!` / `race!s!` / `race!b!`) | Mutex, prepare-once Shared, wait-gate block | [race!](race.md) |
 | Tag backpressure | Не раздувать очередь по тегу | [Backpressure / теги](backpressure-tags.md) |
 | Tags + Admin | Подсчёт и массовое удаление | [Backpressure / теги](backpressure-tags.md) |
 | zstd | Меньше памяти Redis на крупных payload | [Сжатие / метрики](compression-stats.md) |

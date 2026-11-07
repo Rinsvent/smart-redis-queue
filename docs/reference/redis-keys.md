@@ -46,6 +46,7 @@
 | `race:tags:{id}` | SET | `race!` / `race!s!` теги задачи |
 | `race:locks` | HASH | Активные concurrency locks |
 | `shared:{id}` | STRING | Prepare-once blob для `race!s!{id}` (+ EXPIRE) |
+| `block:{id}` | STRING | Wait-gate `race!b!{id}`: wait / `ready` (+ EXPIRE) |
 | `rl:g:*` / `rl:p:*` | — | Состояние rate limit на Get |
 | `tag:{tag}` | SET | Индекс задач по тегу |
 | `stats:{sec}` | HASH | get/ack/reject (+ теги) |
