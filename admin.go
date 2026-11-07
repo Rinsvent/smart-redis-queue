@@ -73,25 +73,8 @@ func (a *Admin) ListQueues(ctx context.Context) ([]string, error) {
 	} else if err != redis.Nil {
 		return nil, err
 	}
-	for _, pattern := range []string{"queue:*:partitions", "queue:*:consumers"} {
-		suffix := ":partitions"
-		if strings.HasSuffix(pattern, ":consumers") {
-			suffix = ":consumers"
-		}
-		iter := a.redis.Scan(ctx, 0, pattern, 200).Iterator()
-		for iter.Next(ctx) {
-			key := iter.Val()
-			if !strings.HasPrefix(key, "queue:") || !strings.HasSuffix(key, suffix) {
-				continue
-			}
-			name := strings.TrimPrefix(strings.TrimSuffix(key, suffix), "queue:")
-			if name != "" {
-				seen[name] = struct{}{}
-			}
-		}
-		if err := iter.Err(); err != nil {
-			return nil, err
-		}
+	if err := a.scanQueueNames(ctx, seen); err != nil {
+		return nil, err
 	}
 	queues := make([]string, 0, len(seen))
 	for name := range seen {
@@ -116,25 +99,8 @@ func (a *Admin) HasQueueIndex(ctx context.Context) (bool, error) {
 // ListQueuesScan — только SCAN partitions/consumers (без srq:queues). Legacy fallback.
 func (a *Admin) ListQueuesScan(ctx context.Context) ([]string, error) {
 	seen := make(map[string]struct{})
-	for _, pattern := range []string{"queue:*:partitions", "queue:*:consumers"} {
-		suffix := ":partitions"
-		if strings.HasSuffix(pattern, ":consumers") {
-			suffix = ":consumers"
-		}
-		iter := a.redis.Scan(ctx, 0, pattern, 200).Iterator()
-		for iter.Next(ctx) {
-			key := iter.Val()
-			if !strings.HasPrefix(key, "queue:") || !strings.HasSuffix(key, suffix) {
-				continue
-			}
-			name := strings.TrimPrefix(strings.TrimSuffix(key, suffix), "queue:")
-			if name != "" {
-				seen[name] = struct{}{}
-			}
-		}
-		if err := iter.Err(); err != nil {
-			return nil, err
-		}
+	if err := a.scanQueueNames(ctx, seen); err != nil {
+		return nil, err
 	}
 	queues := make([]string, 0, len(seen))
 	for name := range seen {
@@ -142,6 +108,45 @@ func (a *Admin) ListQueuesScan(ctx context.Context) ([]string, error) {
 	}
 	sort.Strings(queues)
 	return queues, nil
+}
+
+// scanQueueNames — SCAN legacy partitions + qpN:partitions + consumers → имена очередей.
+func (a *Admin) scanQueueNames(ctx context.Context, seen map[string]struct{}) error {
+	type pat struct {
+		match  string
+		suffix string
+	}
+	for _, p := range []pat{
+		{"queue:*:partitions", ":partitions"},
+		{"queue:*:qp*:partitions", ":partitions"},
+		{"queue:*:consumers", ":consumers"},
+	} {
+		iter := a.redis.Scan(ctx, 0, p.match, 200).Iterator()
+		for iter.Next(ctx) {
+			key := iter.Val()
+			if !strings.HasPrefix(key, "queue:") || !strings.HasSuffix(key, p.suffix) {
+				continue
+			}
+			name := strings.TrimPrefix(strings.TrimSuffix(key, p.suffix), "queue:")
+			// qp lane: "myq:qp5" → "myq"
+			if i := strings.Index(name, ":qp"); i > 0 {
+				rest := name[i+3:]
+				if rest != "" && !strings.Contains(rest, ":") {
+					// digits only
+					if _, err := strconv.Atoi(rest); err == nil {
+						name = name[:i]
+					}
+				}
+			}
+			if name != "" {
+				seen[name] = struct{}{}
+			}
+		}
+		if err := iter.Err(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ListQueueIndex — очереди из srq:queues с total (score). byDepth=true → ZREVRANGE (толстые сверху).
@@ -281,10 +286,11 @@ func (a *Admin) queueStats(ctx context.Context, queueName, partitionFilter strin
 	return stats, nil
 }
 
-// QueueOverview — сводка: SCARD partitions, pending (SCAN ZCARD), in-progress (consumer HLEN), группы.
+// QueueOverview — сводка с учётом qp lanes: уникальные партиции, pending (SCAN ZCARD),
+// in-progress, группы (ready по всем lanes).
 func (a *Admin) QueueOverview(ctx context.Context, queueName string) (*QueueStats, error) {
-	total, err := a.redis.SCard(ctx, "queue:"+queueName+":partitions").Result()
-	if err != nil && err != redis.Nil {
+	_, total, err := a.unionPartitionIDs(ctx, queueName, "", 0)
+	if err != nil {
 		return nil, err
 	}
 	groups, _, err := a.ListGroups(ctx, queueName, "", MaxListPartitions)
@@ -293,7 +299,7 @@ func (a *Admin) QueueOverview(ctx context.Context, queueName string) (*QueueStat
 	}
 	stats := &QueueStats{
 		QueueName:      queueName,
-		PartitionTotal: int(total),
+		PartitionTotal: total,
 		Groups:         groups,
 	}
 	consumers, _ := a.redis.SMembers(ctx, "queue:"+queueName+":consumers").Result()
@@ -310,10 +316,11 @@ func (a *Admin) QueueOverview(ctx context.Context, queueName string) (*QueueStat
 	return stats, nil
 }
 
-// queuePendingTotal — сумма ZCARD по ключам queue:{q}:partition:{part}:{prio}
-// (SCAN; без обхода SET partitions и без чтения meta :priorities/:groups/:lock/:count).
+// queuePendingTotal — сумма ZCARD по ZSET задач во всех lanes
+// (SCAN queue:{q}:*partition:*; без meta :priorities/:groups/:lock/:count и без mapping task→part).
 func (a *Admin) queuePendingTotal(ctx context.Context, queueName string) (int64, error) {
-	prefix := "queue:" + queueName + ":partition:"
+	pattern := "queue:" + queueName + ":*partition:*"
+	prefixLegacy := "queue:" + queueName + ":partition:"
 	var total int64
 	var batch []string
 	flush := func() error {
@@ -335,21 +342,26 @@ func (a *Admin) queuePendingTotal(ctx context.Context, queueName string) (int64,
 		batch = batch[:0]
 		return nil
 	}
-	iter := a.redis.Scan(ctx, 0, prefix+"*", scanMatchCount).Iterator()
+	iter := a.redis.Scan(ctx, 0, pattern, scanMatchCount).Iterator()
 	for iter.Next(ctx) {
 		key := iter.Val()
-		if !strings.HasPrefix(key, prefix) {
+		// legacy mapping / meta
+		if strings.HasPrefix(key, prefixLegacy) && isPartitionKeyMeta(key, prefixLegacy) {
 			continue
 		}
-		switch {
-		case strings.HasSuffix(key, ":priorities"),
-			strings.HasSuffix(key, ":groups"),
-			strings.HasSuffix(key, ":lock"),
-			strings.HasSuffix(key, ":count"):
+		// qp lane meta: ...:qpN:partition:part:priorities
+		if strings.HasSuffix(key, ":priorities") ||
+			strings.HasSuffix(key, ":groups") ||
+			strings.HasSuffix(key, ":lock") ||
+			strings.HasSuffix(key, ":count") {
 			continue
 		}
-		rest := strings.TrimPrefix(key, prefix)
-		// mapping taskID→partition — без ':'; ZSET part:prio — есть
+		// ZSET задач: ...:partition:{part}:{prio} — после "partition:" есть part:prio
+		idx := strings.Index(key, ":partition:")
+		if idx < 0 {
+			continue
+		}
+		rest := key[idx+len(":partition:"):]
 		if !strings.Contains(rest, ":") {
 			continue
 		}
@@ -398,24 +410,16 @@ func (a *Admin) QueueStatsBounds(ctx context.Context, queueName string) (fromSec
 	return fromSec, toSec, nil
 }
 
-// ListPartitions — SET partitions: total=SCARD, выборка ≤limit через SSCAN MATCH *substr*.
+// ListPartitions — уникальные партиции по всем qp lanes (+ legacy).
+// total — число уникальных; выборка ≤limit (сортировка по имени).
 func (a *Admin) ListPartitions(ctx context.Context, queueName, substr string, limit int) (parts []PartitionStats, total int, err error) {
 	if limit <= 0 || limit > MaxListPartitions {
 		limit = MaxListPartitions
 	}
-	key := "queue:" + queueName + ":partitions"
-	n, err := a.redis.SCard(ctx, key).Result()
-	if err != nil && err != redis.Nil {
-		return nil, 0, err
-	}
-	total = int(n)
-
-	ids, err := a.sscanMembers(ctx, key, substr, limit)
+	ids, total, err := a.unionPartitionIDs(ctx, queueName, substr, limit)
 	if err != nil {
 		return nil, 0, err
 	}
-	sort.Strings(ids)
-
 	consumers, _ := a.redis.SMembers(ctx, "queue:"+queueName+":consumers").Result()
 	parts = make([]PartitionStats, 0, len(ids))
 	for _, part := range ids {
@@ -460,17 +464,10 @@ func (a *Admin) sscanMembers(ctx context.Context, key, substr string, limit int)
 
 func (a *Admin) partitionStats(ctx context.Context, queueName, part string, consumers []string) PartitionStats {
 	ps := PartitionStats{Partition: part}
-
-	prioritiesKey := "queue:" + queueName + ":partition:" + part + ":priorities"
-	priorities, err := a.redis.ZRevRange(ctx, prioritiesKey, 0, -1).Result()
-	if err == nil || err == redis.Nil {
-		ps.Priorities = priorities
-	}
-	for _, prio := range ps.Priorities {
-		queueKey := "queue:" + queueName + ":partition:" + part + ":" + prio
-		n, _ := a.redis.ZCard(ctx, queueKey).Result()
-		ps.Pending += n
-	}
+	lanes, _ := a.queueLanePriorities(ctx, queueName)
+	pending, priorities := a.partitionPendingAcrossLanes(ctx, queueName, part, lanes)
+	ps.Pending = pending
+	ps.Priorities = priorities
 
 	ps.Locked = a.redis.Exists(ctx, "queue:"+queueName+":partition:"+part+":lock").Val() > 0
 	ps.Blocked = a.isPartitionBlocked(ctx, queueName, part)
@@ -505,7 +502,8 @@ func (a *Admin) nowMs(ctx context.Context) float64 {
 
 func (a *Admin) groupStatsFromZ(ctx context.Context, queueName string, z redis.Z, nowMs float64) GroupStats {
 	name, _ := z.Member.(string)
-	ready, _ := a.redis.ZCard(ctx, "queue:"+queueName+":group:"+name+":ready").Result()
+	lanes, _ := a.queueLanePriorities(ctx, queueName)
+	ready := a.groupReadyTotal(ctx, queueName, name, lanes)
 	return GroupStats{
 		Name:    name,
 		Ready:   ready,
@@ -645,7 +643,8 @@ func (a *Admin) ListGroups(ctx context.Context, queueName, substr string, limit 
 	var out []GroupStats
 	if substr == "" {
 		if total == 0 {
-			ready, _ := a.redis.ZCard(ctx, "queue:"+queueName+":group:"+DefaultGroup+":ready").Result()
+			lanes, _ := a.queueLanePriorities(ctx, queueName)
+			ready := a.groupReadyTotal(ctx, queueName, DefaultGroup, lanes)
 			if ready > 0 {
 				return []GroupStats{{Name: DefaultGroup, Ready: ready}}, 1, nil
 			}

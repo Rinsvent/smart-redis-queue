@@ -100,7 +100,9 @@
 
 ## Admin
 
-`ListQueues`, `ListQueueIndex`, `QueueDepth`, `QueueDepthIfIndexed`, `RebuildQueueDepth`, `Inspect`, `QueueOverview`, `ListPartitions`, `ListBlockedPartitions`, `ListLockedPartitions`, `ListGroups`, `ListBlockedGroups`, `ListRaceLocks`, `ScanTopPending`, `ScanHighReject`, `ListTags`, `CountTags`, `ListMessages`, `InspectTask`, `SetTaskStepControl`, `BlockGroups`, `BlockPartition`, `UnblockPartition`, `Remove`, `RemoveByTag`, `CountByTag`, `Purge`, `Retry`, `QueueStatsBounds`, `ListQueueStats`.
+`ListQueues`, `ListQueueIndex`, `QueueDepth`, `QueueDepthIfIndexed`, `RebuildQueueDepth`, `Inspect`, `QueueOverview`, `QueueSnapshot`, `ListPartitions`, `ListBlockedPartitions`, `ListLockedPartitions`, `ListGroups`, `ListBlockedGroups`, `ListRaceLocks`, `ScanTopPending`, `ScanHighReject`, `ListTags`, `CountTags`, `ListMessages`, `InspectTask`, `SetTaskStepControl`, `BlockGroups`, `BlockPartition`, `UnblockPartition`, `Remove`, `RemoveByTag`, `CountByTag`, `Purge`, `Retry`, `QueueStatsBounds`, `ListQueueStats`.
+
+`QueueOverview` / `ListPartitions` / `ListGroups` / `ScanTopPending` учитывают **qp lanes** (`QueuePriority` > 0). `QueueSnapshot` — снимок для gauges: чаты, паузы (partition + group), группы с работой, oldest ready по приоритету.
 
 Пакет `tasks`: `New`, `Register`, `SyncCatalog`, `Dispatch`, `Enqueue`, `Consume`, `StartScheduler`, `ListForQueue` — см. [Tasks](../features/tasks.md).
 

@@ -98,39 +98,24 @@ func (a *Admin) ScanTopPending(ctx context.Context, queueName string, topN int) 
 	if topN > MaxListPartitions {
 		topN = MaxListPartitions
 	}
-	key := "queue:" + queueName + ":partitions"
-	total, err := a.redis.SCard(ctx, key).Result()
-	if err != nil && err != redis.Nil {
+	ids, total, err := a.unionPartitionIDs(ctx, queueName, "", 0)
+	if err != nil {
 		return nil, 0, err
 	}
 	consumers, _ := a.redis.SMembers(ctx, "queue:"+queueName+":consumers").Result()
 	h := &pendingHeap{}
 	heap.Init(h)
 
-	var cursor uint64
-	for {
+	for _, part := range ids {
 		if ctx.Err() != nil {
-			return nil, int(total), ctx.Err()
+			return nil, total, ctx.Err()
 		}
-		keys, next, err := a.redis.SScan(ctx, key, cursor, "*", scanMatchCount).Result()
-		if err != nil {
-			return nil, int(total), err
-		}
-		for _, part := range keys {
-			if part == "" {
-				continue
-			}
-			ps := a.partitionStats(ctx, queueName, part, consumers)
-			if h.Len() < topN {
-				heap.Push(h, ps)
-			} else if ps.Pending > (*h)[0].Pending {
-				heap.Pop(h)
-				heap.Push(h, ps)
-			}
-		}
-		cursor = next
-		if cursor == 0 {
-			break
+		ps := a.partitionStats(ctx, queueName, part, consumers)
+		if h.Len() < topN {
+			heap.Push(h, ps)
+		} else if ps.Pending > (*h)[0].Pending {
+			heap.Pop(h)
+			heap.Push(h, ps)
 		}
 	}
 
@@ -138,7 +123,7 @@ func (a *Admin) ScanTopPending(ctx context.Context, queueName string, topN int) 
 	for i := len(out) - 1; i >= 0; i-- {
 		out[i] = heap.Pop(h).(PartitionStats)
 	}
-	return out, int(total), nil
+	return out, total, nil
 }
 
 type poisonHeap []PoisonTask

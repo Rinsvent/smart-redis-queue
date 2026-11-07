@@ -628,7 +628,7 @@ CI (GitHub Actions) на каждый push/PR в `main`: сборка, `go test 
 | `Producer` | Публикация задач |
 | `Consumer` | Один консьюмер (Get/Ack/Reject, Consume, GetChan) |
 | `ConsumerPool` | Пул консьюмеров |
-| `Admin` | Обслуживание: Inspect, Purge, Retry, Remove, RemoveByTag, CountByTag, BlockGroups |
+| `Admin` | Обслуживание: Inspect, QueueOverview/Snapshot (с qp lanes), Purge, Retry, Remove, BlockGroups |
 | `Task` | Задача: ID, Partition, PartitionPriority, QueuePriority, Payload, Scheduled, Tags, Groups |
 | `RejectWithDelay` | Ошибка для отложенного reject (`Delay`, `BlockGroups`) |
 | `HandlerPanicError` | Паника в handler/middleware → Reject (процесс жив) |
