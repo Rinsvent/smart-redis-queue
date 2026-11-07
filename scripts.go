@@ -450,9 +450,6 @@ local function tryAcquireRace(taskId, partition)
 		return true, nil
 	end
 	local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
-	if redis.call('EXISTS', raceTagsKey) == 0 then
-		return true, nil
-	end
 	local tags = redis.call('SMEMBERS', raceTagsKey)
 	if #tags == 0 then
 		return true, nil
@@ -1079,38 +1076,44 @@ local function releaseRaceLocks()
 	if not concurrencyTags then
 		return
 	end
-	if redis.call('EXISTS', raceTagsKey) == 0 then
+	local tags = redis.call('SMEMBERS', raceTagsKey)
+	if #tags == 0 then
 		return
 	end
-	local tags = redis.call('SMEMBERS', raceTagsKey)
+	local toDel = {}
 	for i = 1, #tags do
 		if redis.call('HGET', raceLocksKey, tags[i]) == taskId then
-			redis.call('HDEL', raceLocksKey, tags[i])
+			toDel[#toDel + 1] = tags[i]
 		end
+	end
+	if #toDel > 0 then
+		redis.call('HDEL', raceLocksKey, unpack(toDel))
 	end
 end
 
--- race!s! Shared: SET+EXPIRE (overwrite) и снять лок этого id
+-- race!s! Shared: SET EX (overwrite) и снять лок этого id
 local function applyShared()
 	if nShared <= 0 then
 		return
 	end
 	local argi = 8
+	local toDel = {}
 	for _ = 1, nShared do
 		local id = ARGV[argi]
 		local blob = ARGV[argi + 1]
 		argi = argi + 2
 		if id ~= nil and id ~= "" and blob ~= nil then
-			local sk = "queue:" .. queueName .. ":shared:" .. id
-			redis.call('SET', sk, blob)
-			redis.call('EXPIRE', sk, math.floor(sharedTtl))
+			redis.call('SET', "queue:" .. queueName .. ":shared:" .. id, blob, 'EX', math.floor(sharedTtl))
 			if concurrencyTags then
 				local tag = raceSharedPrefix .. id
 				if redis.call('HGET', raceLocksKey, tag) == taskId then
-					redis.call('HDEL', raceLocksKey, tag)
+					toDel[#toDel + 1] = tag
 				end
 			end
 		end
+	end
+	if #toDel > 0 then
+		redis.call('HDEL', raceLocksKey, unpack(toDel))
 	end
 end
 
@@ -1196,8 +1199,7 @@ local keysToDelete = {
 	raceTagsKey,
 }
 if idempotencyTtl > 0 then
-	redis.call('SET', payloadKey, '0')
-	redis.call('EXPIRE', payloadKey, idempotencyTtl)
+	redis.call('SET', payloadKey, '0', 'EX', math.floor(idempotencyTtl))
 else
 	keysToDelete[#keysToDelete + 1] = payloadKey
 end
@@ -1357,10 +1359,14 @@ if concurrencyTags then
 	local raceLocksKey = "queue:" .. queueName .. ":race:locks"
 	local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
 	local rtags = redis.call('SMEMBERS', raceTagsKey)
+	local toDel = {}
 	for i = 1, #rtags do
 		if redis.call('HGET', raceLocksKey, rtags[i]) == taskId then
-			redis.call('HDEL', raceLocksKey, rtags[i])
+			toDel[#toDel + 1] = rtags[i]
 		end
+	end
+	if #toDel > 0 then
+		redis.call('HDEL', raceLocksKey, unpack(toDel))
 	end
 end
 
@@ -1479,13 +1485,15 @@ for i = 1, #consumers do
 				-- F5: reclaim всегда снимает race locks этого taskId (иначе утечка)
 				local raceLocksKey = "queue:" .. queueName .. ":race:locks"
 				local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskToReturn
-				if redis.call('EXISTS', raceTagsKey) == 1 then
-					local rtags = redis.call('SMEMBERS', raceTagsKey)
-					for ri = 1, #rtags do
-						if redis.call('HGET', raceLocksKey, rtags[ri]) == taskToReturn then
-							redis.call('HDEL', raceLocksKey, rtags[ri])
-						end
+				local rtags = redis.call('SMEMBERS', raceTagsKey)
+				local toDel = {}
+				for ri = 1, #rtags do
+					if redis.call('HGET', raceLocksKey, rtags[ri]) == taskToReturn then
+						toDel[#toDel + 1] = rtags[ri]
 					end
+				end
+				if #toDel > 0 then
+					redis.call('HDEL', raceLocksKey, unpack(toDel))
 				end
 
 				local laneKey = pref .. taskPartition
@@ -1630,10 +1638,14 @@ local payload = redis.call('GET', payloadKey) or ''
 local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId
 local raceLocksKey = "queue:" .. queueName .. ":race:locks"
 local rtags = redis.call('SMEMBERS', raceTagsKey)
+local raceToDel = {}
 for i = 1, #rtags do
 	if redis.call('HGET', raceLocksKey, rtags[i]) == taskId then
-		redis.call('HDEL', raceLocksKey, rtags[i])
+		raceToDel[#raceToDel + 1] = rtags[i]
 	end
+end
+if #raceToDel > 0 then
+	redis.call('HDEL', raceLocksKey, unpack(raceToDel))
 end
 redis.call('DEL', payloadKey, partitionKey, priorityKey, qpriorityKey,
 	"queue:" .. queueName .. ":reject_count:" .. taskId,
@@ -1940,21 +1952,23 @@ end
 local raceLocksKey = "queue:" .. queueName .. ":race:locks"
 local raceSharedPrefix = "race!s!"
 local argi = 7
+local toDel = {}
 for _ = 1, nShared do
 	local id = ARGV[argi]
 	local blob = ARGV[argi + 1]
 	argi = argi + 2
 	if id ~= nil and id ~= "" and blob ~= nil then
-		local sk = "queue:" .. queueName .. ":shared:" .. id
-		redis.call('SET', sk, blob)
-		redis.call('EXPIRE', sk, math.floor(sharedTtl))
+		redis.call('SET', "queue:" .. queueName .. ":shared:" .. id, blob, 'EX', math.floor(sharedTtl))
 		if concurrencyTags then
 			local tag = raceSharedPrefix .. id
 			if redis.call('HGET', raceLocksKey, tag) == taskId then
-				redis.call('HDEL', raceLocksKey, tag)
+				toDel[#toDel + 1] = tag
 			end
 		end
 	end
+end
+if #toDel > 0 then
+	redis.call('HDEL', raceLocksKey, unpack(toDel))
 end
 return 1
 `)
