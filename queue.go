@@ -115,9 +115,11 @@ type Task struct {
 	// Shared — prepare-once blob’ы с Get (ключ = id из race!s!{id}). Нил/пусто = вы лидер prepare.
 	Shared map[string][]byte `json:"-"`
 
-	// bindRedis / bindQueue — клиент и очередь consumer’а после Get (для NewSteps; шард верный).
-	bindRedis *redis.Client
-	bindQueue string
+	// bind* — клиент/очередь/consumer после Get (NewSteps, NewShared; шард верный).
+	bindRedis           *redis.Client
+	bindQueue           string
+	bindConsumerID      string
+	bindConcurrencyTags bool
 
 	// ackShared / ackSharedTTL — что Consume передаст в Ack (SetAckShared).
 	ackShared    map[string][]byte
@@ -797,14 +799,16 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 			return nil, fmt.Errorf("decode payload %s: %w", taskID, err)
 		}
 		tasks = append(tasks, &Task{
-			ID:          taskID,
-			Partition:   partition,
-			Payload:     decoded,
-			Scheduled:   time.Now(),
-			RejectCount: rejectCount,
-			Shared:      shared,
-			bindRedis:   c.redis,
-			bindQueue:   c.queueName,
+			ID:                  taskID,
+			Partition:           partition,
+			Payload:             decoded,
+			Scheduled:           time.Now(),
+			RejectCount:         rejectCount,
+			Shared:              shared,
+			bindRedis:           c.redis,
+			bindQueue:           c.queueName,
+			bindConsumerID:      c.consumerID,
+			bindConcurrencyTags: c.concurrencyTags,
 		})
 	}
 
@@ -849,34 +853,6 @@ func (c *Consumer) Ack(ctx context.Context, taskID string, opts ...AckOption) er
 		if err := c.afterAck(ctx, taskID); err != nil {
 			return fmt.Errorf("after ack: %w", err)
 		}
-	}
-	return nil
-}
-
-// Share публикует prepare-once blob’ы mid-handler (до Ack): пишет shared:{id},
-// снимает race!s! локи этой задачи, перезаписывает уже лежащие значения.
-// Для Consume — основной способ разблокировать тег не дожидаясь конца хэндлера.
-// TTL: WithSharedTTL (те же AckOption).
-func (c *Consumer) Share(ctx context.Context, taskID string, shared map[string][]byte, opts ...AckOption) error {
-	if len(shared) == 0 {
-		return nil
-	}
-	cfg := applyAckOptions(opts)
-	args := []interface{}{
-		c.queueName,
-		taskID,
-		c.consumerID,
-		sharedTTLSeconds(cfg.sharedTTL),
-		bool01(c.concurrencyTags),
-	}
-	args = appendSharedArgs(args, shared)
-
-	result, err := getShareScript().Run(ctx, c.redis, []string{}, args...).Result()
-	if err != nil {
-		return fmt.Errorf("failed to share: %w", err)
-	}
-	if result.(int64) == 0 {
-		return fmt.Errorf("task not found in processing or not owned by this consumer")
 	}
 	return nil
 }

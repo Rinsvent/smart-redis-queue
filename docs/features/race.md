@@ -2,7 +2,7 @@
 
 Mutex на ресурс **между** партициями. Пока задача in-flight держит лок, другая партиция с тем же тегом не выдаётся.
 
-Для prepare-once (загрузить файл один раз, дальше рассылка параллельно) — префикс `race!s!`: после `Share` / `Ack(WithShared(...))` лок больше не нужен, а blob приходит в `Task.Shared` на Get.
+Для prepare-once (подготовить общий артефакт один раз, дальше обработать N задач параллельно) — префикс `race!s!`: после `NewShared(...).Publish` / `Ack(WithShared(...))` лок больше не нужен, а blob приходит в `Task.Shared` на Get.
 
 ## Зачем
 
@@ -11,7 +11,7 @@ Mutex на ресурс **между** партициями. Пока задач
 Примеры:
 
 - один wallet / document id — классический `race!` (mutex на весь processing);
-- один набор файлов для рассылки в N чатов — `race!s!` (один prepare, потом parallel).
+- один тяжёлый артефакт (файл, кэш, внешний upload) на пачку задач — `race!s!` (один prepare, потом parallel).
 
 ## Как пользоваться
 
@@ -22,7 +22,7 @@ consumer.SetConcurrencyTags(true)
 
 _ = producer.Publish(ctx, &redisqueue.Task{
     ID:        "job-1",
-    Partition: "!chat:1",
+    Partition: "!acct_a:batch_1",
     Tags:      []string{redisqueue.RaceSharedTag("file:" + fileHash)},
     Payload:   payload,
     Scheduled: time.Now(),
@@ -38,7 +38,7 @@ Ack и Reject снимают лок. Без `SetConcurrencyTags` Get ничег�
 | Момент | Поведение |
 |--------|-----------|
 | Shared ещё нет | как `race!`: один in-flight, остальные ждут |
-| `Share` или `Ack(WithShared(...))` | `SET queue:{q}:shared:{id}` + TTL, лок снят |
+| `Shared.Publish` или `Ack(WithShared(...))` | `SET queue:{q}:shared:{id}` + TTL, лок снят |
 | Shared уже есть | Get **без** лока, `task.Shared[id]` = blob; полный параллелизм |
 | Поздний Publish с тем же тегом | сразу parallel + Shared |
 
@@ -47,32 +47,36 @@ Ack и Reject снимают лок. Без `SetConcurrencyTags` Get ничег�
 ```go
 // Get / Consume: Shared уже на задаче
 if len(task.Shared["file:"+hash]) == 0 {
-    tokens := uploadToTelegram(...) // лидер
+    artifact := prepareOnce(...) // лидер
     // быстрее разблокировать тег до конца хэндлера:
-    _ = consumer.Share(ctx, task.ID, map[string][]byte{"file:" + hash: tokens},
-        redisqueue.WithSharedTTL(24*time.Hour))
+    sh, err := redisqueue.NewShared(ctx, task)
+    if err != nil { return err }
+    if err := sh.Publish(ctx, map[string][]byte{"file:" + hash: artifact},
+        redisqueue.WithSharedTTL(24*time.Hour)); err != nil {
+        return err
+    }
     // или отложить на Ack / Consume:
-    // task.SetAckShared(map[string][]byte{"file:" + hash: tokens})
+    // task.SetAckShared(map[string][]byte{"file:" + hash: artifact})
 }
-sendWithTokens(task.Payload, task.Shared["file:"+hash])
+useArtifact(task.Payload, task.Shared["file:"+hash])
 ```
 
-`Share` и `WithShared` **перезаписывают** blob (удобно обновить токены).
+`Publish` и `WithShared` **перезаписывают** blob (удобно обновить артефакт).
 
 `Ack` — variadic options, только нужные:
 
 ```go
 _ = consumer.Ack(ctx, task.ID,
     redisqueue.WithIdempotency(time.Minute),
-    redisqueue.WithShared(map[string][]byte{"file:" + hash: tokens}),
+    redisqueue.WithShared(map[string][]byte{"file:" + hash: artifact}),
 )
 ```
 
-В `Consume` авто-Ack подхватит `task.SetAckShared(...)`; mid-handler `Share` разблокирует раньше.
+В `Consume` авто-Ack подхватит `task.SetAckShared(...)`; mid-handler `NewShared` + `Publish` разблокирует раньше.
 
 ## Без фичи очереди
 
-Можно вынести prepare в отдельную задачу / app Redis и публиковать send без race-тегов. Обвязки больше — для простого кейса удобнее `race!s!`.
+Можно вынести prepare в отдельную задачу / app Redis и публиковать follow-up без race-тегов. Обвязки больше — для простого кейса удобнее `race!s!`.
 
 ## Вместе с ordered
 
@@ -82,4 +86,4 @@ _ = consumer.Ack(ctx, task.ID,
 | `race!tag` | Mutex между партициями на весь in-flight |
 | `race!s!id` | Mutex только до Shared; дальше parallel + blob на Get |
 
-Во время prepare Get может skip’ать занятые партиции (бюджет `maxRaceSkips`) — это ожидаемо, пока лидер не сделал `Share`/`WithShared`.
+Во время prepare Get может skip’ать занятые партиции (бюджет `maxRaceSkips`) — это ожидаемо, пока лидер не сделал `Publish`/`WithShared`.

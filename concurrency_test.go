@@ -221,8 +221,11 @@ func TestConcurrency_RaceShared_ShareMidHandler(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, gotA, 1)
 
-	require.NoError(t, consumerA.Share(ctx, gotA[0].ID, map[string][]byte{sharedID: blob}))
+	sh, err := NewShared(ctx, gotA[0])
+	require.NoError(t, err)
+	require.NoError(t, sh.Publish(ctx, map[string][]byte{sharedID: blob}))
 	assert.False(t, rdb.HExists(ctx, "queue:test-queue:race:locks", tag).Val())
+	assert.Equal(t, blob, gotA[0].Shared[sharedID])
 
 	gotB, err := consumerB.Get(ctx)
 	require.NoError(t, err)
@@ -231,7 +234,7 @@ func TestConcurrency_RaceShared_ShareMidHandler(t *testing.T) {
 
 	// overwrite
 	blob2 := []byte("TOK2")
-	require.NoError(t, consumerA.Share(ctx, gotA[0].ID, map[string][]byte{sharedID: blob2}))
+	require.NoError(t, sh.Publish(ctx, map[string][]byte{sharedID: blob2}))
 	assert.Equal(t, string(blob2), rdb.Get(ctx, "queue:test-queue:shared:"+sharedID).Val())
 
 	require.NoError(t, consumerA.Ack(ctx, gotA[0].ID))
