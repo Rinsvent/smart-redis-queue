@@ -69,7 +69,7 @@ func TestAdmin_ScanTopPendingAndPoison(t *testing.T) {
 		got, err := c2.Get(ctx)
 		require.NoError(t, err)
 		require.Len(t, got, 1)
-		require.NoError(t, c2.Reject(ctx, got[0].ID, 0))
+		require.NoError(t, c2.Reject(ctx, got[0].ID))
 	}
 	poison, err := admin.ScanHighReject(ctx, "tox-q", 3, 10)
 	require.NoError(t, err)

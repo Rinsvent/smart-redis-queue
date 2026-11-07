@@ -65,7 +65,10 @@ consumer.Consume(ctx, func(task *redisqueue.Task) error {
     if isRateLimited(err) {
         // Паркует всю группу: Get её не обходит, пока не истечёт Delay.
         // Для ordered (!) дополнительно блокируется сама партиция.
-        return redisqueue.NewRejectWithDelay(err, 2.0, "acct:9f3a")
+        return redisqueue.NewRejectWithDelay(err,
+            redisqueue.WithDelay(2.0),
+            redisqueue.WithBlockGroups("acct:9f3a"),
+        )
     }
     return err
 })

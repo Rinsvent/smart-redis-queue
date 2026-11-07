@@ -15,15 +15,14 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// RejectWithDelay — ошибка, при которой задача возвращается в очередь с задержкой.
-// Delay — секунды (дробные OK). BlockGroups — группы для парковки (score unlockAt в groups).
-// BlockTags — ids race!b! (или полные теги): SET block:{id} wait на Delay (парк Get).
+// RejectWithDelay — ошибка, при которой Consume делает Reject с теми же опциями.
+// Delay / BlockGroups / BlockTags задаются через RejectOption (WithDelay, …).
 // Для ordered-партиций (!) дополнительно ставится partition в blocked.
 type RejectWithDelay struct {
 	Err         error
-	Delay       float64  // секунды (можно дробные)
-	BlockGroups []string // опционально: заблокировать группы на Delay
-	BlockTags   []string // опционально: race!b! park на Delay
+	Delay       float64
+	BlockGroups []string
+	BlockTags   []string
 }
 
 func (e *RejectWithDelay) Error() string {
@@ -37,20 +36,60 @@ func (e *RejectWithDelay) Unwrap() error {
 	return e.Err
 }
 
-// WithBlockTags — race!b! ids (или полные теги) для парковки на Delay при Consume Reject.
-func (e *RejectWithDelay) WithBlockTags(ids ...string) *RejectWithDelay {
-	if e == nil {
-		return nil
-	}
-	e.BlockTags = append([]string(nil), ids...)
-	return e
+// rejectConfig — накопитель для Reject(...RejectOption) и NewRejectWithDelay.
+type rejectConfig struct {
+	delay       float64
+	blockGroups []string
+	blockTags   []string
 }
 
-// NewRejectWithDelay создаёт ошибку с задержкой для Reject.
-// delaySeconds — секунды, допускается дробное значение меньше 1.
-// blockGroups — опциональные группы для BlockGroups при Reject.
-func NewRejectWithDelay(err error, delaySeconds float64, blockGroups ...string) *RejectWithDelay {
-	return &RejectWithDelay{Err: err, Delay: delaySeconds, BlockGroups: blockGroups}
+// RejectOption — опция Reject / NewRejectWithDelay (порядок любой).
+type RejectOption func(*rejectConfig)
+
+// WithDelay — секунды до повтора (дробные OK); для BlockTags ещё и TTL block:{id}.
+func WithDelay(seconds float64) RejectOption {
+	return func(c *rejectConfig) {
+		if seconds < 0 {
+			seconds = 0
+		}
+		c.delay = seconds
+	}
+}
+
+// WithBlockGroups — парковка групп на Delay (score unlockAt в groups).
+func WithBlockGroups(groups ...string) RejectOption {
+	return func(c *rejectConfig) {
+		c.blockGroups = append([]string(nil), groups...)
+	}
+}
+
+// WithBlockTags — race!b! ids (или полные теги): SET block:{id} wait на Delay.
+func WithBlockTags(ids ...string) RejectOption {
+	return func(c *rejectConfig) {
+		c.blockTags = append([]string(nil), ids...)
+	}
+}
+
+func applyRejectOptions(opts []RejectOption) rejectConfig {
+	cfg := rejectConfig{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg
+}
+
+// NewRejectWithDelay создаёт ошибку для Consume → Reject.
+// Пример: NewRejectWithDelay(err, WithDelay(2), WithBlockGroups("acct:1"), WithBlockTags("batch:1")).
+func NewRejectWithDelay(err error, opts ...RejectOption) *RejectWithDelay {
+	cfg := applyRejectOptions(opts)
+	return &RejectWithDelay{
+		Err:         err,
+		Delay:       cfg.delay,
+		BlockGroups: cfg.blockGroups,
+		BlockTags:   cfg.blockTags,
+	}
 }
 
 // HandlerFunc — обработчик задачи для Consume.
@@ -608,18 +647,17 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 			continue
 		}
 
-		waitTime := 0.0
-		var blockGroups []string
+		var rejectOpts []RejectOption
 		rejectedPartitions := make(map[string]bool)
 		for _, task := range tasks {
 			select {
 			case <-ctx.Done():
-				if err := c.Reject(opCtx, task.ID, waitTime, blockGroups...); err != nil {
+				if err := c.Reject(opCtx, task.ID, rejectOpts...); err != nil {
 					return err
 				}
 				continue
 			case <-c.stopPing:
-				if err := c.Reject(opCtx, task.ID, waitTime, blockGroups...); err != nil {
+				if err := c.Reject(opCtx, task.ID, rejectOpts...); err != nil {
 					return err
 				}
 				continue
@@ -627,7 +665,7 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 			}
 
 			if isOrderedPartition(task.Partition) && rejectedPartitions[task.Partition] {
-				if err := c.Reject(opCtx, task.ID, waitTime, blockGroups...); err != nil {
+				if err := c.Reject(opCtx, task.ID, rejectOpts...); err != nil {
 					return err
 				}
 				continue
@@ -637,23 +675,11 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 				if isOrderedPartition(task.Partition) {
 					rejectedPartitions[task.Partition] = true
 				}
-				var blockTags []string
 				var rejectErr *RejectWithDelay
 				if errors.As(err, &rejectErr) {
-					if rejectErr.Delay > 0 {
-						waitTime = rejectErr.Delay
-					}
-					if len(rejectErr.BlockGroups) > 0 {
-						blockGroups = rejectErr.BlockGroups
-					}
-					if len(rejectErr.BlockTags) > 0 {
-						blockTags = rejectErr.BlockTags
-					}
+					rejectOpts = rejectOptsFromDelay(rejectErr)
 				}
-				if ackErr := c.RejectWith(opCtx, task.ID, waitTime, RejectOpts{
-					BlockGroups: blockGroups,
-					BlockTags:   blockTags,
-				}); ackErr != nil {
+				if ackErr := c.Reject(opCtx, task.ID, rejectOpts...); ackErr != nil {
 					return ackErr
 				}
 			} else {
@@ -920,30 +946,33 @@ func parseSharedPairs(v interface{}) map[string][]byte {
 	return out
 }
 
-// RejectOpts — доп. поля RejectWith (группы и/или race!b! park).
-type RejectOpts struct {
-	BlockGroups []string
-	BlockTags   []string // race!b! ids или полные теги; TTL = waitTime
+func rejectOptsFromDelay(e *RejectWithDelay) []RejectOption {
+	if e == nil {
+		return nil
+	}
+	opts := make([]RejectOption, 0, 3)
+	if e.Delay > 0 {
+		opts = append(opts, WithDelay(e.Delay))
+	}
+	if len(e.BlockGroups) > 0 {
+		opts = append(opts, WithBlockGroups(e.BlockGroups...))
+	}
+	if len(e.BlockTags) > 0 {
+		opts = append(opts, WithBlockTags(e.BlockTags...))
+	}
+	return opts
 }
 
 // Reject отклоняет задачу и возвращает её обратно в очередь.
-// waitTime — секунды (дробные OK). При waitTime > 0 для ordered-партиций (!) в
-// queue:{name}:blocked пишется partition; blockGroups — score unlockAt в groups.
-func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, blockGroups ...string) error {
-	return c.reject(ctx, taskID, waitTime, blockGroups, nil)
-}
-
-// RejectWith — Reject с BlockGroups и/или BlockTags (race!b! park на waitTime).
-func (c *Consumer) RejectWith(ctx context.Context, taskID string, waitTime float64, opts RejectOpts) error {
-	return c.reject(ctx, taskID, waitTime, opts.BlockGroups, opts.BlockTags)
-}
-
-func (c *Consumer) reject(ctx context.Context, taskID string, waitTime float64, blockGroups, blockTags []string) error {
-	groupsStr, err := encodeGroups(blockGroups)
+// Опции (порядок любой): WithDelay, WithBlockGroups, WithBlockTags.
+// При Delay > 0 для ordered-партиций (!) пишется partition в blocked.
+func (c *Consumer) Reject(ctx context.Context, taskID string, opts ...RejectOption) error {
+	cfg := applyRejectOptions(opts)
+	groupsStr, err := encodeGroups(cfg.blockGroups)
 	if err != nil {
 		return err
 	}
-	blockTagsStr, err := encodeBlockTagIDs(blockTags)
+	blockTagsStr, err := encodeBlockTagIDs(cfg.blockTags)
 	if err != nil {
 		return err
 	}
@@ -952,7 +981,7 @@ func (c *Consumer) reject(ctx context.Context, taskID string, waitTime float64, 
 		c.queueName,
 		taskID,
 		c.consumerID,
-		waitTime,
+		cfg.delay,
 		groupsStr,
 		bool01(c.concurrencyTags),
 		bool01(c.extendGroupBlocksOnly),

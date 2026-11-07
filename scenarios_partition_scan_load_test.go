@@ -120,11 +120,11 @@ func TestPartitionScanLoad_S1000(t *testing.T) {
 						var err error
 						switch rejectDelaySec {
 						case 1:
-							err = c.Reject(runCtx, task.ID, 1)
+							err = c.Reject(runCtx, task.ID, WithDelay(1))
 						case 5:
-							err = c.Reject(runCtx, task.ID, 5)
+							err = c.Reject(runCtx, task.ID, WithDelay(5))
 						default:
-							err = c.Reject(runCtx, task.ID, 2)
+							err = c.Reject(runCtx, task.ID, WithDelay(2))
 						}
 						if err != nil && runCtx.Err() == nil {
 							t.Errorf("reject: %v", err)

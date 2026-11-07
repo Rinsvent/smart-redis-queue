@@ -65,7 +65,7 @@ func TestQueueIndex_PublishAckUpdatesDepth(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), depth)
 
-	require.NoError(t, consumer.Reject(ctx, got[1].ID, 0))
+	require.NoError(t, consumer.Reject(ctx, got[1].ID))
 	depth, err = admin.QueueDepth(ctx, "test-queue")
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), depth, "Reject не меняет total")

@@ -177,7 +177,10 @@ consumer.Consume(ctx, func(task *redisqueue.Task) error {
     if accountRateLimited {
         // Паркует всю группу: Get не обходит её ready, пока не истечёт Delay.
         // Для ordered (!) дополнительно блокируется сама партиция в blocked.
-        return redisqueue.NewRejectWithDelay(errors.New("rate limit"), 0.3, "acct:9f3a")
+        return redisqueue.NewRejectWithDelay(errors.New("rate limit"),
+            redisqueue.WithDelay(0.3),
+            redisqueue.WithBlockGroups("acct:9f3a"),
+        )
     }
     return nil
 })
@@ -267,7 +270,7 @@ pool.Consume(ctx, process)
 ch := consumer.GetChan(ctx)
 for task := range ch {
     if err := handle(task); err != nil {
-        consumer.Reject(ctx, task.ID, 0) // вернуть в очередь
+        consumer.Reject(ctx, task.ID) // вернуть в очередь
     } else {
         // idempotencyTtl>0: после успеха payload:{id} остаётся на TTL — повторный Publish с тем же ID отклоняется (NX)
         consumer.Ack(ctx, task.ID, redisqueue.WithIdempotency(2*time.Second))

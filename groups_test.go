@@ -53,7 +53,7 @@ func TestQueue_Groups_RejectWithBlockGroups(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Contains(t, []string{"!connA:1", "!connA:2"}, got[0].Partition)
 
-	require.NoError(t, consumer.Reject(ctx, got[0].ID, 1.0, "connA"))
+	require.NoError(t, consumer.Reject(ctx, got[0].ID, WithDelay(1.0), WithBlockGroups("connA")))
 
 	require.NoError(t, producer.Publish(ctx, &Task{
 		ID: "b1", Partition: "!connB:1", Groups: []string{"connB"}, Payload: []byte("b"), Scheduled: time.Now().Add(-time.Second),

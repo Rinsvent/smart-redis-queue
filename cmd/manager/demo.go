@@ -523,7 +523,10 @@ func runConsume(ctx context.Context, c *cli.Command) error {
 				fmt.Printf("  stub-429 %s groups=%v (acked=%d rejected=%d) → BlockGroups\n",
 					task.ID, groups, acked.Load(), n)
 			}
-			return redisqueue.NewRejectWithDelay(fmt.Errorf("stub upstream 429"), delaySec, groups...)
+			return redisqueue.NewRejectWithDelay(fmt.Errorf("stub upstream 429"),
+				redisqueue.WithDelay(delaySec),
+				redisqueue.WithBlockGroups(groups...),
+			)
 		}
 		acked.Add(1)
 		if a := acked.Load(); a%100 == 0 {

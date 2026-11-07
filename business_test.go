@@ -16,7 +16,7 @@ import (
 
 func TestRejectWithDelay_ErrorAndUnwrap(t *testing.T) {
 	inner := errors.New("rate")
-	e := NewRejectWithDelay(inner, 0.5, "g1")
+	e := NewRejectWithDelay(inner, WithDelay(0.5), WithBlockGroups("g1"))
 	assert.Equal(t, "rate", e.Error())
 	assert.ErrorIs(t, e, inner)
 	assert.Equal(t, 0.5, e.Delay)
@@ -179,7 +179,7 @@ func TestBusiness_Consume_RejectWithDelay_BlockGroups(t *testing.T) {
 				gotOther.Store(true)
 				return nil
 			}
-			return NewRejectWithDelay(errors.New("429"), 2, "conn")
+			return NewRejectWithDelay(errors.New("429"), WithDelay(2), WithBlockGroups("conn"))
 		})
 	}()
 
@@ -228,7 +228,7 @@ func TestBusiness_PartitionBlockedInInspect(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Reject(ctx, got[0].ID, 5))
+	require.NoError(t, consumer.Reject(ctx, got[0].ID, WithDelay(5)))
 
 	stats, err := admin.Inspect(ctx, q, "")
 	require.NoError(t, err)
@@ -382,8 +382,8 @@ func TestBusiness_AckReject_WrongOwner(t *testing.T) {
 
 	other := newConsumer(rdb, "test-queue", "other", false)
 	require.Error(t, other.Ack(ctx, got[0].ID))
-	require.Error(t, other.Reject(ctx, got[0].ID, 0))
-	require.Error(t, consumer.Reject(ctx, "missing-id", 0))
+	require.Error(t, other.Reject(ctx, got[0].ID))
+	require.Error(t, consumer.Reject(ctx, "missing-id"))
 	require.NoError(t, consumer.Ack(ctx, got[0].ID))
 }
 
@@ -396,8 +396,8 @@ func TestBusiness_Reject_InvalidBlockGroup(t *testing.T) {
 	}))
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
-	require.Error(t, consumer.Reject(ctx, got[0].ID, 1, "bad#group"))
-	require.NoError(t, consumer.Reject(ctx, got[0].ID, 0))
+	require.Error(t, consumer.Reject(ctx, got[0].ID, WithDelay(1), WithBlockGroups("bad#group")))
+	require.NoError(t, consumer.Reject(ctx, got[0].ID))
 }
 
 func TestBusiness_BlockGroups_Noop(t *testing.T) {
@@ -622,7 +622,7 @@ func TestBusiness_Consume_OrderedRejectCascadeWithDelay(t *testing.T) {
 		defer close(done)
 		_ = consumer.Consume(ctx, func(task *Task) error {
 			if first.CompareAndSwap(false, true) {
-				return NewRejectWithDelay(errors.New("fail"), 0.2)
+				return NewRejectWithDelay(errors.New("fail"), WithDelay(0.2))
 			}
 			t.Errorf("не должны вызывать handler для остальных задач партиции после reject: %s", task.ID)
 			return nil

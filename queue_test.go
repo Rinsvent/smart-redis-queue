@@ -483,7 +483,7 @@ func TestQueue_Reject(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, got)
 
-	err = consumer.Reject(ctx, "task-1", 0)
+	err = consumer.Reject(ctx, "task-1")
 	require.NoError(t, err)
 
 	// Проверяем что задача вернулась в очередь
@@ -511,7 +511,7 @@ func TestQueue_Reject_PartitionUnlock(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, got)
 
-	err = consumer.Reject(ctx, "task-1", 0)
+	err = consumer.Reject(ctx, "task-1")
 	require.NoError(t, err)
 
 	// Проверяем что партиция разблокирована
@@ -549,7 +549,7 @@ func TestQueue_Reject_OrderedPartition_WithWaitTime(t *testing.T) {
 
 	// Reject с waitTime=2 сек — партиция в queue:blocked
 	beforeMs := time.Now().UnixMilli()
-	err = consumer.Reject(ctx, "task-1", 2)
+	err = consumer.Reject(ctx, "task-1", WithDelay(2))
 	require.NoError(t, err)
 	afterMs := time.Now().UnixMilli()
 
@@ -598,7 +598,7 @@ func TestQueue_Consume_RejectWithDelay(t *testing.T) {
 	go func() {
 		consumer.Consume(ctx, func(t *Task) error {
 			close(handled)
-			return NewRejectWithDelay(fmt.Errorf("rate limit"), 2)
+			return NewRejectWithDelay(fmt.Errorf("rate limit"), WithDelay(2))
 		})
 	}()
 
@@ -630,7 +630,7 @@ func TestQueue_Reject_FractionalWaitTime(t *testing.T) {
 	require.Len(t, got, 1)
 
 	beforeMs := time.Now().UnixMilli()
-	require.NoError(t, consumer.Reject(ctx, "task-1", 0.3))
+	require.NoError(t, consumer.Reject(ctx, "task-1", WithDelay(0.3)))
 	afterMs := time.Now().UnixMilli()
 
 	unlockAt, err := consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "!frac-block").Result()
@@ -670,7 +670,7 @@ func TestQueue_Reject_NonOrderedPartition_WaitTimeIgnored(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, got)
 
-	err = consumer.Reject(ctx, "task-1", 10)
+	err = consumer.Reject(ctx, "task-1", WithDelay(10))
 	require.NoError(t, err)
 
 	_, err = consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "shared-partition").Result()
@@ -700,7 +700,7 @@ func TestQueue_Reject_OrderedPartition_WaitTimeZero(t *testing.T) {
 	require.NoError(t, err)
 	require.NotEmpty(t, got)
 
-	err = consumer.Reject(ctx, "task-1", 0)
+	err = consumer.Reject(ctx, "task-1")
 	require.NoError(t, err)
 
 	_, err = consumer.redis.ZScore(ctx, queueBlockedKey("test-queue"), "!ordered").Result()
@@ -1471,9 +1471,9 @@ func TestQueue_Reject_OrderedPartition_PreservesOrder(t *testing.T) {
 
 	// Reject обе — для ordered партиции при reject первой все из батча идут обратно
 	// (в Consume это делает rejectedPartitions; здесь вызываем Reject вручную для обеих)
-	err = consumer.Reject(ctx, "task-1", 0)
+	err = consumer.Reject(ctx, "task-1")
 	require.NoError(t, err)
-	err = consumer.Reject(ctx, "task-2", 0)
+	err = consumer.Reject(ctx, "task-2")
 	require.NoError(t, err)
 
 	// Следующие Get должны вернуть 1, 2, 3, 4, 5 по порядку (тот же priority + original score)
@@ -1520,7 +1520,7 @@ func TestQueue_Reject_Ordered_RestoresBeforeRemaining(t *testing.T) {
 	assert.Equal(t, "t1", got[0].ID)
 	assert.Equal(t, "t2", got[1].ID)
 
-	require.NoError(t, consumer.Reject(ctx, "t1", 0))
+	require.NoError(t, consumer.Reject(ctx, "t1"))
 	// t2 ещё in-flight; priority не должен расти
 	prio, err := rdb.Get(ctx, "queue:test-queue:priority:t1").Result()
 	require.NoError(t, err)
@@ -1710,7 +1710,7 @@ func TestQueue_Reject_OrderedPartition_RepeatedRejects(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, got, 1)
 		assert.Equal(t, "task-1", got[0].ID)
-		err = consumer.Reject(ctx, "task-1", 0)
+		err = consumer.Reject(ctx, "task-1")
 		require.NoError(t, err)
 	}
 

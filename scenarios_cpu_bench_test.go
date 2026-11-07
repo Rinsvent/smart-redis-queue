@@ -274,11 +274,11 @@ func BenchmarkIdleRejectConnector(b *testing.B) {
 				delivered++
 				t := got[0]
 				if mode.blockGroup {
-					if err := consumer.Reject(ctx, t.ID, 3600, group); err != nil {
+					if err := consumer.Reject(ctx, t.ID, WithDelay(3600), WithBlockGroups(group)); err != nil {
 						b.Fatal(err)
 					}
 				} else {
-					if err := consumer.Reject(ctx, t.ID, 3600); err != nil {
+					if err := consumer.Reject(ctx, t.ID, WithDelay(3600)); err != nil {
 						b.Fatal(err)
 					}
 				}
@@ -313,7 +313,7 @@ func BenchmarkParkedPartitionsIdleGets(b *testing.B) {
 					b.Fatalf("empty Get while parking (%d/%d)", parked, parts)
 				}
 				for _, t := range got {
-					if err := consumer.Reject(ctx, t.ID, 3600); err != nil {
+					if err := consumer.Reject(ctx, t.ID, WithDelay(3600)); err != nil {
 						b.Fatal(err)
 					}
 					parked++
@@ -425,10 +425,10 @@ func TestConnectorRateLimitLoad_Head(t *testing.T) {
 							_ = c.Ack(runCtx, task.ID)
 							acks.Add(1)
 						} else if blockGroup {
-							_ = c.Reject(runCtx, task.ID, rejectDelaySec, group)
+							_ = c.Reject(runCtx, task.ID, WithDelay(rejectDelaySec), WithBlockGroups(group))
 							rejects.Add(1)
 						} else {
-							_ = c.Reject(runCtx, task.ID, rejectDelaySec)
+							_ = c.Reject(runCtx, task.ID, WithDelay(rejectDelaySec))
 							rejects.Add(1)
 						}
 					}

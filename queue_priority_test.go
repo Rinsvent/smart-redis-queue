@@ -126,7 +126,7 @@ func TestQueue_QueuePriority_RejectReturnsToSameLane(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Reject(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Reject(ctx, got[0].ID))
 
 	assert.Equal(t, int64(1), rdb.Exists(ctx, "queue:test-queue:qp3:partition:p:0").Val())
 	assert.Equal(t, "3", rdb.Get(ctx, "queue:test-queue:qpriority:qp3").Val())
@@ -198,7 +198,7 @@ func TestQueue_QueuePriority_SharedPartitionGroupsSurviveLegacyCleanup(t *testin
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	require.Equal(t, "qp10", got[0].ID)
-	require.NoError(t, consumer.Reject(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Reject(ctx, got[0].ID))
 
 	assert.Equal(t, int64(1), rdb.Exists(ctx, "queue:test-queue:qp10:group:conn:1:ready").Val())
 	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:test-queue:qp10:group:_default:ready").Val())

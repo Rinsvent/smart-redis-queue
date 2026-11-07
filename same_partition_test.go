@@ -177,9 +177,9 @@ func TestQueue_ExtendGroupBlocksOnly_RejectDoesNotShortenPause(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, got, 2)
 
-	require.NoError(t, consumer.Reject(ctx, got[0].ID, 30, "read:conn1"))
+	require.NoError(t, consumer.Reject(ctx, got[0].ID, WithDelay(30), WithBlockGroups("read:conn1")))
 	long := groupUnlockAt(t, consumer, "read:conn1")
-	require.NoError(t, consumer.Reject(ctx, got[1].ID, 5, "read:conn1"))
+	require.NoError(t, consumer.Reject(ctx, got[1].ID, WithDelay(5), WithBlockGroups("read:conn1")))
 
 	assert.Equal(t, long, groupUnlockAt(t, consumer, "read:conn1"), "короткий отказ не сокращает паузу")
 }

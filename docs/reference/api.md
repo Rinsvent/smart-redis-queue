@@ -87,7 +87,7 @@
 | `SetConcurrencyTags` | `race!` / `race!s!` / `race!b!` |
 | `Ack` / `WithIdempotency` / `WithShared` / `WithOpenBlocks` / `WithSharedTTL` | завершение + Shared / open gate |
 | `NewShared` / `Shared.Publish` / `Shared.Open` | mid-handler shared blob / `race!b!` ready |
-| `Reject` / `RejectWithDelay.WithBlockTags` | парк `race!b!` на Delay |
+| `Reject` / `WithDelay` / `WithBlockGroups` / `WithBlockTags` | reject + парк groups / `race!b!` |
 | `RaceSharedTag` / `RaceBlockTag` / `Task.Shared` / `SetAckShared` / `SetAckOpenBlocks` | теги / Get blob / Consume→Ack |
 | `NewSteps` / `NewStepsRaw` / `Do` / `Begin` / `End` / `Progress` / `Commit` / `Last` / `LastProgress` / `LastCursor` / `Release` / `SetStepControl` / `ParseStepCheckpoint` | Step recovery + progress (`name#3/?:cur@ms[!pause]`); см. [доку](../features/step-recovery.md) |
 | `Task.Headers` / `SetHeader` / `SetHeaders` | Мета между попытками |

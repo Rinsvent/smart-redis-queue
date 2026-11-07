@@ -152,7 +152,7 @@ func TestDebounce_Reject_ClearsFlagKeepsPayload(t *testing.T) {
 	}))
 	assert.Equal(t, int64(1), rdb.Exists(ctx, "queue:test-queue:debounce:"+id).Val())
 
-	require.NoError(t, consumer.Reject(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Reject(ctx, got[0].ID))
 	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:test-queue:debounce:"+id).Val())
 
 	raw, err := rdb.Get(ctx, "queue:test-queue:payload:"+id).Bytes()

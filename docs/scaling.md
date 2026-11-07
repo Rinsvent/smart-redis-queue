@@ -16,7 +16,10 @@ Redis Cluster для SRQ пока не поддерживается (ключи 
 При лимите на аккаунт:
 
 ```go
-return redisqueue.NewRejectWithDelay(err, 2.0, "acct:9f3a")
+return redisqueue.NewRejectWithDelay(err,
+    redisqueue.WithDelay(2.0),
+    redisqueue.WithBlockGroups("acct:9f3a"),
+)
 ```
 
 Иначе Get продолжит обходить O(N) партиций, и нагрузка на Redis вырастет вместе с их числом.

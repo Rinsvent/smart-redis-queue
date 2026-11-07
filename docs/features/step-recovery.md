@@ -22,7 +22,7 @@ pool.Consume(ctx, func(task *redisqueue.Task) error {
     }
 
     if err := s.Do(ctx, "call_api", callAPI); err != nil {
-        return redisqueue.NewRejectWithDelay(err, 2.0)
+        return redisqueue.NewRejectWithDelay(err, redisqueue.WithDelay(2.0))
     }
 
     return s.Do(ctx, "notify", sendNotify)
@@ -220,7 +220,7 @@ pool.Consume(ctx, func(task *redisqueue.Task) error {
     if err := s.Do(ctx, "charge", func(ctx context.Context) error {
         return payments.Charge(ctx, amount, payments.WithIdempotencyKey(task.ID+":charge"))
     }); err != nil {
-        return redisqueue.NewRejectWithDelay(err, 5.0)
+        return redisqueue.NewRejectWithDelay(err, redisqueue.WithDelay(5.0))
     }
     return s.Do(ctx, "notify", func(ctx context.Context) error {
         return notify.Send(ctx, task.ID) // тоже лучше идемпотентно

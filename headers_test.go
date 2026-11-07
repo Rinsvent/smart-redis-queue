@@ -31,7 +31,7 @@ func TestHeaders_SetGetAckClears(t *testing.T) {
 	assert.Equal(t, "timeout", m["last_error"])
 	assert.Equal(t, "2", m["attempt"])
 
-	require.NoError(t, consumer.Reject(ctx, task.ID, 0))
+	require.NoError(t, consumer.Reject(ctx, task.ID))
 
 	tasks2, err := consumer.Get(ctx)
 	require.NoError(t, err)

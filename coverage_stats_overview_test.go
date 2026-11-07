@@ -84,7 +84,7 @@ func TestConsumer_StatsRetentionLoopAndReject(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Reject(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Reject(ctx, got[0].ID))
 
 	require.NoError(t, producer.Publish(ctx, &Task{
 		ID: "st-2", Payload: []byte("y"), Scheduled: time.Now().Add(-time.Second),

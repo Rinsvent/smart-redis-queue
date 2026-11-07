@@ -95,7 +95,7 @@ func TestConsume_RejectWithDelay_ExtractsFields(t *testing.T) {
 	go func() {
 		defer close(done)
 		_ = consumer.Consume(ctx, func(task *Task) error {
-			return NewRejectWithDelay(errors.New("slow"), 1.5, "g")
+			return NewRejectWithDelay(errors.New("slow"), WithDelay(1.5), WithBlockGroups("g"))
 		})
 	}()
 

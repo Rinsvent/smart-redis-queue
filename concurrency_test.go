@@ -102,7 +102,7 @@ func TestConcurrency_RejectReleasesLock(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.True(t, rdb.HExists(ctx, "queue:test-queue:race:locks", tag).Val())
 
-	require.NoError(t, consumer.Reject(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Reject(ctx, got[0].ID))
 	assert.False(t, rdb.HExists(ctx, "queue:test-queue:race:locks", tag).Val())
 	assert.Equal(t, int64(1), rdb.Exists(ctx, "queue:test-queue:race:tags:r1").Val())
 
@@ -258,7 +258,7 @@ func TestConcurrency_RaceShared_RejectAllowsNewLeader(t *testing.T) {
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	require.Len(t, got, 1)
-	require.NoError(t, consumer.Reject(ctx, got[0].ID, 0))
+	require.NoError(t, consumer.Reject(ctx, got[0].ID))
 	assert.False(t, rdb.HExists(ctx, "queue:test-queue:race:locks", tag).Val())
 	assert.Equal(t, int64(0), rdb.Exists(ctx, "queue:test-queue:shared:file:rej2").Val())
 
@@ -332,7 +332,7 @@ func TestConcurrency_RaceBlock_ParkProbeOpen(t *testing.T) {
 	require.NoError(t, sh.Publish(ctx, map[string][]byte{sharedID: blob}))
 
 	// not ready → park
-	require.NoError(t, consumerA.RejectWith(ctx, gotA[0].ID, 2, RejectOpts{BlockTags: []string{blockID}}))
+	require.NoError(t, consumerA.Reject(ctx, gotA[0].ID, WithDelay(2), WithBlockTags(blockID)))
 	assert.Equal(t, BlockWaitValue, rdb.Get(ctx, "queue:test-queue:block:"+blockID).Val())
 
 	gotB, err := consumerB.Get(ctx)

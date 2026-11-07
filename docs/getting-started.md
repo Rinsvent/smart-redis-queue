@@ -92,7 +92,10 @@ _ = consumer.SetRateLimit(&redisqueue.RateLimitConfig{
 Если провайдер всё же ответил 429 — паркуем группу:
 
 ```go
-return redisqueue.NewRejectWithDelay(err, 2.0, "acct:9f3a")
+return redisqueue.NewRejectWithDelay(err,
+    redisqueue.WithDelay(2.0),
+    redisqueue.WithBlockGroups("acct:9f3a"),
+)
 ```
 
 Разбор: [Группы и rate limit](features/rate-limit.md).

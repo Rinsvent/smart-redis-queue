@@ -52,7 +52,10 @@ Tags: []string{
 }
 
 // not ready → парк Get на Delay (block:{id}=wait), потом Reject
-return redisqueue.NewRejectWithDelay(err, 30).WithBlockTags("batch:" + batchID)
+return redisqueue.NewRejectWithDelay(err,
+    redisqueue.WithDelay(30),
+    redisqueue.WithBlockTags("batch:"+batchID),
+)
 
 // успех → артефакт + open gate
 sh, _ := redisqueue.NewShared(ctx, task)
