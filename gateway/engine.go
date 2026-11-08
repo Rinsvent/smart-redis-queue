@@ -163,6 +163,12 @@ func (g *Gateway) ensureHealth() {
 				return
 			case now := <-t.C:
 				g.loss.truncate(now)
+				// always: min 1s retention for RedisOK ops; everysec: loss window.
+				win := g.persist.LossWindow
+				if win <= 0 {
+					win = time.Second
+				}
+				g.ops.truncateOlderThan(now.Add(-win))
 				g.probeRedis(context.Background())
 			case <-pingT.C:
 				g.pingAll(context.Background())
@@ -172,7 +178,13 @@ func (g *Gateway) ensureHealth() {
 }
 
 func (g *Gateway) probeRedis(ctx context.Context) {
-	err := g.cfg.Redis.Ping(ctx).Err()
+	var err error
+	for i, c := range g.redisClients() {
+		if e := c.Ping(ctx).Err(); e != nil {
+			err = fmt.Errorf("client[%d]: %w", i, e)
+			break
+		}
+	}
 	st := g.state.Get()
 	if err != nil {
 		if st == StateRunning {
@@ -262,19 +274,14 @@ func (g *Gateway) Close() {
 	}
 }
 
-// Drain — graceful stop: закрыть Get/Publish, дождаться, dump, Close.
+// Drain — graceful stop: закрыть Get/Publish, settle window для in-flight Ack/Reject, dump, Close.
 func (g *Gateway) Drain(ctx context.Context) error {
 	g.state.set(StateDraining)
-	// короткий wait на terminal ops in-flight
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		select {
-		case <-ctx.Done():
-			break
-		default:
-			time.Sleep(50 * time.Millisecond)
-		}
-		break
+	timer := time.NewTimer(3 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
 	}
 	if g.cfg.DumpPath != "" {
 		d := Dump{

@@ -36,6 +36,6 @@
 6. Desktop UI  
 7. ~~Journal~~ — [journal.md](features/journal.md)  
 8. Script / queue flags — после решения по ресерчу  
-9. Gateway — доработки после v1 skeleton (disk WAL, HA, шарды)
+9. Gateway — после v1: disk WAL / kill-9, active/passive HA, Admin RPC (шарды уже в v1)
 
 Актуальный список в репозитории: [`ROADMAP.md`](https://github.com/Rinsvent/smart-redis-queue/blob/main/ROADMAP.md).

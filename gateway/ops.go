@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -59,6 +60,7 @@ func (g *Gateway) PublishTasksWith(ctx context.Context, queue string, tasks []*r
 }
 
 // GetTasks — Get только в Running. При шардах — fan-in по всем клиентам до prefetch.
+// При ошибке mid-fan-in уже взятые задачи возвращаются клиенту (не orphan lock).
 func (g *Gateway) GetTasks(ctx context.Context, queue, consumerID string, prefetch int) ([]*redisqueue.Task, error) {
 	if queue == "" {
 		return nil, ErrEmptyQueue
@@ -81,28 +83,29 @@ func (g *Gateway) GetTasks(ctx context.Context, queue, consumerID string, prefet
 		return tasks, nil
 	}
 	out := make([]*redisqueue.Task, 0, prefetch)
-	per := prefetch
-	if per < 1 {
-		per = 1
-	}
+	var firstErr error
 	for i, rdb := range clients {
 		if len(out) >= prefetch {
 			break
 		}
 		need := prefetch - len(out)
-		if need > per {
-			need = per
-		}
 		c := g.consumerOn(rdb, queue, consumerID, i)
 		c.SetPrefetchCount(need)
 		tasks, err := c.Get(ctx)
 		if err != nil {
 			g.noteRedisErr(err)
-			return nil, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			// не прерываем: иначе уже locked tasks потеряются для клиента
+			continue
 		}
 		out = append(out, tasks...)
 	}
-	return out, nil
+	if len(out) > 0 {
+		return out, nil
+	}
+	return nil, firstErr
 }
 
 // AckTask — Ack; при RedisDown копит в op-log без вызова Redis.
@@ -153,7 +156,7 @@ func (g *Gateway) AckTask(ctx context.Context, queue, consumerID, taskID string,
 
 func (g *Gateway) ackOnShards(ctx context.Context, queue, consumerID, taskID string, rec *AckRec) error {
 	clients := g.redisClients()
-	var last error
+	var lastNotFound error
 	for i, rdb := range clients {
 		idx := -1
 		if len(clients) > 1 {
@@ -161,15 +164,19 @@ func (g *Gateway) ackOnShards(ctx context.Context, queue, consumerID, taskID str
 		}
 		c := g.consumerOn(rdb, queue, consumerID, idx)
 		if err := c.Ack(ctx, taskID, ackOptions(rec)...); err != nil {
-			last = err
+			if isRedisTransportErr(err) {
+				g.noteRedisErr(err)
+				return err
+			}
+			lastNotFound = err
 			continue
 		}
 		return nil
 	}
-	return last
+	return lastNotFound
 }
 
-// RejectTask — Reject; publish остаётся / продлевается в loss-window.
+// RejectTask — Reject; publish убирается из loss-window (не продлевается).
 func (g *Gateway) RejectTask(ctx context.Context, queue, consumerID, taskID string, rej *RejectRec) error {
 	if queue == "" {
 		return ErrEmptyQueue
@@ -223,7 +230,7 @@ func (g *Gateway) RejectTask(ctx context.Context, queue, consumerID, taskID stri
 
 func (g *Gateway) rejectOnShards(ctx context.Context, queue, consumerID, taskID string, rec *RejectRec) error {
 	clients := g.redisClients()
-	var last error
+	var lastNotFound error
 	for i, rdb := range clients {
 		idx := -1
 		if len(clients) > 1 {
@@ -231,29 +238,41 @@ func (g *Gateway) rejectOnShards(ctx context.Context, queue, consumerID, taskID 
 		}
 		c := g.consumerOn(rdb, queue, consumerID, idx)
 		if err := c.Reject(ctx, taskID, rejectOptions(rec)...); err != nil {
-			last = err
+			if isRedisTransportErr(err) {
+				g.noteRedisErr(err)
+				return err
+			}
+			lastNotFound = err
 			continue
 		}
 		return nil
 	}
-	return last
+	return lastNotFound
 }
 
 func (g *Gateway) noteRedisErr(err error) {
-	if err == nil {
+	if err == nil || !isRedisTransportErr(err) {
 		return
 	}
+	if g.state.Get() == StateRunning {
+		g.log.Printf("redis fault on op: %v → redis_down", err)
+		g.state.set(StateRedisDown)
+	}
+}
+
+func isRedisTransportErr(err error) bool {
+	if err == nil {
+		return false
+	}
 	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "connection refused") ||
+	return strings.Contains(msg, "connection refused") ||
 		strings.Contains(msg, "i/o timeout") ||
 		strings.Contains(msg, "broken pipe") ||
 		strings.Contains(msg, "eof") ||
-		strings.Contains(msg, "loading") {
-		if g.state.Get() == StateRunning {
-			g.log.Printf("redis fault on op: %v → redis_down", err)
-			g.state.set(StateRedisDown)
-		}
-	}
+		strings.Contains(msg, "loading") ||
+		strings.Contains(msg, "context deadline exceeded") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "no such host")
 }
 
 func publishRecFromTask(t *redisqueue.Task) PublishRec {
@@ -331,7 +350,9 @@ func (g *Gateway) recover(ctx context.Context) error {
 	g.state.set(StateRecovering)
 	g.log.Printf("recover: begin ops=%d loss=%d", g.ops.len(), g.loss.len())
 
-	g.fenceLocks(ctx)
+	if err := g.fenceLocks(ctx); err != nil {
+		return fmt.Errorf("gateway: fence: %w", err)
+	}
 
 	for _, op := range g.ops.snapshot() {
 		if op.RedisOK {
@@ -340,6 +361,7 @@ func (g *Gateway) recover(ctx context.Context) error {
 		if err := g.replayOp(ctx, op); err != nil {
 			return fmt.Errorf("gateway: replay offset=%d: %w", op.Offset, err)
 		}
+		g.ops.markRedisOK(op.Offset)
 	}
 
 	for _, e := range g.loss.snapshot() {
@@ -349,7 +371,11 @@ func (g *Gateway) recover(ctx context.Context) error {
 		}
 		t := taskFromPublishRec(e.Rec)
 		if err := g.producer(e.Queue).Publish(ctx, t); err != nil {
-			g.log.Printf("recover: re-publish %s: %v", e.Rec.ID, err)
+			var exists *redisqueue.ErrTasksAlreadyExist
+			if errors.As(err, &exists) {
+				continue
+			}
+			return fmt.Errorf("gateway: re-publish %s: %w", e.Rec.ID, err)
 		}
 	}
 
@@ -366,14 +392,35 @@ func (g *Gateway) replayOp(ctx context.Context, op Op) error {
 			return nil
 		}
 		t := taskFromPublishRec(*op.Publish)
-		return g.producer(op.Queue).Publish(ctx, t)
+		err := g.producer(op.Queue).Publish(ctx, t)
+		var exists *redisqueue.ErrTasksAlreadyExist
+		if errors.As(err, &exists) {
+			return nil
+		}
+		return err
 	case OpAck:
-		c := g.consumer(op.Queue, op.Consumer)
-		return c.Ack(ctx, op.TaskID, ackOptions(op.Ack)...)
+		err := g.ackOnShards(ctx, op.Queue, op.Consumer, op.TaskID, op.Ack)
+		if err != nil && isAlreadySettled(err) {
+			return nil
+		}
+		return err
 	case OpReject:
-		c := g.consumer(op.Queue, op.Consumer)
-		return c.Reject(ctx, op.TaskID, rejectOptions(op.Reject)...)
+		err := g.rejectOnShards(ctx, op.Queue, op.Consumer, op.TaskID, op.Reject)
+		if err != nil && isAlreadySettled(err) {
+			return nil
+		}
+		return err
 	default:
 		return nil
 	}
+}
+
+// isAlreadySettled — idempotent replay: задача уже не в processing.
+func isAlreadySettled(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found in processing") ||
+		strings.Contains(msg, "not owned by this consumer")
 }

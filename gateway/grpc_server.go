@@ -94,12 +94,18 @@ func (a *grpcAPI) Ack(ctx context.Context, req *gatewayv1.AckRequest) (*gatewayv
 }
 
 func (a *grpcAPI) Reject(ctx context.Context, req *gatewayv1.RejectRequest) (*gatewayv1.RejectResponse, error) {
+	// proto3: unset dead_letter_max == 0; совпадаем с HTTP (nil → consumer default = -1).
+	// Unlimited через gRPC: пока не optional — передавайте большой max или используйте HTTP.
+	dlqMax := int(req.DeadLetterMax)
+	if req.DeadLetter && dlqMax == 0 {
+		dlqMax = -1
+	}
 	rej := &RejectRec{
 		Delay:         req.Delay,
 		BlockGroups:   req.BlockGroups,
 		BlockTags:     req.BlockTags,
 		DeadLetter:    req.DeadLetter,
-		DeadLetterMax: int(req.DeadLetterMax),
+		DeadLetterMax: dlqMax,
 	}
 	if err := a.g.RejectTask(ctx, req.Queue, req.ConsumerId, req.TaskId, rej); err != nil {
 		return nil, mapErr(err)
@@ -110,11 +116,11 @@ func (a *grpcAPI) Reject(ctx context.Context, req *gatewayv1.RejectRequest) (*ga
 func mapErr(err error) error {
 	var bp *redisqueue.ErrBackpressure
 	switch {
-	case err == ErrRedisDown:
+	case errors.Is(err, ErrRedisDown):
 		return status.Error(codes.Unavailable, err.Error())
-	case err == ErrRecovering, err == ErrDraining:
+	case errors.Is(err, ErrRecovering), errors.Is(err, ErrDraining):
 		return status.Error(codes.FailedPrecondition, err.Error())
-	case err == ErrEmptyQueue, err == ErrEmptyTaskID:
+	case errors.Is(err, ErrEmptyQueue), errors.Is(err, ErrEmptyTaskID):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.As(err, &bp):
 		return status.Error(codes.ResourceExhausted, err.Error())

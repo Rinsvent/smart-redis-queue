@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 
 	redisqueue "github.com/Rinsvent/smart-redis-queue"
 )
@@ -34,7 +35,8 @@ func (g *Gateway) pingAll(ctx context.Context) {
 }
 
 // fenceLocks — renew heartbeat известных consumer’ов до replay (reclaim не должен обогнать Ack).
-func (g *Gateway) fenceLocks(ctx context.Context) {
+// Любой transport-error → fail recover (fail-closed).
+func (g *Gateway) fenceLocks(ctx context.Context) error {
 	seen := map[string]struct{}{}
 	for _, op := range g.ops.snapshot() {
 		if op.Consumer == "" || op.Queue == "" {
@@ -53,8 +55,9 @@ func (g *Gateway) fenceLocks(ctx context.Context) {
 			}
 			c := g.consumerOn(rdb, op.Queue, op.Consumer, idx)
 			if err := c.Ping(ctx); err != nil {
-				g.log.Printf("fence ping %s/%s: %v", op.Queue, op.Consumer, err)
+				return fmt.Errorf("fence ping %s/%s shard=%d: %w", op.Queue, op.Consumer, i, err)
 			}
 		}
 	}
+	return nil
 }

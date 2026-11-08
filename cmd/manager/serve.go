@@ -31,6 +31,16 @@ func runGateway(ctx context.Context, c *cli.Command) error {
 		if err != nil {
 			return err
 		}
+		root := c.Root()
+		if root.IsSet("addr") {
+			fc.Redis.Addr = root.String("addr")
+		}
+		if root.IsSet("password") {
+			fc.Redis.Password = root.String("password")
+		}
+		if root.IsSet("db") {
+			fc.Redis.DB = root.Int("db")
+		}
 		rdb = fc.RedisClient()
 		cfg.ListenAddr = fc.Listen
 		cfg.HTTPAddr = fc.HTTP

@@ -115,6 +115,32 @@ func (l *opLog) truncateBefore(offset uint64) {
 	l.entries = append([]Op(nil), l.entries[i:]...)
 }
 
+// markRedisOK — после успешного replay: op больше не повторяется.
+func (l *opLog) markRedisOK(offset uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i := range l.entries {
+		if l.entries[i].Offset == offset {
+			l.entries[i].RedisOK = true
+			return
+		}
+	}
+}
+
+// truncateOlderThan удаляет RedisOK-записи старше cutoff.
+// Pending (RedisOK=false) всегда сохраняются до успешного replay.
+func (l *opLog) truncateOlderThan(cutoff time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	kept := make([]Op, 0, len(l.entries))
+	for _, e := range l.entries {
+		if !e.RedisOK || e.At.After(cutoff) {
+			kept = append(kept, e)
+		}
+	}
+	l.entries = kept
+}
+
 func (l *opLog) len() int {
 	l.mu.Lock()
 	defer l.mu.Unlock()

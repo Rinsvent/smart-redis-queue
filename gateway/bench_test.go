@@ -13,7 +13,7 @@ import (
 
 func setupGWBench(b *testing.B) (*Gateway, *redis.Client) {
 	b.Helper()
-	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379", DB: 5})
+	rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379", DB: gatewayTestDB})
 	ctx := context.Background()
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		b.Skipf("Redis not available: %v", err)
@@ -35,7 +35,7 @@ func BenchmarkGatewayVsDirect_Publish(b *testing.B) {
 	for _, size := range sizes {
 		payload := bytes.Repeat([]byte("x"), size)
 		b.Run(fmt.Sprintf("direct_%dB", size), func(b *testing.B) {
-			rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379", DB: 5})
+			rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379", DB: gatewayTestDB})
 			ctx := context.Background()
 			if err := rdb.Ping(ctx).Err(); err != nil {
 				b.Skip(err)
@@ -72,7 +72,7 @@ func BenchmarkGatewayVsDirect_FullCycle(b *testing.B) {
 	for _, size := range sizes {
 		payload := bytes.Repeat([]byte("x"), size)
 		b.Run(fmt.Sprintf("direct_%dB", size), func(b *testing.B) {
-			rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379", DB: 5})
+			rdb := redis.NewClient(&redis.Options{Addr: "localhost:6379", DB: gatewayTestDB})
 			ctx := context.Background()
 			if err := rdb.Ping(ctx).Err(); err != nil {
 				b.Skip(err)

@@ -34,7 +34,7 @@ redis:
   db: 0
 ```
 
-Флаги `--listen` / `--http` / `--dump` / `--skip-persist-check` и корневые `--addr` / `--password` / `--db` перекрывают файл. Без `--config` используются дефолты портов и Redis из флагов manager.
+Флаги `--listen` / `--http` / `--dump` / `--skip-persist-check` перекрывают файл. Корневые `--addr` / `--password` / `--db` перекрывают секцию `redis` файла, если явно заданы (`IsSet`). Без `--config` — дефолты портов и Redis из флагов manager.
 
 ## HTTP data-plane
 
@@ -179,7 +179,7 @@ _ = conn.Producer("orders").Publish(ctx, &redisqueue.Task{ID: "1", Payload: []by
 |---------|-------------|--------|
 | Publish OK | до `publishOK + window` | append |
 | Ack | publish удаляется | append |
-| Reject | publish не продлевается | append + opts |
+| Reject | publish удаляется (не продлевается и не воскрешается на recover) | append + opts |
 
 ## Heartbeat и stats
 
@@ -194,10 +194,19 @@ Consumer’ы через gateway создаются с `WithPing(false)`. Heartb
 ## Бенчмарк
 
 ```bash
-go test ./gateway -run='^$' -bench='BenchmarkGatewayVsDirect' -benchtime=2s -count=1
+go test ./gateway -run='^$' -bench='BenchmarkGatewayVsDirect' -benchtime=2s -count=3
 ```
 
-Сравнивает in-process gateway API с прямым `Producer`/`Consumer` (payload 256B и 16KB).
+In-process gateway API vs прямой `Producer`/`Consumer` (тот же Redis, без сетевого hop gRPC/HTTP). Замер `2026-11-08`, AMD Ryzen 7 2700, `count=3` (медиана ns/op):
+
+| Сценарий | Direct | Gateway | Отношение | Вывод |
+|----------|--------|---------|-----------|--------|
+| Publish 256B | ~174 µs | ~205 µs | ~1.18× | **ниже** (~15% медленнее) |
+| Publish 16KB | ~242 µs | ~274 µs | ~1.13× | **ниже**, тот же порядок |
+| FullCycle 256B (pub+get+ack) | ~657 µs | ~668 µs | ~1.02× | **та же** |
+| FullCycle 16KB | ~797 µs | ~788 µs | ~0.99× | **та же** |
+
+Пропускная способность data-plane через gateway: для чистого Publish слегка ниже (op-log + loss-window), для полного цикла — в пределах шума / того же порядка. Сетевой gRPC/HTTP hop в бенч не входит.
 
 ## Ограничения / roadmap
 
