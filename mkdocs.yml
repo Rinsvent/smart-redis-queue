@@ -88,6 +88,7 @@ nav:
       - Сжатие и метрики: features/compression-stats.md
       - Step recovery: features/step-recovery.md
       - Headers: features/headers.md
+      - Dead letter queue: features/dlq.md
       - Exchange: features/exchange.md
       - Journal: features/journal.md
   - Архитектура:

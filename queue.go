@@ -16,13 +16,14 @@ import (
 )
 
 // RejectWithDelay — ошибка, при которой Consume делает Reject с теми же опциями.
-// Delay / BlockGroups / BlockTags задаются через RejectOption (WithDelay, …).
+// Delay / BlockGroups / BlockTags / DeadLetter — через RejectOption.
 // Для ordered-партиций (!) дополнительно ставится partition в blocked.
 type RejectWithDelay struct {
 	Err         error
 	Delay       float64
 	BlockGroups []string
 	BlockTags   []string
+	DeadLetter  bool
 }
 
 func (e *RejectWithDelay) Error() string {
@@ -41,6 +42,7 @@ type rejectConfig struct {
 	delay       float64
 	blockGroups []string
 	blockTags   []string
+	deadLetter  bool
 }
 
 // RejectOption — опция Reject / NewRejectWithDelay (порядок любой).
@@ -70,6 +72,14 @@ func WithBlockTags(ids ...string) RejectOption {
 	}
 }
 
+// WithDeadLetter — вместо возврата в очередь положить задачу в queue:{name}:dlq.
+// Meta (payload/partition/…) сохраняется для Admin.RetryDLQ; srq:queues −1.
+func WithDeadLetter() RejectOption {
+	return func(c *rejectConfig) {
+		c.deadLetter = true
+	}
+}
+
 func applyRejectOptions(opts []RejectOption) rejectConfig {
 	cfg := rejectConfig{}
 	for _, opt := range opts {
@@ -81,7 +91,7 @@ func applyRejectOptions(opts []RejectOption) rejectConfig {
 }
 
 // NewRejectWithDelay создаёт ошибку для Consume → Reject.
-// Пример: NewRejectWithDelay(err, WithDelay(2), WithBlockGroups("acct:1"), WithBlockTags("batch:1")).
+// Пример: NewRejectWithDelay(err, WithDelay(2), WithDeadLetter()).
 func NewRejectWithDelay(err error, opts ...RejectOption) *RejectWithDelay {
 	cfg := applyRejectOptions(opts)
 	return &RejectWithDelay{
@@ -89,6 +99,7 @@ func NewRejectWithDelay(err error, opts ...RejectOption) *RejectWithDelay {
 		Delay:       cfg.delay,
 		BlockGroups: cfg.blockGroups,
 		BlockTags:   cfg.blockTags,
+		DeadLetter:  cfg.deadLetter,
 	}
 }
 
@@ -966,12 +977,15 @@ func rejectOptsFromDelay(e *RejectWithDelay) []RejectOption {
 	if len(e.BlockTags) > 0 {
 		opts = append(opts, WithBlockTags(e.BlockTags...))
 	}
+	if e.DeadLetter {
+		opts = append(opts, WithDeadLetter())
+	}
 	return opts
 }
 
-// Reject отклоняет задачу и возвращает её обратно в очередь.
-// Опции (порядок любой): WithDelay, WithBlockGroups, WithBlockTags.
-// При Delay > 0 для ordered-партиций (!) пишется partition в blocked.
+// Reject отклоняет задачу: либо назад в очередь, либо в DLQ (WithDeadLetter).
+// Опции (порядок любой): WithDelay, WithBlockGroups, WithBlockTags, WithDeadLetter.
+// При Delay > 0 для ordered-партиций (!) пишется partition в blocked (и при DLQ).
 func (c *Consumer) Reject(ctx context.Context, taskID string, opts ...RejectOption) error {
 	cfg := applyRejectOptions(opts)
 	groupsStr, err := encodeGroups(cfg.blockGroups)
@@ -992,6 +1006,7 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, opts ...RejectOpti
 		bool01(c.concurrencyTags),
 		bool01(c.extendGroupBlocksOnly),
 		blockTagsStr,
+		bool01(cfg.deadLetter),
 	).Result()
 
 	if err != nil {

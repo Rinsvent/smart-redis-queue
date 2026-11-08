@@ -22,7 +22,7 @@ type ListMessagesOptions struct {
 type MessageView struct {
 	ID          string
 	Partition   string
-	State       string // pending | in_progress | unknown
+	State       string // pending | in_progress | dead_letter | unknown
 	RejectCount int64
 	Step        string
 	Progress    *StepProgressView
@@ -178,6 +178,9 @@ func (a *Admin) taskState(ctx context.Context, queueName, id string) string {
 		if err == nil && n {
 			return "in_progress"
 		}
+	}
+	if _, err := a.redis.ZScore(ctx, dlqKey(queueName), id).Result(); err == nil {
+		return "dead_letter"
 	}
 	if part, err := a.redis.Get(ctx, "queue:"+queueName+":partition:"+id).Result(); err == nil && part != "" {
 		return "pending"

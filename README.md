@@ -29,6 +29,7 @@
 - **Шардинг** — несколько standalone Redis (`ShardByGroup` / `ByManual` / …); см. [docs](https://rinsvent.github.io/smart-redis-queue/sharding/)
 - **Step recovery** — checkpoint шагов handler (`NewSteps` / `Do`); см. [docs](https://rinsvent.github.io/smart-redis-queue/features/step-recovery/)
 - **Headers** — мета между попытками (`SetHeader` / ошибки при Reject); см. [docs](https://rinsvent.github.io/smart-redis-queue/features/headers/)
+- **Dead letter queue** — `WithDeadLetter` → `queue:{name}:dlq`; Admin `ListDLQ` / `RetryDLQ` / `PurgeDLQ`; см. [docs](https://rinsvent.github.io/smart-redis-queue/features/dlq/)
 
 ## Требования
 
@@ -628,9 +629,9 @@ CI (GitHub Actions) на каждый push/PR в `main`: сборка, `go test 
 | `Producer` | Публикация задач |
 | `Consumer` | Один консьюмер (Get/Ack/Reject, Consume, GetChan) |
 | `ConsumerPool` | Пул консьюмеров |
-| `Admin` | Обслуживание: Inspect, QueueOverview/Snapshot (с qp lanes), Purge, Retry, Remove, BlockGroups |
+| `Admin` | Обслуживание: Inspect, QueueOverview/Snapshot (с qp lanes), Purge, Retry, DLQ, Remove, BlockGroups |
 | `Task` | Задача: ID, Partition, PartitionPriority, QueuePriority, Payload, Scheduled, Tags, Groups |
-| `RejectWithDelay` | Ошибка для отложенного reject (`Delay`, `BlockGroups`) |
+| `RejectWithDelay` | Ошибка для отложенного reject (`Delay`, `BlockGroups`, `DeadLetter`) |
 | `HandlerPanicError` | Паника в handler/middleware → Reject (процесс жив) |
 | `HandlerMiddleware` / `Use` | Обертка вокруг handler (логи, Sentry) |
 | `Consumer.BlockGroups` | Парковка групп без задачи |
@@ -642,6 +643,8 @@ CI (GitHub Actions) на каждый push/PR в `main`: сборка, `go test 
 | `Remove(queue, taskID)` | Снять ожидающую задачу по ID. `inprogress` не трогает |
 | `RemoveByTag(queue, tag, opts)` | Снять до `Limit` задач с тегом (default 100, max 1000) |
 | `CountByTag(queue, tag)` | `SCARD` индекса тега |
+| `CountDLQ` / `ListDLQ` | Задачи в dead letter |
+| `RetryDLQ` / `PurgeDLQ` | Вернуть в pending / удалить meta |
 
 Статусы: `removed`, `inprogress`, `missing` (`RemovalStatus*`).
 

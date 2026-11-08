@@ -1291,15 +1291,11 @@ return 1
 
 // getRejectScript возвращает Lua скрипт для отклонения задачи.
 // Возврат в тот же priority с originalScore из consumer:tasks.
-// Так prefetch/reject и dead-reclaim не ломают порядок без priority+1 / reject_seq.
-// При waitTime > 0: ordered → blocked {partition}; группы → score unlockAt в groups.
-// ARGV[1] = queue name
-// ARGV[2] = task ID
-// ARGV[3] = consumer ID
-// ARGV[4] = waitTime в секундах (дробное OK; 0 = без блокировки)
-// ARGV[5] = blockGroups (g1#g2#..., опционально)
-// ARGV[6] = concurrencyTags ("1" / "0") — F5 release race locks
-// ARGV[7] = extendGroupBlocksOnly ("1" / "0") — пауза группы только продлевается (ZADD GT)
+// deadLetter=1 → ZADD queue:{q}:dlq (score=now), meta не чистим; srq:queues −1.
+// При waitTime > 0: ordered → blocked; группы → score unlockAt в groups.
+// ARGV[1]=queue ARGV[2]=taskId ARGV[3]=consumerId ARGV[4]=waitTime
+// ARGV[5]=blockGroups ARGV[6]=concurrencyTags ARGV[7]=extendGroupBlocksOnly
+// ARGV[8]=blockTags ARGV[9]=deadLetter ("1"/"0")
 var rejectScript = redis.NewScript(`
 local queueName = ARGV[1]
 local taskId = ARGV[2]
@@ -1309,6 +1305,7 @@ local blockGroupsStr = ARGV[5] or ""
 local concurrencyTags = (ARGV[6] or "") == "1"
 local extendGroupBlocksOnly = (ARGV[7] or "") == "1"
 local blockTagsStr = ARGV[8] or ""
+local deadLetter = (ARGV[9] or "") == "1"
 
 local consumerTasksKey = "queue:" .. queueName .. ":consumer:" .. consumerId .. ":tasks"
 
@@ -1350,30 +1347,41 @@ local needsLockUnlock = partitionCode:sub(1, 1) == "!"
 local rejectCountKey = "queue:" .. queueName .. ":reject_count:" .. taskId
 redis.call('INCR', rejectCountKey)
 
--- Возвращаем задачу обратно в очередь (тот же qp + partitionPriority + исходный score)
-local partitionQueueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":" .. priority
-redis.call('ZADD', partitionQueueKey, score, taskId)
-local partitionsKey = "queue:" .. queueName .. ":" .. pref .. "partitions"
 local groupsKey = "queue:" .. queueName .. ":groups"
-redis.call('SADD', partitionsKey, partitionCode)
-local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":priorities"
-redis.call('ZADD', prioritiesKey, priority, tostring(priority))
-if queuePriority > 0 then
-	redis.call('ZADD', "queue:" .. queueName .. ":priorities", queuePriority, tostring(queuePriority))
-end
 
--- ready = «есть/была работа». Блок группы — score в groups (не трогаем, если уже > now).
-local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups")
-if #pgroups == 0 then
-	pgroups = {"_default"}
-	redis.call('SADD', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups", "_default")
-end
-for gi = 1, #pgroups do
-	local g = pgroups[gi]
-	if not redis.call('ZSCORE', groupsKey, g) then
-		redis.call('ZADD', groupsKey, 0, g)
+if deadLetter then
+	-- DLQ: единый ZSET, meta (payload/partition/…) оставляем для RetryDLQ
+	redis.call('SET', "queue:" .. queueName .. ":dlq:score:" .. taskId, tostring(score))
+	redis.call('ZADD', "queue:" .. queueName .. ":dlq", nowMs, taskId)
+	local _qd = tonumber(redis.call('ZINCRBY', 'srq:queues', -1, queueName))
+	if _qd < 0 then
+		redis.call('ZADD', 'srq:queues', 0, queueName)
 	end
-	redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", 0, partitionCode)
+else
+	-- Возвращаем задачу обратно в очередь (тот же qp + partitionPriority + исходный score)
+	local partitionQueueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":" .. priority
+	redis.call('ZADD', partitionQueueKey, score, taskId)
+	local partitionsKey = "queue:" .. queueName .. ":" .. pref .. "partitions"
+	redis.call('SADD', partitionsKey, partitionCode)
+	local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":priorities"
+	redis.call('ZADD', prioritiesKey, priority, tostring(priority))
+	if queuePriority > 0 then
+		redis.call('ZADD', "queue:" .. queueName .. ":priorities", queuePriority, tostring(queuePriority))
+	end
+
+	-- ready = «есть/была работа». Блок группы — score в groups (не трогаем, если уже > now).
+	local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups")
+	if #pgroups == 0 then
+		pgroups = {"_default"}
+		redis.call('SADD', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups", "_default")
+	end
+	for gi = 1, #pgroups do
+		local g = pgroups[gi]
+		if not redis.call('ZSCORE', groupsKey, g) then
+			redis.call('ZADD', groupsKey, 0, g)
+		end
+		redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", 0, partitionCode)
+	end
 end
 
 -- :count / :lock только для ordered (!)
@@ -1425,12 +1433,12 @@ end
 
 -- Удаляем задачу из hash консьюмера (prefetch)
 redis.call('HDEL', consumerTasksKey, taskId)
--- F2: снова в ZSET → снять флаг только для deb! id
+-- F2: снять debounce-флаг (и при DLQ, и при возврате)
 local debPrefix = "deb!"
 if taskId:sub(1, #debPrefix) == debPrefix then
 	redis.call('DEL', "queue:" .. queueName .. ":debounce:" .. taskId)
 end
--- F5: снять race locks (задача снова waiting; race:tags оставляем)
+-- F5: снять race locks (race:tags оставляем — meta жива)
 if concurrencyTags then
 	local raceLocksKey = "queue:" .. queueName .. ":race:locks"
 	local raceTagsKey = "queue:" .. queueName .. ":race:tags:" .. taskId

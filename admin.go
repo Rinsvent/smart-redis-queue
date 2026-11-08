@@ -1023,61 +1023,17 @@ func (a *Admin) Retry(ctx context.Context, queueName string) (int, error) {
 }
 
 func (a *Admin) returnTaskToQueue(ctx context.Context, queueName, taskID, consumerID string) error {
-	partitionKey := "queue:" + queueName + ":partition:" + taskID
-	partition, err := a.redis.Get(ctx, partitionKey).Result()
-	if err == redis.Nil {
-		return fmt.Errorf("task %s: partition not found", taskID)
-	}
-	if err != nil {
-		return err
-	}
-
-	priorityKey := "queue:" + queueName + ":priority:" + taskID
-	priorityStr, _ := a.redis.Get(ctx, priorityKey).Result()
-	if priorityStr == "" {
-		priorityStr = "0"
-	}
-	priorityNum, _ := strconv.ParseFloat(priorityStr, 64)
-
-	pref := ""
-	qpStr, _ := a.redis.Get(ctx, "queue:"+queueName+":qpriority:"+taskID).Result()
-	if qpStr != "" && qpStr != "0" {
-		if qpNum, err := strconv.ParseFloat(qpStr, 64); err == nil && qpNum > 0 {
-			pref = "qp" + qpStr + ":"
-			a.redis.ZAdd(ctx, "queue:"+queueName+":priorities", redis.Z{Score: qpNum, Member: qpStr})
-		}
-	}
-
-	now, _ := a.redis.Time(ctx).Result()
-	score := float64(now.UnixMilli())
+	score := a.nowMs(ctx)
 	// meta = original ZSET score (после Get); иначе now
 	if meta, err := a.redis.HGet(ctx, "queue:"+queueName+":consumer:"+consumerID+":tasks", taskID).Result(); err == nil {
 		if s, err := strconv.ParseFloat(meta, 64); err == nil {
 			score = s
 		}
 	}
-
-	partitionQueueKey := "queue:" + queueName + ":" + pref + "partition:" + partition + ":" + priorityStr
-	a.redis.ZAdd(ctx, partitionQueueKey, redis.Z{Score: score, Member: taskID})
-	prioritiesKey := "queue:" + queueName + ":" + pref + "partition:" + partition + ":priorities"
-	a.redis.ZAdd(ctx, prioritiesKey, redis.Z{Score: priorityNum, Member: priorityStr})
-	a.redis.SAdd(ctx, "queue:"+queueName+":"+pref+"partitions", partition)
-
-	// Get мог снять пустую партицию с groups/ready — восстанавливаем.
-	groupsKey := "queue:" + queueName + ":groups"
-	pgroupsKey := "queue:" + queueName + ":partition:" + partition + ":groups"
-	pgroups, _ := a.redis.SMembers(ctx, pgroupsKey).Result()
-	if len(pgroups) == 0 {
-		pgroups = []string{DefaultGroup}
-		a.redis.SAdd(ctx, pgroupsKey, DefaultGroup)
+	if err := a.enqueuePending(ctx, queueName, taskID, score); err != nil {
+		return err
 	}
-	for _, g := range pgroups {
-		if _, err := a.redis.ZScore(ctx, groupsKey, g).Result(); err == redis.Nil {
-			a.redis.ZAdd(ctx, groupsKey, redis.Z{Score: 0, Member: g})
-		}
-		a.redis.ZAdd(ctx, "queue:"+queueName+":"+pref+"group:"+g+":ready", redis.Z{Score: 0, Member: partition})
-	}
-
+	partition, _ := a.redis.Get(ctx, "queue:"+queueName+":partition:"+taskID).Result()
 	if len(partition) > 0 && partition[0] == '!' {
 		countKey := "queue:" + queueName + ":consumer:" + consumerID + ":partition:" + partition + ":count"
 		a.redis.Del(ctx, countKey)

@@ -87,7 +87,7 @@
 | `SetConcurrencyTags` | `race!` / `race!s!` / `race!b!` |
 | `Ack` / `WithIdempotency` / `WithShared` / `WithOpenBlocks` / `WithSharedTTL` | завершение + Shared / open gate |
 | `NewShared` / `Shared.Publish` / `Shared.Open` | mid-handler shared blob / `race!b!` ready |
-| `Reject` / `WithDelay` / `WithBlockGroups` / `WithBlockTags` | reject + парк groups / `race!b!` |
+| `Reject` / `WithDelay` / `WithBlockGroups` / `WithBlockTags` / `WithDeadLetter` | reject + парк groups / `race!b!` / DLQ |
 | `RaceSharedTag` / `RaceBlockTag` / `Task.Shared` / `SetAckShared` / `SetAckOpenBlocks` | теги / Get blob / Consume→Ack |
 | `NewSteps` / `NewStepsRaw` / `Do` / `Begin` / `End` / `Progress` / `Commit` / `Last` / `LastProgress` / `LastCursor` / `Release` / `SetStepControl` / `ParseStepCheckpoint` | Step recovery + progress (`name#3/?:cur@ms[!pause]`); см. [доку](../features/step-recovery.md) |
 | `Task.Headers` / `SetHeader` / `SetHeaders` | Мета между попытками |
@@ -100,7 +100,7 @@
 
 ## Admin
 
-`ListQueues`, `ListQueueIndex`, `QueueDepth`, `QueueDepthIfIndexed`, `RebuildQueueDepth`, `Inspect`, `QueueOverview`, `QueueSnapshot`, `ListPartitions`, `ListBlockedPartitions`, `ListLockedPartitions`, `ListGroups`, `ListBlockedGroups`, `ListRaceLocks`, `ScanTopPending`, `ScanHighReject`, `ListTags`, `CountTags`, `ListMessages`, `InspectTask`, `SetTaskStepControl`, `BlockGroups`, `BlockPartition`, `UnblockPartition`, `Remove`, `RemoveByTag`, `CountByTag`, `Purge`, `Retry`, `QueueStatsBounds`, `ListQueueStats`.
+`ListQueues`, `ListQueueIndex`, `QueueDepth`, `QueueDepthIfIndexed`, `RebuildQueueDepth`, `Inspect`, `QueueOverview`, `QueueSnapshot`, `ListPartitions`, `ListBlockedPartitions`, `ListLockedPartitions`, `ListGroups`, `ListBlockedGroups`, `ListRaceLocks`, `ScanTopPending`, `ScanHighReject`, `ListTags`, `CountTags`, `ListMessages`, `InspectTask`, `SetTaskStepControl`, `BlockGroups`, `BlockPartition`, `UnblockPartition`, `Remove`, `RemoveByTag`, `CountByTag`, `Purge`, `Retry`, `CountDLQ`, `ListDLQ`, `RetryDLQ`, `PurgeDLQ`, `QueueStatsBounds`, `ListQueueStats`.
 
 `QueueOverview` / `ListPartitions` / `ListGroups` / `ScanTopPending` учитывают **qp lanes** (`QueuePriority` > 0). `QueueSnapshot` — снимок для gauges: чаты, паузы (partition + group), группы с работой, oldest ready по приоритету.
 

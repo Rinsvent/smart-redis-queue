@@ -49,6 +49,8 @@
 | `block:{id}` | STRING | Wait-gate `race!b!{id}`: wait / `ready` (+ EXPIRE) |
 | `rl:g:*` / `rl:p:*` | — | Состояние rate limit на Get |
 | `tag:{tag}` | SET | Индекс задач по тегу |
+| `dlq` | ZSET | Dead letter; score = ms попадания. Reject `WithDeadLetter`; meta не чистим |
+| `dlq:score:{id}` | STRING | Исходный ZSET score для RetryDLQ |
 | `stats:{sec}` | HASH | get/ack/reject (+ теги) |
 | `stats:index` | ZSET | Индекс секунд stats |
 

@@ -21,6 +21,7 @@
 | Step recovery | Checkpoint шагов handler (`NewSteps`) + progress | [Step recovery](step-recovery.md) |
 | Tasks | Каталог команд, cron, last-run, pause/stop (рядом с очередью) | [Tasks](tasks.md) |
 | Headers | Мета между попытками (ошибки и т.п.) | [Headers](headers.md) |
+| Dead letter (`WithDeadLetter`) | Терминальный сбой → `queue:{name}:dlq`; Admin Retry/Purge | [DLQ](dlq.md) |
 | Exchange | direct / fanout / topic → копии в N очередей | [Exchange](exchange.md) |
 | Journal | Durable ingress (kafka/pg/mongo) + recovery | [Journal](journal.md) |
 
