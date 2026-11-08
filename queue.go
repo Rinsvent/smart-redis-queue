@@ -467,6 +467,7 @@ type Consumer struct {
 	dlqMaxSize                  int // дефолт для WithDeadLetter(); 0 = без лимита
 	middlewares                 []HandlerMiddleware
 	stopPing                    chan struct{}
+	enablePing                  bool // дефолт true; WithPing(false) для gateway
 	stats                       *StatsSink
 	statsOwn                    bool // true — Close останавливает stats loop
 	journalAck                  func(ctx context.Context, taskID string) error
@@ -475,19 +476,10 @@ type Consumer struct {
 	faultAt                     time.Time
 }
 
-// NewConsumer создает нового консьюмера и запускает ping горутину.
-// consumerID — идентификатор консьюмера; если пустая строка — генерируется автоматически.
-func NewConsumer(redisClient *redis.Client, queueName string, consumerID string) *Consumer {
-	return newConsumer(redisClient, queueName, consumerID, true)
-}
-
-// NewConsumerNoPing — consumer без pingLoop (gateway централизует heartbeat / Redis probe).
-func NewConsumerNoPing(redisClient *redis.Client, queueName string, consumerID string) *Consumer {
-	return newConsumer(redisClient, queueName, consumerID, false)
-}
-
-// newConsumer создает консьюмера. startPing — запускать ли pingLoop (для тестов можно false).
-func newConsumer(redisClient *redis.Client, queueName string, consumerID string, startPing bool) *Consumer {
+// NewConsumer создаёт consumer. consumerID пустой → генерируется.
+// Опции: WithPing, WithPrefetchCount, WithRateLimit, … (см. consumer_opts.go).
+// Без opts — как раньше (ping включён).
+func NewConsumer(redisClient *redis.Client, queueName string, consumerID string, opts ...ConsumerOption) *Consumer {
 	if consumerID == "" {
 		consumerID = generateConsumerID()
 	}
@@ -500,17 +492,27 @@ func newConsumer(redisClient *redis.Client, queueName string, consumerID string,
 		checkDeadConsumerLocksOnGet: false,
 		idempotencyTtl:              0,
 		stopPing:                    make(chan struct{}),
+		enablePing:                  true,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(c)
+		}
 	}
 	_ = EnsureQueue(context.Background(), redisClient, queueName)
 
-	if startPing {
+	if c.enablePing {
 		ctx := context.Background()
 		c.ping(ctx)
-
 		go c.pingLoop()
 	}
 
 	return c
+}
+
+// newConsumer — совместимость тестов; предпочитать NewConsumer(..., WithPing(startPing)).
+func newConsumer(redisClient *redis.Client, queueName string, consumerID string, startPing bool) *Consumer {
+	return NewConsumer(redisClient, queueName, consumerID, WithPing(startPing))
 }
 
 // ConsumerID возвращает идентификатор консьюмера
@@ -539,6 +541,7 @@ func (c *Consumer) ensureStats() *StatsSink {
 }
 
 // SetStatsRetention включает запись g/a/r (+ sample тегов) с TTL точек. 0 = выкл (default).
+// Deprecated: NewConsumer(..., WithStatsRetention(d)).
 func (c *Consumer) SetStatsRetention(d time.Duration) {
 	s := c.ensureStats()
 	s.setRetention(d)
@@ -549,16 +552,19 @@ func (c *Consumer) SetStatsRetention(d time.Duration) {
 
 // SetTagsStats — теги для секундного SCARD-сэмпла в Redis (поле t:{tag}). Пусто = только g/a/r.
 // Метрики должны быть включены через SetStatsRetention.
+// Deprecated: NewConsumer(..., WithTagsStats(...)).
 func (c *Consumer) SetTagsStats(tags ...string) {
 	c.ensureStats().setTags(tags)
 }
 
-// SetPollInterval задает интервал ожидания при отсутствии задач в очереди
+// SetPollInterval задает интервал ожидания при отсутствии задач в очереди.
+// Deprecated: NewConsumer(..., WithPollInterval(d)).
 func (c *Consumer) SetPollInterval(d time.Duration) {
 	c.pollInterval = d
 }
 
-// SetPrefetchCount задает количество задач для предзагрузки (по умолчанию 5)
+// SetPrefetchCount задает количество задач для предзагрузки (по умолчанию 5).
+// Deprecated: NewConsumer(..., WithPrefetchCount(n)).
 func (c *Consumer) SetPrefetchCount(n int) {
 	if n < 1 {
 		n = 1
@@ -566,7 +572,8 @@ func (c *Consumer) SetPrefetchCount(n int) {
 	c.prefetchCount = n
 }
 
-// SetCheckDeadConsumerLocksOnGet флаг проверки блокировок при get
+// SetCheckDeadConsumerLocksOnGet флаг проверки блокировок при get.
+// Deprecated: NewConsumer(..., WithCheckDeadConsumerLocksOnGet(cd)).
 func (c *Consumer) SetCheckDeadConsumerLocksOnGet(cd bool) {
 	c.checkDeadConsumerLocksOnGet = cd
 }
@@ -574,6 +581,7 @@ func (c *Consumer) SetCheckDeadConsumerLocksOnGet(cd bool) {
 // SetSamePartitionBatch — Get набирает пачку из одной партиции: первая задача выбирается как обычно
 // (случайная свободная группа и партиция), остальные до prefetchCount — только из её партиции.
 // Готовых задач в партиции меньше — пачка меньше, без ожидания. По умолчанию выключено.
+// Deprecated: NewConsumer(..., WithSamePartitionBatch(enabled)).
 func (c *Consumer) SetSamePartitionBatch(enabled bool) {
 	c.samePartitionBatch = enabled
 }
@@ -581,6 +589,7 @@ func (c *Consumer) SetSamePartitionBatch(enabled bool) {
 // SetExtendGroupBlocksOnly — Reject с blockGroups и BlockGroups только продлевают паузу группы
 // (ZADD GT, Redis >= 6.2): параллельные отказы с коротким waitTime не сокращают уже стоящую
 // длинную паузу. По умолчанию выключено — каждый вызов перезаписывает unlockAt.
+// Deprecated: NewConsumer(..., WithExtendGroupBlocksOnly(enabled)).
 func (c *Consumer) SetExtendGroupBlocksOnly(enabled bool) {
 	c.extendGroupBlocksOnly = enabled
 }
@@ -588,6 +597,7 @@ func (c *Consumer) SetExtendGroupBlocksOnly(enabled bool) {
 // SetDLQMaxSize — дефолтная ёмкость DLQ для WithDeadLetter() без аргумента
 // и лимит дочистки в ping (ARGV, без ключа в Redis).
 // 0 (дефолт) — без лимита. >0 — вытеснение старых при Reject→DLQ (+ батчи в ping).
+// Deprecated: NewConsumer(..., WithDLQMaxSize(n)).
 func (c *Consumer) SetDLQMaxSize(n int) {
 	if n < 0 {
 		n = 0
@@ -597,6 +607,7 @@ func (c *Consumer) SetDLQMaxSize(n int) {
 
 // SetIdempotencyTtl — окно dedupe после успешного Ack: payload:{id} живёт TTL, повторный Publish с тем же ID отклоняется (NX).
 // Это не rate limit: ограничивает только повтор того же ID. 0 (дефолт) — сразу удалять ключ после Ack.
+// Deprecated: NewConsumer(..., WithIdempotencyTTL(n)).
 func (c *Consumer) SetIdempotencyTtl(n time.Duration) {
 	if n < 0 {
 		n = 0
@@ -773,16 +784,19 @@ func (c *Consumer) ping(ctx context.Context) error {
 }
 
 // SetJournalAck вызывается после успешного SRQ Ack (ретраи — на стороне колбэка).
+// Deprecated: NewConsumer(..., WithJournalAck(fn)).
 func (c *Consumer) SetJournalAck(fn func(ctx context.Context, taskID string) error) {
 	c.journalAck = fn
 }
 
 // SetAfterAck вызывается после успешного SRQ Ack (и после journalAck, если задан).
+// Deprecated: NewConsumer(..., WithAfterAck(fn)).
 func (c *Consumer) SetAfterAck(fn func(ctx context.Context, taskID string) error) {
 	c.afterAck = fn
 }
 
 // SetEmergencyResume — ждать srq:resume_after после ошибки Redis, похожей на потерю состояния.
+// Deprecated: NewConsumer(..., WithEmergencyResume(on)).
 func (c *Consumer) SetEmergencyResume(on bool) {
 	c.emergencyResume = on
 }

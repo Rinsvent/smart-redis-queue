@@ -18,13 +18,13 @@ type Conn struct {
 	api gatewayv1.GatewayClient
 }
 
-// Dial подключается к gateway (например "127.0.0.1:50051").
+// Dial подключается к gateway gRPC (например "127.0.0.1:50051"), не к HTTP ops.
 func Dial(ctx context.Context, addr string) (*Conn, error) {
 	cc, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return nil, err
 	}
-	_ = ctx // reserved for dial deadline / future options
+	_ = ctx
 	return &Conn{cc: cc, api: gatewayv1.NewGatewayClient(cc)}, nil
 }
 
@@ -93,25 +93,76 @@ func (c *Consumer) Get(ctx context.Context) ([]*redisqueue.Task, error) {
 	return out, nil
 }
 
-func (c *Consumer) Ack(ctx context.Context, taskID string) error {
-	_, err := c.conn.api.Ack(ctx, &gatewayv1.AckRequest{
+// Ack подтверждает задачу. Опции зеркалят gateway AckRequest.
+func (c *Consumer) Ack(ctx context.Context, taskID string, opts ...AckOption) error {
+	req := &gatewayv1.AckRequest{
 		Queue:      c.queue,
 		ConsumerId: c.consumerID,
 		TaskId:     taskID,
-	})
+	}
+	for _, o := range opts {
+		o(req)
+	}
+	_, err := c.conn.api.Ack(ctx, req)
 	return err
 }
 
-func (c *Consumer) Reject(ctx context.Context, taskID string, delay float64, deadLetter bool) error {
-	_, err := c.conn.api.Reject(ctx, &gatewayv1.RejectRequest{
+// Reject отклоняет задачу.
+func (c *Consumer) Reject(ctx context.Context, taskID string, opts ...RejectOption) error {
+	req := &gatewayv1.RejectRequest{
 		Queue:         c.queue,
 		ConsumerId:    c.consumerID,
 		TaskId:        taskID,
-		Delay:         delay,
-		DeadLetter:    deadLetter,
 		DeadLetterMax: -1,
-	})
+	}
+	for _, o := range opts {
+		o(req)
+	}
+	_, err := c.conn.api.Reject(ctx, req)
 	return err
+}
+
+type AckOption func(*gatewayv1.AckRequest)
+
+func WithIdempotencyTTL(sec float64) AckOption {
+	return func(r *gatewayv1.AckRequest) { r.IdempotencyTtlSec = sec }
+}
+
+func WithShared(shared map[string][]byte) AckOption {
+	return func(r *gatewayv1.AckRequest) { r.Shared = shared }
+}
+
+func WithSharedTTL(sec float64) AckOption {
+	return func(r *gatewayv1.AckRequest) { r.SharedTtlSec = sec }
+}
+
+func WithOpenBlocks(ids ...string) AckOption {
+	return func(r *gatewayv1.AckRequest) { r.OpenBlocks = append(r.OpenBlocks, ids...) }
+}
+
+type RejectOption func(*gatewayv1.RejectRequest)
+
+func WithDelay(sec float64) RejectOption {
+	return func(r *gatewayv1.RejectRequest) { r.Delay = sec }
+}
+
+func WithBlockGroups(groups ...string) RejectOption {
+	return func(r *gatewayv1.RejectRequest) { r.BlockGroups = append(r.BlockGroups, groups...) }
+}
+
+func WithBlockTags(tags ...string) RejectOption {
+	return func(r *gatewayv1.RejectRequest) { r.BlockTags = append(r.BlockTags, tags...) }
+}
+
+func WithDeadLetter(maxSize ...int) RejectOption {
+	return func(r *gatewayv1.RejectRequest) {
+		r.DeadLetter = true
+		if len(maxSize) == 0 {
+			r.DeadLetterMax = -1
+			return
+		}
+		r.DeadLetterMax = int32(maxSize[0])
+	}
 }
 
 func taskToProto(t *redisqueue.Task) *gatewayv1.Task {

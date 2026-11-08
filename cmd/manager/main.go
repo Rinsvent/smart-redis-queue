@@ -139,16 +139,17 @@ func main() {
 				Action: runServer,
 			},
 			{
-				Name:  "serve",
-				Usage: "SRQ Gateway: gRPC data-plane перед Redis (single-active). Admin UI по-прежнему ходит в Redis напрямую.",
+				Name:  "gateway",
+				Usage: "SRQ Gateway: gRPC data-plane + HTTP ops. Admin UI ходит в Redis напрямую (не через gateway).",
 				Flags: []cli.Flag{
 					&cli.StringFlag{
 						Name:    "listen",
 						Aliases: []string{"l"},
 						Value:   "127.0.0.1:50051",
-						Usage:   "gRPC listen host:port",
+						Usage:   "gRPC data-plane listen host:port",
 						Sources: cli.EnvVars("SRQ_GATEWAY_LISTEN"),
 					},
+					gatewayHTTPFlag(),
 					&cli.StringFlag{
 						Name:    "dump",
 						Value:   "",
@@ -160,7 +161,21 @@ func main() {
 						Usage: "не проверять appendonly/appendfsync (только dev/test)",
 					},
 				},
-				Action: runServe,
+				Action: runGateway,
+				Commands: []*cli.Command{
+					{
+						Name:   "status",
+						Usage:  "Статус работающего gateway (HTTP GET /api/overview)",
+						Flags:  []cli.Flag{gatewayHTTPFlag()},
+						Action: runGatewayStatus,
+					},
+					{
+						Name:   "stop",
+						Usage:  "Graceful stop (HTTP POST /api/shutdown → drain+dump)",
+						Flags:  []cli.Flag{gatewayHTTPFlag()},
+						Action: runGatewayStop,
+					},
+				},
 			},
 		}, demoCommands()...),
 	}

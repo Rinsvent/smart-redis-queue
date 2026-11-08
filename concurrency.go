@@ -78,6 +78,7 @@ func NormalizeRaceBlockID(idOrTag string) string {
 // SetConcurrencyTags включает проверку race!-тегов в Get (и release в Ack/Reject/Share).
 // Выкл (дефолт) — ноль доп. redis.call на горячем пути. Ping-reclaim снимает
 // чужие race-локи всегда (редкий путь, иначе утечка после смерти consumer).
+// Deprecated: NewConsumer(..., WithConcurrencyTags(enabled)).
 func (c *Consumer) SetConcurrencyTags(enabled bool) {
 	c.concurrencyTags = enabled
 }

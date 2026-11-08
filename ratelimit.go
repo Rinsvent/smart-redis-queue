@@ -103,6 +103,7 @@ func appendLayerRates(args []interface{}, l *RateLimitLayer) []interface{} {
 
 // SetRateLimit включает транспортный rate limit на Get (group и/или partition).
 // nil или пустые слои — выключить. Копия конфига; изменение cfg после вызова не влияет.
+// Deprecated: NewConsumer(..., WithRateLimit(cfg)); для ошибки валидации SetRateLimit всё ещё удобен.
 func (c *Consumer) SetRateLimit(cfg *RateLimitConfig) error {
 	if cfg == nil || !cfg.enabled() {
 		c.rateLimit = nil

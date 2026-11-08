@@ -15,7 +15,8 @@ import (
 // Config — параметры Gateway.
 type Config struct {
 	Redis      *redis.Client
-	ListenAddr string // host:port for gRPC
+	ListenAddr string // host:port gRPC data-plane
+	HTTPAddr   string // host:port HTTP ops; empty = без HTTP
 	DumpPath   string // graceful dump path; empty = no dump
 	// SkipPersistCheck — только для тестов (miniredis / no AOF).
 	SkipPersistCheck bool
@@ -183,7 +184,7 @@ func (g *Gateway) consumer(queue, consumerID string) *redisqueue.Consumer {
 		return c
 	}
 	// startPing=false: heartbeat централизуем позже; пока без лишнего ping на каждый SDK consumer.
-	c := redisqueue.NewConsumerNoPing(g.cfg.Redis, queue, consumerID)
+	c := redisqueue.NewConsumer(g.cfg.Redis, queue, consumerID, redisqueue.WithPing(false))
 	g.consumers[key] = c
 	return c
 }

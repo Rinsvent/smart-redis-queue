@@ -48,18 +48,12 @@ func (w *lossWindow) onAckOK(taskID string) {
 	w.mu.Unlock()
 }
 
-// onRejectOK — продлеваем retention publish (нужен для Publish→Reject replay).
+// onRejectOK — no-op для retention publish: окно от publishOK; после истечения
+// Redis уже на диске, повторно грузить publish не нужно. Reject живёт в op-log
+// до своего окна truncation (replay Reject, если Redis потерял только Reject).
 func (w *lossWindow) onRejectOK(taskID string, at time.Time) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	e, ok := w.byID[taskID]
-	if !ok {
-		return
-	}
-	until := at.Add(w.window)
-	if until.After(e.RetainUntil) {
-		e.RetainUntil = until
-	}
+	_ = taskID
+	_ = at
 }
 
 func (w *lossWindow) truncate(now time.Time) {

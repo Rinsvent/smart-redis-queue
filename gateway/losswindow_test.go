@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestLossWindow_AckDropsRejectRetains(t *testing.T) {
+func TestLossWindow_AckDropsRejectDoesNotExtend(t *testing.T) {
 	w := newLossWindow(time.Second)
 	now := time.Now()
 	rec := PublishRec{ID: "t1", Payload: []byte("x")}
@@ -18,11 +18,11 @@ func TestLossWindow_AckDropsRejectRetains(t *testing.T) {
 	assert.Equal(t, 0, w.len())
 
 	w.onPublishOK("q", rec, now)
+	until := w.snapshot()[0].RetainUntil
 	w.onRejectOK("t1", now.Add(500*time.Millisecond))
 	assert.Equal(t, 1, w.len())
-	snap := w.snapshot()
-	assert.True(t, snap[0].RetainUntil.After(now.Add(time.Second)))
+	assert.Equal(t, until, w.snapshot()[0].RetainUntil, "Reject must not extend publish retention")
 
-	w.truncate(snap[0].RetainUntil.Add(time.Millisecond))
+	w.truncate(until.Add(time.Millisecond))
 	assert.Equal(t, 0, w.len())
 }
