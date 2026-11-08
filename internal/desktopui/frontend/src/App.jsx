@@ -147,6 +147,7 @@ const VIEW_MODES = [
   { id: 'groups', label: 'Groups' },
   { id: 'tags', label: 'Tags' },
   { id: 'messages', label: 'Messages' },
+  { id: 'dlq', label: 'DLQ' },
   { id: 'tasks', label: 'Tasks' },
 ]
 
@@ -465,9 +466,11 @@ export default function App() {
         ? 'Filter tags (glob * ?)'
         : viewMode === 'messages'
           ? 'Task id / substring (exact id = one row)'
-          : viewMode === 'tasks'
-            ? 'Filter task names'
-            : 'Filter partitions (glob * ?)'
+          : viewMode === 'dlq'
+            ? 'DLQ list (no filter)'
+            : viewMode === 'tasks'
+              ? 'Filter task names'
+              : 'Filter partitions (glob * ?)'
 
   const loadConnections = useCallback(async () => {
     try {
@@ -575,6 +578,11 @@ export default function App() {
         const r = await api.listMessages(q, db, tag, filter)
         nextRows = r?.messages || []
         nextTotal = nextRows.length
+        nextTrunc = !!r?.truncated
+      } else if (mode === 'dlq') {
+        const r = await api.listDLQ(q, db)
+        nextRows = r?.entries || []
+        nextTotal = r?.count || nextRows.length
         nextTrunc = !!r?.truncated
       } else if (mode === 'tasks') {
         const r = await api.listRegistryTasks(q, db, filter)
@@ -1750,6 +1758,57 @@ export default function App() {
                           )}
                         />
                       )}
+                      {viewMode === 'dlq' && (
+                        <>
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            disabled={!selectedQueue || tableRows.length === 0}
+                            onClick={() => {
+                              setConfirm({
+                                title: `Retry all DLQ in ${selectedQueue}?`,
+                                body: `${listTotal || tableRows.length} task(s) back to pending`,
+                                action: async () => {
+                                  try {
+                                    const n = await api.retryDLQ(selectedQueue, activeDb, [])
+                                    notify(`Retried ${n} from DLQ`, 'success')
+                                    loadList()
+                                  } catch (e) {
+                                    notify(String(e), 'error')
+                                  }
+                                },
+                              })
+                            }}
+                            sx={{ flexShrink: 0 }}
+                          >
+                            Retry all
+                          </Button>
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            color="warning"
+                            disabled={!selectedQueue || tableRows.length === 0}
+                            onClick={() => {
+                              setConfirm({
+                                title: `Purge all DLQ in ${selectedQueue}?`,
+                                body: `Delete ${listTotal || tableRows.length} dead-letter task(s)`,
+                                action: async () => {
+                                  try {
+                                    const n = await api.purgeDLQ(selectedQueue, activeDb, [])
+                                    notify(`Purged ${n} from DLQ`, 'success')
+                                    loadList()
+                                  } catch (e) {
+                                    notify(String(e), 'error')
+                                  }
+                                },
+                              })
+                            }}
+                            sx={{ flexShrink: 0 }}
+                          >
+                            Purge all
+                          </Button>
+                        </>
+                      )}
                       {viewMode === 'tasks' && (
                         <Button
                           size="small"
@@ -2127,6 +2186,95 @@ export default function App() {
                                   >
                                     <VisibilityOutlinedIcon fontSize="small" />
                                   </IconButton>
+                                </TableCell>
+                              </TableRow>
+                            ))
+                          )}
+                        </TableBody>
+                      </Table>
+                    )}
+
+                    {obsMode === 'list' && viewMode === 'dlq' && (
+                      <Table size="small" stickyHeader>
+                        <TableHead>
+                          <TableRow>
+                            <TableCell>ID</TableCell>
+                            <TableCell>Partition</TableCell>
+                            <TableCell align="right">Reject</TableCell>
+                            <TableCell>Dead at</TableCell>
+                            <TableCell align="right">Actions</TableCell>
+                          </TableRow>
+                        </TableHead>
+                        <TableBody>
+                          {tableRows.length === 0 ? (
+                            <TableRow>
+                              <TableCell colSpan={5}>
+                                <Typography variant="body2" color="text.secondary">
+                                  {listLoading ? 'Loading…' : 'DLQ empty'}
+                                </Typography>
+                              </TableCell>
+                            </TableRow>
+                          ) : (
+                            tableRows.map((m) => (
+                              <TableRow key={m.id}>
+                                <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                                  {m.id}
+                                </TableCell>
+                                <TableCell sx={{ fontFamily: 'ui-monospace, monospace', fontSize: 12 }}>
+                                  {m.partition || '—'}
+                                </TableCell>
+                                <TableCell align="right">{m.rejectCount || 0}</TableCell>
+                                <TableCell sx={{ fontSize: 12 }}>
+                                  {m.deadLetterAtMs
+                                    ? new Date(m.deadLetterAtMs).toISOString()
+                                    : '—'}
+                                </TableCell>
+                                <TableCell align="right">
+                                  <Stack direction="row" spacing={0.5} justifyContent="flex-end">
+                                    <IconButton
+                                      size="small"
+                                      onClick={() => {
+                                        setPayloadId(m.id)
+                                        setPayloadResult(null)
+                                        setPayloadOpen(true)
+                                        api
+                                          .getTaskPayload(selectedQueue, m.id, activeDb)
+                                          .then(setPayloadResult)
+                                          .catch((e) => notify(String(e), 'error'))
+                                      }}
+                                    >
+                                      <VisibilityOutlinedIcon fontSize="small" />
+                                    </IconButton>
+                                    <Button
+                                      size="small"
+                                      onClick={async () => {
+                                        try {
+                                          const n = await api.retryDLQ(selectedQueue, activeDb, [m.id])
+                                          notify(`Retried ${n}`, 'success')
+                                          loadList()
+                                        } catch (e) {
+                                          notify(String(e), 'error')
+                                        }
+                                      }}
+                                    >
+                                      Retry
+                                    </Button>
+                                    <Button
+                                      size="small"
+                                      color="warning"
+                                      onClick={async () => {
+                                        try {
+                                          const n = await api.purgeDLQ(selectedQueue, activeDb, [m.id])
+                                          notify(`Purged ${n}`, 'success')
+                                          loadList()
+                                        } catch (e) {
+                                          notify(String(e), 'error')
+                                        }
+                                      }}
+                                    >
+                                      Purge
+                                    </Button>
+                                  </Stack>
                                 </TableCell>
                               </TableRow>
                             ))

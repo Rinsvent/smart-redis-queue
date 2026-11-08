@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS %s (
     task_id        TEXT NOT NULL UNIQUE,
     partition      TEXT NOT NULL DEFAULT '',
     priority       INT NOT NULL DEFAULT 0,
+    queue_priority INT NOT NULL DEFAULT 0,
     payload        BYTEA NOT NULL,
     tags           TEXT[] NOT NULL DEFAULT '{}',
     groups         TEXT[] NOT NULL DEFAULT '{}',
@@ -65,11 +66,12 @@ CREATE TABLE IF NOT EXISTS %s (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     acked_at       TIMESTAMPTZ
 );
+ALTER TABLE %s ADD COLUMN IF NOT EXISTS queue_priority INT NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS %s_due ON %s (scheduled)
     WHERE state = '%s' AND acked_at IS NULL;
 CREATE INDEX IF NOT EXISTS %s_ready ON %s (journal_offset)
     WHERE state = '%s' AND acked_at IS NULL AND journal_offset IS NOT NULL;
-`, seq, t, journal.StateReady, t, t, journal.StateScheduled, t, t, journal.StateReady))
+`, seq, t, journal.StateReady, t, t, t, journal.StateScheduled, t, t, journal.StateReady))
 	return err
 }
 
@@ -124,8 +126,8 @@ func (s *Source) Insert(ctx context.Context, tasks ...*redisqueue.Task) error {
 		return err
 	}
 	b := &pgx.Batch{}
-	q := fmt.Sprintf(`INSERT INTO %s (journal_offset, state, task_id, partition, priority, payload, tags, groups, scheduled)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) ON CONFLICT (task_id) DO NOTHING`, pgIdent(s.table))
+	q := fmt.Sprintf(`INSERT INTO %s (journal_offset, state, task_id, partition, priority, queue_priority, payload, tags, groups, scheduled)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) ON CONFLICT (task_id) DO NOTHING`, pgIdent(s.table))
 	var dueI int64
 	for _, it := range items {
 		tags, groups := it.t.Tags, it.t.Groups
@@ -143,7 +145,7 @@ func (s *Source) Insert(ctx context.Context, tasks ...*redisqueue.Task) error {
 			off = v
 			state = journal.StateReady
 		}
-		b.Queue(q, off, state, it.t.ID, it.t.Partition, it.t.PartitionPriority, it.t.Payload, tags, groups, it.sch)
+		b.Queue(q, off, state, it.t.ID, it.t.Partition, it.t.PartitionPriority, it.t.QueuePriority, it.t.Payload, tags, groups, it.sch)
 	}
 	return s.pool.SendBatch(ctx, b).Close()
 }
@@ -158,7 +160,7 @@ func (s *Source) ReadBatch(ctx context.Context, after journal.Cursor, n int) ([]
 		afterOff = 0
 	}
 	rows, err := s.pool.Query(ctx, fmt.Sprintf(`
-		SELECT journal_offset, task_id, partition, priority, payload, tags, groups, scheduled
+		SELECT journal_offset, task_id, partition, priority, queue_priority, payload, tags, groups, scheduled
 		FROM %s
 		WHERE state = $1 AND acked_at IS NULL AND journal_offset IS NOT NULL AND journal_offset > $2
 		ORDER BY journal_offset LIMIT $3`, tbl), journal.StateReady, afterOff, n)
@@ -172,7 +174,7 @@ func (s *Source) ReadBatch(ctx context.Context, after journal.Cursor, n int) ([]
 func (s *Source) ReadByOffset(ctx context.Context, c journal.Cursor) (journal.Record, error) {
 	tbl := pgIdent(s.table)
 	row := s.pool.QueryRow(ctx, fmt.Sprintf(`
-		SELECT journal_offset, task_id, partition, priority, payload, tags, groups, scheduled
+		SELECT journal_offset, task_id, partition, priority, queue_priority, payload, tags, groups, scheduled
 		FROM %s WHERE journal_offset = $1`, tbl), c.Offset)
 	return scanOne(row)
 }
@@ -200,17 +202,17 @@ func scanOne(row scannable) (journal.Record, error) {
 func scanRow(row scannable) (journal.Record, error) {
 	var off int64
 	var id, part string
-	var prio int
+	var prio, qprio int
 	var payload []byte
 	var tags, groups []string
 	var sch time.Time
-	if err := row.Scan(&off, &id, &part, &prio, &payload, &tags, &groups, &sch); err != nil {
+	if err := row.Scan(&off, &id, &part, &prio, &qprio, &payload, &tags, &groups, &sch); err != nil {
 		return journal.Record{}, err
 	}
 	return journal.Record{
 		Task: &redisqueue.Task{
-			ID: id, Partition: part, PartitionPriority: prio, Payload: payload,
-			Tags: tags, Groups: groups, Scheduled: sch,
+			ID: id, Partition: part, PartitionPriority: prio, QueuePriority: qprio,
+			Payload: payload, Tags: tags, Groups: groups, Scheduled: sch,
 		},
 		Cursor: journal.OffsetCursor(off),
 	}, nil

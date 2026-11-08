@@ -99,17 +99,34 @@ type TagListResult struct {
 
 // TaskView — payload, headers и мета по id.
 type TaskView struct {
-	TaskID      string            `json:"taskId"`
-	Payload     string            `json:"payload"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Partition   string            `json:"partition"`
-	Priority    string            `json:"priority"`
-	Group       string            `json:"group"`
-	Exists      bool              `json:"exists"`
-	RejectCount int64             `json:"rejectCount,omitempty"`
-	Step        string            `json:"step,omitempty"`
-	State       string            `json:"state,omitempty"`
-	Progress    *StepProgressUI   `json:"progress,omitempty"`
+	TaskID        string            `json:"taskId"`
+	Payload       string            `json:"payload"`
+	Headers       map[string]string `json:"headers,omitempty"`
+	Partition     string            `json:"partition"`
+	Priority      string            `json:"priority"`
+	QueuePriority string            `json:"queuePriority,omitempty"`
+	Tags          []string          `json:"tags,omitempty"`
+	Group         string            `json:"group"`
+	Exists        bool              `json:"exists"`
+	RejectCount   int64             `json:"rejectCount,omitempty"`
+	Step          string            `json:"step,omitempty"`
+	State         string            `json:"state,omitempty"`
+	Progress      *StepProgressUI   `json:"progress,omitempty"`
+}
+
+// DLQListResult — Admin.ListDLQ для UI.
+type DLQListResult struct {
+	Entries   []DLQRow `json:"entries"`
+	Count     int64    `json:"count"`
+	Truncated bool     `json:"truncated"`
+}
+
+// DLQRow — строка режима DLQ.
+type DLQRow struct {
+	ID           string `json:"id"`
+	Partition    string `json:"partition"`
+	RejectCount  int64  `json:"rejectCount"`
+	DeadLetterAt int64  `json:"deadLetterAtMs"`
 }
 
 // StepProgressUI — progress из step-ключа.
@@ -1193,8 +1210,8 @@ func (a *App) GetTaskPayload(queue, taskID string, db int) (TaskView, error) {
 	}
 	tv := TaskView{
 		TaskID: taskID, Exists: ti.Exists, Payload: ti.Payload, Headers: ti.Headers,
-		Partition: ti.Partition, Priority: ti.Priority, RejectCount: ti.RejectCount,
-		Step: ti.Step, State: ti.State,
+		Partition: ti.Partition, Priority: ti.Priority, QueuePriority: ti.QueuePriority,
+		Tags: ti.Tags, RejectCount: ti.RejectCount, Step: ti.Step, State: ti.State,
 	}
 	if ti.Progress != nil {
 		tv.Progress = &StepProgressUI{
@@ -1204,6 +1221,53 @@ func (a *App) GetTaskPayload(queue, taskID string, db int) (TaskView, error) {
 		}
 	}
 	return tv, nil
+}
+
+// ListDLQ — страница dead letter + total count.
+func (a *App) ListDLQ(queue string, db int) (DLQListResult, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return DLQListResult{}, err
+	}
+	ctx, cancel := a.beginList(30 * time.Second)
+	defer cancel()
+	n, err := admin.CountDLQ(ctx, queue)
+	if err != nil {
+		return DLQListResult{}, err
+	}
+	entries, err := admin.ListDLQ(ctx, queue, 0, int64(redisqueue.MaxListDLQ))
+	if err != nil {
+		return DLQListResult{}, err
+	}
+	out := make([]DLQRow, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, DLQRow{
+			ID: e.ID, Partition: e.Partition, RejectCount: e.RejectCount,
+			DeadLetterAt: e.DeadLetterAt.UnixMilli(),
+		})
+	}
+	return DLQListResult{
+		Entries: out, Count: n,
+		Truncated: n > int64(len(out)),
+	}, nil
+}
+
+// RetryDLQ — вернуть ids (пусто = все) из DLQ.
+func (a *App) RetryDLQ(queue string, db int, ids []string) (int, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return 0, err
+	}
+	return admin.RetryDLQ(a.ctxOrBackground(), queue, ids...)
+}
+
+// PurgeDLQ — удалить ids (пусто = все) из DLQ.
+func (a *App) PurgeDLQ(queue string, db int, ids []string) (int, error) {
+	admin, err := a.adminForDB(db)
+	if err != nil {
+		return 0, err
+	}
+	return admin.PurgeDLQ(a.ctxOrBackground(), queue, ids...)
 }
 
 // ListMessages — peek ≤50 (tag / query / SCAN).

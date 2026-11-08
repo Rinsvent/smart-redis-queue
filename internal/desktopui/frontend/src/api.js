@@ -44,6 +44,9 @@ export const api = {
   getTaskPayload: (queue, taskId, db) => call('GetTaskPayload', queue, taskId, db),
   listMessages: (queue, db, tag, query) =>
     call('ListMessages', queue, db, tag || '', query || ''),
+  listDLQ: (queue, db) => call('ListDLQ', queue, db),
+  retryDLQ: (queue, db, ids) => call('RetryDLQ', queue, db, ids || []),
+  purgeDLQ: (queue, db, ids) => call('PurgeDLQ', queue, db, ids || []),
   listRegistryTasks: (queue, db, query) =>
     call('ListRegistryTasks', queue, db, query || ''),
   enqueueRegistryTask: (queue, name, payloadJSON, bypassLock, byOptions, db) =>

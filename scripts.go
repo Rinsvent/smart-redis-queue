@@ -890,9 +890,14 @@ local function getFromPartition(partition, group)
 				if sharedPairs == nil then
 					sharedPairs = {}
 				end
-				-- partition уже известен (мы внутри getFromPartition); GET partition:{id} не нужен
+				-- maxPriority / currentPref уже известны — без лишних redis.call
+				-- (Tags/Groups: SMEMBERS дорого на prefetch → не отдаём)
+				local qpNum = 0
+				if currentPref ~= "" then
+					qpNum = tonumber(currentPref:match("^qp(%d+):")) or 0
+				end
 				-- taskScore — исходный ZSET score (Scheduled ms) для Go Task.Scheduled
-				return {taskId, partition, payload, tostring(rejectCount), tostring(taskScore), sharedPairs}
+				return {taskId, partition, payload, tostring(rejectCount), tostring(taskScore), sharedPairs, tostring(maxPriority), tostring(qpNum)}
 			end
 		else
 			redis.call('ZREM', prioritiesKey, maxPriority)
@@ -1031,7 +1036,7 @@ end
 local stickyPartition = nil
 local stickyGroup = nil
 local stickyPref = nil
-while #results / 6 < prefetchCount do
+while #results / 8 < prefetchCount do
 	if raceBudgetExhausted then
 		break
 	end
@@ -1060,6 +1065,8 @@ while #results / 6 < prefetchCount do
 		sharedPairs = {}
 	end
 	results[#results + 1] = sharedPairs
+	results[#results + 1] = taskData[7] or "0" -- PartitionPriority
+	results[#results + 1] = taskData[8] or "0" -- QueuePriority
 end
 
 -- Если мы залочили партицию в рамках этого GET, но не взяли из неё ни одной задачи,
@@ -1361,6 +1368,18 @@ if deadLetter then
 	if _qd < 0 then
 		redis.call('ZADD', 'srq:queues', 0, queueName)
 	end
+	-- снять из tag: индексов (backpressure); tags:{id} оставить для RetryDLQ
+	do
+		local tagsKey = "queue:" .. queueName .. ":tags:" .. taskId
+		local tags = redis.call('SMEMBERS', tagsKey)
+		for ti = 1, #tags do
+			local tagKey = "queue:" .. queueName .. ":tag:" .. tags[ti]
+			redis.call('SREM', tagKey, taskId)
+			if redis.call('SCARD', tagKey) == 0 then
+				redis.call('DEL', tagKey)
+			end
+		end
+	end
 	-- ёмкость: вытеснить oldest (не трогаем только что добавленный — у него max score)
 	if dlqMax > 0 then
 		local card = redis.call('ZCARD', dlqKey)
@@ -1376,14 +1395,6 @@ if deadLetter then
 			end
 			redis.call('ZREM', dlqKey, oid)
 			local tagsKey = "queue:" .. queueName .. ":tags:" .. oid
-			local tags = redis.call('SMEMBERS', tagsKey)
-			for ti = 1, #tags do
-				local tagKey = "queue:" .. queueName .. ":tag:" .. tags[ti]
-				redis.call('SREM', tagKey, oid)
-				if redis.call('SCARD', tagKey) == 0 then
-					redis.call('DEL', tagKey)
-				end
-			end
 			redis.call('DEL',
 				"queue:" .. queueName .. ":dlq:score:" .. oid,
 				"queue:" .. queueName .. ":payload:" .. oid,
@@ -1578,15 +1589,7 @@ if dlqMax > 0 then
 		end
 		local oid = oldest[1]
 		redis.call('ZREM', dlqKey, oid)
-		local tagsKey = "queue:" .. queueName .. ":tags:" .. oid
-		local tags = redis.call('SMEMBERS', tagsKey)
-		for ti = 1, #tags do
-			local tagKey = "queue:" .. queueName .. ":tag:" .. tags[ti]
-			redis.call('SREM', tagKey, oid)
-			if redis.call('SCARD', tagKey) == 0 then
-				redis.call('DEL', tagKey)
-			end
-		end
+		-- tag: индексы уже сняты при Reject→DLQ; чистим meta + tags:{id}
 		redis.call('DEL',
 			"queue:" .. queueName .. ":dlq:score:" .. oid,
 			"queue:" .. queueName .. ":payload:" .. oid,
@@ -1598,7 +1601,7 @@ if dlqMax > 0 then
 			"queue:" .. queueName .. ":headers:" .. oid,
 			"queue:" .. queueName .. ":race:tags:" .. oid,
 			"queue:" .. queueName .. ":debounce:" .. oid,
-			tagsKey)
+			"queue:" .. queueName .. ":tags:" .. oid)
 		card = card - 1
 		trimmed = trimmed + 1
 	end
@@ -1797,6 +1800,22 @@ if meta[3] ~= false then
 end
 local pref = qpPrefix(queuePriority)
 local queueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":" .. priority
+local dlqKey = "queue:" .. queueName .. ":dlq"
+
+-- DLQ: не в pending ZSET; снимаем как PurgeDLQ (tag: уже пуст)
+if redis.call('ZSCORE', dlqKey, taskId) then
+	local payload = redis.call('GET', payloadKey) or ''
+	redis.call('ZREM', dlqKey, taskId)
+	redis.call('DEL', payloadKey, partitionKey, priorityKey, qpriorityKey,
+		"queue:" .. queueName .. ":dlq:score:" .. taskId,
+		"queue:" .. queueName .. ":reject_count:" .. taskId,
+		"queue:" .. queueName .. ":step:" .. taskId,
+		"queue:" .. queueName .. ":headers:" .. taskId,
+		"queue:" .. queueName .. ":race:tags:" .. taskId,
+		"queue:" .. queueName .. ":debounce:" .. taskId,
+		tagsKey)
+	return {'removed', payload}
+end
 
 if redis.call('ZREM', queueKey, taskId) == 0 then
 	return {'inprogress'}
@@ -1965,6 +1984,21 @@ local function removeOne(taskId)
 	end
 	local pref = qpPrefix(queuePriority)
 	local queueKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":" .. priority
+	local dlqKey = "queue:" .. queueName .. ":dlq"
+
+	if redis.call('ZSCORE', dlqKey, taskId) then
+		local payload = redis.call('GET', payloadKey) or ''
+		redis.call('ZREM', dlqKey, taskId)
+		redis.call('DEL', payloadKey, partitionKey, priorityKey, qpriorityKey,
+			"queue:" .. queueName .. ":dlq:score:" .. taskId,
+			"queue:" .. queueName .. ":reject_count:" .. taskId,
+			"queue:" .. queueName .. ":step:" .. taskId,
+			"queue:" .. queueName .. ":headers:" .. taskId,
+			"queue:" .. queueName .. ":race:tags:" .. taskId,
+			"queue:" .. queueName .. ":debounce:" .. taskId)
+		cleanupTags(taskId)
+		return 'removed', payload
+	end
 
 	if redis.call('ZREM', queueKey, taskId) == 0 then
 		return 'inprogress', ''

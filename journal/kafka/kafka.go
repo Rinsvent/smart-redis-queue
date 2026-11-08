@@ -35,13 +35,14 @@ type Source struct {
 }
 
 type envelope struct {
-	ID        string   `json:"id"`
-	Partition string   `json:"partition"`
-	Priority  int      `json:"priority"`
-	Payload   []byte   `json:"payload"`
-	Tags      []string `json:"tags"`
-	Groups    []string `json:"groups"`
-	Scheduled int64    `json:"scheduled_ms"`
+	ID            string   `json:"id"`
+	Partition     string   `json:"partition"`
+	Priority      int      `json:"priority"`
+	QueuePriority int      `json:"queue_priority,omitempty"`
+	Payload       []byte   `json:"payload"`
+	Tags          []string `json:"tags"`
+	Groups        []string `json:"groups"`
+	Scheduled     int64    `json:"scheduled_ms"`
 }
 
 func New(cfg Config) (*Source, error) {
@@ -87,7 +88,8 @@ func (s *Source) Publish(ctx context.Context, tasks ...*redisqueue.Task) error {
 		sch := journal.ScheduledOrNow(t.Scheduled)
 		env := envelope{
 			ID: t.ID, Partition: t.Partition, Priority: t.PartitionPriority,
-			Payload: t.Payload, Tags: t.Tags, Groups: t.Groups,
+			QueuePriority: t.QueuePriority,
+			Payload:       t.Payload, Tags: t.Tags, Groups: t.Groups,
 			Scheduled: sch.UnixMilli(),
 		}
 		body, err := json.Marshal(env)
@@ -207,7 +209,8 @@ func recordFromMsg(topic string, msg *sarama.ConsumerMessage) (journal.Record, e
 	return journal.Record{
 		Task: &redisqueue.Task{
 			ID: id, Partition: env.Partition, PartitionPriority: env.Priority,
-			Payload: env.Payload, Tags: env.Tags, Groups: env.Groups, Scheduled: sch,
+			QueuePriority: env.QueuePriority,
+			Payload:       env.Payload, Tags: env.Tags, Groups: env.Groups, Scheduled: sch,
 		},
 		Cursor: journal.KafkaCursor(msg.Partition, msg.Offset),
 	}, nil
@@ -320,7 +323,8 @@ func (s *Source) PromoteDue(ctx context.Context, limit int) (int, error) {
 			}
 			body, _ := json.Marshal(envelope{
 				ID: rec.Task.ID, Partition: rec.Task.Partition, Priority: rec.Task.PartitionPriority,
-				Payload: rec.Task.Payload, Tags: rec.Task.Tags, Groups: rec.Task.Groups,
+				QueuePriority: rec.Task.QueuePriority,
+				Payload:       rec.Task.Payload, Tags: rec.Task.Tags, Groups: rec.Task.Groups,
 				Scheduled: rec.Task.Scheduled.UnixMilli(),
 			})
 			_, _, err = s.producer.SendMessage(&sarama.ProducerMessage{

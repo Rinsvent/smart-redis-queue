@@ -13,10 +13,12 @@ _ = consumer.Reject(ctx, task.ID, redisqueue.WithDeadLetter(101))
 consumer.SetDLQMaxSize(101) // дефолт для WithDeadLetter() без аргумента
 ```
 
-- Meta (`payload`, `partition`, `priority`, `headers`, `step`, tags, `reject_count`) **не** чистится (пока задача в DLQ).
+- Meta (`payload`, `partition`, `priority`, `headers`, `step`, `tags:{id}`, `reject_count`) **не** чистится (пока задача в DLQ).
+- Индекс `tag:{tag}` **снимается** при уходе в DLQ (чтобы `WithTagBackpressure` / `CountByTag` не считали poison); на `RetryDLQ` индекс восстанавливается из `tags:{id}`.
 - `srq:queues` −1 (как при Ack).
 - Race / ordered locks снимаются как при обычном Reject.
 - `WithDelay` / `WithBlockGroups` / `WithBlockTags` по-прежнему паркуют scope, если переданы вместе с DLQ.
+- В prefetch/Consume опции `RejectWithDelay` (в т.ч. DeadLetter) применяются **только** к задаче, вернувшей ошибку; соседи ordered / cancel — plain Reject назад в очередь.
 
 ### Ёмкость (max size)
 
@@ -36,6 +38,8 @@ consumer.SetDLQMaxSize(101) // дефолт для WithDeadLetter() без ар�
 | `RetryDLQ(queue, ids...)` | Назад в pending с исходным score; пустой ids = все; `srq:queues` +N |
 | `PurgeDLQ(queue, ids...)` | Удалить из DLQ + meta (как Ack); depth не трогаем |
 
-`InspectTask` / `ListMessages` отдают state `dead_letter`, пока задача в DLQ.
+`InspectTask` / `ListMessages` отдают state `dead_letter`, пока задача в DLQ. `Admin.Remove` по id снимает и из DLQ.
+
+CLI: `manager dlq list|count|retry|purge --queue …`. Desktop UI: режим **DLQ** рядом с Messages.
 
 Ключи: [redis-keys](../reference/redis-keys.md) (`dlq`, `dlq:score:{id}`).

@@ -32,6 +32,7 @@ type doc struct {
 	TaskID        string             `bson:"task_id"`
 	Partition     string             `bson:"partition"`
 	Priority      int                `bson:"priority"`
+	QueuePriority int                `bson:"queue_priority,omitempty"`
 	Payload       []byte             `bson:"payload"`
 	Tags          []string           `bson:"tags"`
 	Groups        []string           `bson:"groups"`
@@ -131,16 +132,17 @@ func (s *Source) Insert(ctx context.Context, tasks ...*redisqueue.Task) error {
 			groups = []string{}
 		}
 		d := doc{
-			ID:        primitive.NewObjectID(),
-			TaskID:    it.t.ID,
-			Partition: it.t.Partition,
-			Priority:  it.t.PartitionPriority,
-			Payload:   it.t.Payload,
-			Tags:      tags,
-			Groups:    groups,
-			Scheduled: it.sch,
-			CreatedAt: now,
-			AckedAt:   nil,
+			ID:            primitive.NewObjectID(),
+			TaskID:        it.t.ID,
+			Partition:     it.t.Partition,
+			Priority:      it.t.PartitionPriority,
+			QueuePriority: it.t.QueuePriority,
+			Payload:       it.t.Payload,
+			Tags:          tags,
+			Groups:        groups,
+			Scheduled:     it.sch,
+			CreatedAt:     now,
+			AckedAt:       nil,
 		}
 		if it.due {
 			off := start + dueI
@@ -205,7 +207,8 @@ func toRec(d doc) journal.Record {
 	return journal.Record{
 		Task: &redisqueue.Task{
 			ID: d.TaskID, Partition: d.Partition, PartitionPriority: d.Priority,
-			Payload: d.Payload, Tags: d.Tags, Groups: d.Groups, Scheduled: d.Scheduled,
+			QueuePriority: d.QueuePriority,
+			Payload:       d.Payload, Tags: d.Tags, Groups: d.Groups, Scheduled: d.Scheduled,
 		},
 		Cursor: journal.OffsetCursor(off),
 	}

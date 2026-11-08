@@ -10,6 +10,115 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestAdmin_DLQ_TagsOffIndex_RetryRestores(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "dlq-tags"
+
+	producer := NewProducer(rdb, q)
+	consumer := newConsumer(rdb, q, "", false)
+	consumer.SetPrefetchCount(1)
+
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "t1", Payload: []byte("x"), Tags: []string{"camp"},
+		Scheduled: time.Now().Add(-time.Second),
+	}))
+	n, err := admin.CountByTag(ctx, q, "camp")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+
+	tasks, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.NoError(t, consumer.Reject(ctx, "t1", WithDeadLetter()))
+
+	n, err = admin.CountByTag(ctx, q, "camp")
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n, "DLQ must leave tag index")
+
+	// tags:{id} still for Retry
+	members, err := rdb.SMembers(ctx, "queue:"+q+":tags:t1").Result()
+	require.NoError(t, err)
+	assert.Contains(t, members, "camp")
+
+	_, err = admin.RetryDLQ(ctx, q, "t1")
+	require.NoError(t, err)
+	n, err = admin.CountByTag(ctx, q, "camp")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+}
+
+func TestAdmin_DLQ_RemoveByID(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "dlq-rm"
+
+	producer := NewProducer(rdb, q)
+	consumer := newConsumer(rdb, q, "", false)
+	consumer.SetPrefetchCount(1)
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "dead", Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
+	}))
+	tasks, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	require.NoError(t, consumer.Reject(ctx, "dead", WithDeadLetter()))
+
+	res, err := admin.Remove(ctx, q, "dead")
+	require.NoError(t, err)
+	assert.Equal(t, RemovalStatusRemoved, res.Status)
+
+	n, err := admin.CountDLQ(ctx, q)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), n)
+}
+
+func TestConsume_OrderedSibling_NoDeadLetterInherit(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "dlq-ord"
+
+	producer := NewProducer(rdb, q)
+	consumer := newConsumer(rdb, q, "", false)
+	consumer.SetPrefetchCount(2)
+	consumer.SetSamePartitionBatch(true)
+	require.NoError(t, producer.Publish(ctx,
+		&Task{ID: "a", Partition: "!p", Payload: []byte("1"), Scheduled: time.Now().Add(-2 * time.Second)},
+		&Task{ID: "b", Partition: "!p", Payload: []byte("2"), Scheduled: time.Now().Add(-time.Second)},
+	))
+
+	batch, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, batch, 2, "same-partition prefetch must take both")
+	require.True(t, isOrderedPartition(batch[0].Partition))
+
+	// как Consume: первая → DeadLetter, остальные ordered siblings → plain Reject
+	rejected := map[string]bool{}
+	for i, task := range batch {
+		if isOrderedPartition(task.Partition) && rejected[task.Partition] {
+			require.NoError(t, consumer.Reject(ctx, task.ID))
+			continue
+		}
+		if i == 0 {
+			require.NoError(t, consumer.Reject(ctx, task.ID, WithDeadLetter()))
+			rejected[task.Partition] = true
+			continue
+		}
+		t.Fatalf("expected sibling %s to take plain-reject branch", task.ID)
+	}
+
+	n, err := admin.CountDLQ(ctx, q)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+
+	depth, err := admin.QueueDepth(ctx, q)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), depth)
+}
+
 func TestAdmin_DLQ_RejectRetryPurge(t *testing.T) {
 	admin, rdb := setupAdminTest(t)
 	defer rdb.Close()

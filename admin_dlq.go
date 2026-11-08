@@ -161,6 +161,16 @@ func (a *Admin) retryOneDLQ(ctx context.Context, queueName, taskID string) (bool
 		_ = a.redis.Set(ctx, dlqScoreKey(queueName, taskID), strconv.FormatFloat(score, 'f', -1, 64), 0).Err()
 		return false, err
 	}
+	// восстановить tag: индексы из tags:{id} (сняты при Reject→DLQ)
+	tagsKey := "queue:" + queueName + ":tags:" + taskID
+	if tags, err := a.redis.SMembers(ctx, tagsKey).Result(); err == nil {
+		for _, tag := range tags {
+			if tag == "" {
+				continue
+			}
+			_ = a.redis.SAdd(ctx, "queue:"+queueName+":tag:"+tag, taskID).Err()
+		}
+	}
 	_ = a.redis.ZIncrBy(ctx, QueuesIndexKey, 1, queueName).Err()
 	return true, nil
 }

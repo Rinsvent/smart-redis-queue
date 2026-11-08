@@ -41,16 +41,18 @@ type StepProgressView struct {
 
 // TaskInspect — полный peek по id (payload/headers/step/reject).
 type TaskInspect struct {
-	ID          string
-	Exists      bool
-	Payload     string
-	Headers     map[string]string
-	Partition   string
-	Priority    string
-	RejectCount int64
-	Step        string
-	Progress    *StepProgressView
-	State       string
+	ID            string
+	Exists        bool
+	Payload       string
+	Headers       map[string]string
+	Partition     string
+	Priority      string // PartitionPriority
+	QueuePriority string
+	Tags          []string
+	RejectCount   int64
+	Step          string
+	Progress      *StepProgressView
+	State         string
 }
 
 // ListMessages — до Limit задач: exact id / tag / SCAN payload:*. Без consumer Get.
@@ -223,6 +225,10 @@ func (a *Admin) InspectTask(ctx context.Context, queueName, taskID string) (*Tas
 	ti.Payload = payload
 	ti.Partition, _ = a.redis.Get(ctx, "queue:"+queueName+":partition:"+taskID).Result()
 	ti.Priority, _ = a.redis.Get(ctx, "queue:"+queueName+":priority:"+taskID).Result()
+	ti.QueuePriority, _ = a.redis.Get(ctx, "queue:"+queueName+":qpriority:"+taskID).Result()
+	if tags, err := a.redis.SMembers(ctx, "queue:"+queueName+":tags:"+taskID).Result(); err == nil && len(tags) > 0 {
+		ti.Tags = tags
+	}
 	ti.Headers, _ = a.redis.HGetAll(ctx, "queue:"+queueName+":headers:"+taskID).Result()
 	if len(ti.Headers) == 0 {
 		ti.Headers = nil

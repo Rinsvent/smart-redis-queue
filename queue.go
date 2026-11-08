@@ -652,7 +652,7 @@ func isOrderedPartition(partition string) bool {
 // обрабатывается как обычная ошибка handler → Reject; процесс и цикл Consume не падают.
 // Гарантирует последовательную обработку задач в рамках одного консьюмера.
 // Для ordered-партиций (!): при reject первой задачи остальные из этой партиции в текущем
-// prefetch-батче также reject'ятся, чтобы сохранить порядок при возврате в очередь.
+// prefetch-батче также reject'ятся без опций (plain Reject), чтобы сохранить порядок.
 // При ошибке Ack или Reject консьюмер завершает работу и возвращает ошибку — остальные
 // сообщения вернутся в очередь при чистке мёртвых консьюмеров, что важно для ordered-партиций:
 // не брать следующую пачку тем же консьюмером и не нарушать порядок.
@@ -686,17 +686,17 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 			continue
 		}
 
-		var rejectOpts []RejectOption
 		rejectedPartitions := make(map[string]bool)
 		for _, task := range tasks {
 			select {
 			case <-ctx.Done():
-				if err := c.Reject(opCtx, task.ID, rejectOpts...); err != nil {
+				// без опций: назад в очередь (не наследуем DeadLetter/Delay с соседей)
+				if err := c.Reject(opCtx, task.ID); err != nil {
 					return err
 				}
 				continue
 			case <-c.stopPing:
-				if err := c.Reject(opCtx, task.ID, rejectOpts...); err != nil {
+				if err := c.Reject(opCtx, task.ID); err != nil {
 					return err
 				}
 				continue
@@ -704,7 +704,7 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 			}
 
 			if isOrderedPartition(task.Partition) && rejectedPartitions[task.Partition] {
-				if err := c.Reject(opCtx, task.ID, rejectOpts...); err != nil {
+				if err := c.Reject(opCtx, task.ID); err != nil {
 					return err
 				}
 				continue
@@ -714,6 +714,7 @@ func (c *Consumer) Consume(ctx context.Context, handler func(*Task) error) error
 				if isOrderedPartition(task.Partition) {
 					rejectedPartitions[task.Partition] = true
 				}
+				var rejectOpts []RejectOption
 				var rejectErr *RejectWithDelay
 				if errors.As(err, &rejectErr) {
 					rejectOpts = rejectOptsFromDelay(rejectErr)
@@ -860,10 +861,11 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 		return nil, nil
 	}
 
-	// Результат: {taskId, partition, payload, rejectCount, scoreMs, sharedPairs, ...}
+	// Результат: {taskId, partition, payload, rejectCount, scoreMs, sharedPairs, partPrio, queuePrio, ...}
 	// sharedPairs — плоский массив [id, blob, id, blob, ...] или пустой.
-	tasks := make([]*Task, 0, len(results)/6)
-	for i := 0; i+5 < len(results); i += 6 {
+	// Tags/Groups на Get не отдаём (лишние SMEMBERS); смотри InspectTask.
+	tasks := make([]*Task, 0, len(results)/8)
+	for i := 0; i+7 < len(results); i += 8 {
 		if results[i] == nil {
 			continue
 		}
@@ -889,6 +891,18 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 			}
 		}
 		shared := parseSharedPairs(results[i+5])
+		partPrio := 0
+		if results[i+6] != nil {
+			if n, err := strconv.Atoi(fmt.Sprint(results[i+6])); err == nil {
+				partPrio = n
+			}
+		}
+		queuePrio := 0
+		if results[i+7] != nil {
+			if n, err := strconv.Atoi(fmt.Sprint(results[i+7])); err == nil {
+				queuePrio = n
+			}
+		}
 
 		raw := []byte(payload)
 		decoded, err := decodePayloadFromRedis(raw)
@@ -898,6 +912,8 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 		tasks = append(tasks, &Task{
 			ID:                  taskID,
 			Partition:           partition,
+			PartitionPriority:   partPrio,
+			QueuePriority:       queuePrio,
 			Payload:             decoded,
 			Scheduled:           scheduled,
 			RejectCount:         rejectCount,

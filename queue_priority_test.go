@@ -9,6 +9,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestQueue_Get_HydratesPriorities(t *testing.T) {
+	producer, consumer, _ := setupTestQueue(t)
+	ctx := context.Background()
+	consumer.SetPrefetchCount(1)
+	require.NoError(t, producer.Publish(ctx, &Task{
+		ID: "prio", Partition: "p1", PartitionPriority: 7, QueuePriority: 3,
+		Payload: []byte("x"), Scheduled: time.Now().Add(-time.Second),
+	}))
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, 7, got[0].PartitionPriority)
+	assert.Equal(t, 3, got[0].QueuePriority)
+}
+
 // High QueuePriority in another group beats low/default even if that group would be scanned later.
 func TestQueue_QueuePriority_CrossGroupWins(t *testing.T) {
 	producer, consumer, rdb := setupTestQueue(t)

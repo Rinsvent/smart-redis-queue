@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/Rinsvent/smart-redis-queue"
 	"github.com/redis/go-redis/v9"
@@ -64,6 +65,48 @@ func main() {
 					&cli.StringFlag{Name: "queue", Aliases: []string{"q"}, Required: true, Usage: "имя очереди"},
 				},
 				Action: runRetry,
+			},
+			{
+				Name:  "dlq",
+				Usage: "Dead letter queue: list / count / retry / purge",
+				Commands: []*cli.Command{
+					{
+						Name:  "list",
+						Usage: "Список задач в DLQ (до 100)",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "queue", Aliases: []string{"q"}, Required: true},
+							&cli.IntFlag{Name: "offset", Value: 0},
+							&cli.IntFlag{Name: "limit", Value: 50},
+						},
+						Action: runDLQList,
+					},
+					{
+						Name:  "count",
+						Usage: "Число задач в DLQ",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "queue", Aliases: []string{"q"}, Required: true},
+						},
+						Action: runDLQCount,
+					},
+					{
+						Name:  "retry",
+						Usage: "Вернуть из DLQ в pending (ids… или все)",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "queue", Aliases: []string{"q"}, Required: true},
+							&cli.StringSliceFlag{Name: "id", Aliases: []string{"i"}, Usage: "task id (можно несколько)"},
+						},
+						Action: runDLQRetry,
+					},
+					{
+						Name:  "purge",
+						Usage: "Удалить из DLQ + meta (ids… или все)",
+						Flags: []cli.Flag{
+							&cli.StringFlag{Name: "queue", Aliases: []string{"q"}, Required: true},
+							&cli.StringSliceFlag{Name: "id", Aliases: []string{"i"}, Usage: "task id (можно несколько)"},
+						},
+						Action: runDLQPurge,
+					},
+				},
 			},
 			{
 				Name:   "desktop",
@@ -185,5 +228,59 @@ func runRetry(ctx context.Context, c *cli.Command) error {
 		return err
 	}
 	fmt.Printf("Retried %d tasks (returned to queue)\n", n)
+	return nil
+}
+
+func runDLQList(ctx context.Context, c *cli.Command) error {
+	rdb := redisClient(c)
+	defer rdb.Close()
+	admin := redisqueue.NewAdmin(rdb)
+	entries, err := admin.ListDLQ(ctx, c.String("queue"), int64(c.Int("offset")), int64(c.Int("limit")))
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		fmt.Println("DLQ empty")
+		return nil
+	}
+	for _, e := range entries {
+		fmt.Printf("%s  part=%s  reject=%d  at=%s\n",
+			e.ID, e.Partition, e.RejectCount, e.DeadLetterAt.UTC().Format(time.RFC3339))
+	}
+	return nil
+}
+
+func runDLQCount(ctx context.Context, c *cli.Command) error {
+	rdb := redisClient(c)
+	defer rdb.Close()
+	n, err := redisqueue.NewAdmin(rdb).CountDLQ(ctx, c.String("queue"))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("%d\n", n)
+	return nil
+}
+
+func runDLQRetry(ctx context.Context, c *cli.Command) error {
+	rdb := redisClient(c)
+	defer rdb.Close()
+	ids := c.StringSlice("id")
+	n, err := redisqueue.NewAdmin(rdb).RetryDLQ(ctx, c.String("queue"), ids...)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Retried %d from DLQ\n", n)
+	return nil
+}
+
+func runDLQPurge(ctx context.Context, c *cli.Command) error {
+	rdb := redisClient(c)
+	defer rdb.Close()
+	ids := c.StringSlice("id")
+	n, err := redisqueue.NewAdmin(rdb).PurgeDLQ(ctx, c.String("queue"), ids...)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Purged %d from DLQ\n", n)
 	return nil
 }

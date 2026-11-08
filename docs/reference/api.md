@@ -4,7 +4,7 @@
 
 ## Типы
 
-`Task` — `ID`, `Partition`, `PartitionPriority`, `QueuePriority`, `Payload`, `Scheduled`, `Tags`, `Groups`, `RejectCount`.
+`Task` — `ID`, `Partition`, `PartitionPriority`, `QueuePriority`, `Payload`, `Scheduled`, `Tags`, `Groups`, `RejectCount`. Get заполняет `PartitionPriority` / `QueuePriority` (бесплатно из lane); `Tags`/`Groups` на Get не гидрируются (лишние SMEMBERS) — см. `InspectTask`.
 
 Основные объекты: `Producer`, `Consumer`, `ConsumerPool`, `Exchange`, `Admin`.
 
