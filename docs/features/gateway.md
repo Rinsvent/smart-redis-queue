@@ -1,18 +1,20 @@
 # Gateway (opt-in)
 
-Single-active процесс перед Redis с **двумя равноправными data-plane**:
+Опциональный single-active процесс перед Redis. Два равноправных data-plane:
 
-| Транспорт | Для кого |
-|-----------|----------|
-| **gRPC** (`--listen`, дефолт `:50051`) | Go SDK `gateway/client` |
-| **HTTP JSON** (`--http`, дефолт `:50052`) | PHP, curl, любой язык без gRPC |
+| Транспорт | Назначение |
+|-----------|------------|
+| **gRPC** (`--listen`, по умолчанию `127.0.0.1:50051`) | Go-клиенты (`gateway/client`) |
+| **HTTP JSON** (`--http`, по умолчанию `127.0.0.1:50052`) | Клиенты без gRPC (PHP, curl и т.п.) |
 
-Плюс на том же HTTP — ops: health / overview / shutdown.  
-Прямой Redis SDK не меняется. **Admin UI ходит в Redis напрямую**, не через gateway.
+На том же HTTP-порту — ops: health, overview, shutdown.  
+Прямой Redis SDK не меняется. Admin UI / CLI к данным очереди ходят в Redis напрямую, не через gateway.
 
-## Зачем
+## Назначение
 
-Короткие blip’ы Redis: после OK клиенту gateway держит publish в RAM на окно потери (≤1s) и пишет mutating ops в op-log. RedisDown → fail-closed Publish/Get; Ack/Reject копятся и replay’ятся.
+После успешного ответа клиенту gateway удерживает publish в RAM на окно потери Redis (≤1s) и пишет mutating ops в op-log. При недоступности Redis: Publish/Get отклоняются; Ack/Reject буферизуются и воспроизводятся после восстановления.
+
+Требование к Redis: `appendonly yes` и `appendfsync everysec` или `always`. Иначе процесс не стартует (кроме `--skip-persist-check` для разработки).
 
 ## Запуск
 
@@ -22,28 +24,27 @@ manager gateway \
   --listen 127.0.0.1:50051 \
   --http 127.0.0.1:50052 \
   --dump /var/lib/srq/gateway.dump
-
-# dev без AOF:
-manager gateway --skip-persist-check
 ```
 
-Redis: `appendonly yes` + `appendfsync everysec|always`.
-
-## HTTP API (data-plane) — для PHP
+## HTTP data-plane
 
 Все методы: `POST`, `Content-Type: application/json`.
 
-| Path | Тело | Ответ |
-|------|------|--------|
+| Path | Запрос | Ответ |
+|------|--------|--------|
 | `/v1/publish` | `{ "queue", "tasks":[{id,payload,...}] }` | `{ "ok": true }` |
 | `/v1/get` | `{ "queue", "consumer_id", "prefetch" }` | `{ "tasks":[...] }` |
 | `/v1/ack` | `{ "queue", "consumer_id", "task_id", ... }` | `{ "ok": true }` |
-| `/v1/reject` | `{ "queue", "consumer_id", "task_id", delay?, dead_letter?, ... }` | `{ "ok": true }` |
+| `/v1/reject` | `{ "queue", "consumer_id", "task_id", ... }` | `{ "ok": true }` |
 
-**Payload:** на вход — строка; `payload_encoding`: `utf8` (default) или `base64`.  
-В ответе Get всегда `payload_encoding: "base64"` (бинарно-безопасно).
+Поле `payload` — строка. `payload_encoding`: `utf8` (по умолчанию) или `base64`.  
+В ответе Get payload всегда с `payload_encoding: "base64"`.
 
-### PHP (curl)
+HTTP-коды: `400` — неверный запрос; `409` — recovering/draining; `503` — redis_down; `500` — прочее. Тело ошибки: `{ "ok": false, "error": "..." }`.
+
+Клиенты без gRPC используют только HTTP. Прямой доступ к Lua SRQ из таких клиентов не предусмотрен.
+
+### Пример (PHP)
 
 ```php
 <?php
@@ -68,7 +69,6 @@ function srq_post(string $path, array $body): array {
     return json_decode($raw, true, 512, JSON_THROW_ON_ERROR);
 }
 
-// Publish
 srq_post('/v1/publish', [
     'queue' => 'orders',
     'tasks' => [[
@@ -80,7 +80,6 @@ srq_post('/v1/publish', [
     ]],
 ]);
 
-// Get
 $got = srq_post('/v1/get', [
     'queue' => 'orders',
     'consumer_id' => 'php-worker-1',
@@ -88,77 +87,99 @@ $got = srq_post('/v1/get', [
 ]);
 foreach ($got['tasks'] as $t) {
     $payload = base64_decode($t['payload']);
-    // ... обработать ...
+    // обработка...
     srq_post('/v1/ack', [
         'queue' => 'orders',
         'consumer_id' => 'php-worker-1',
         'task_id' => $t['id'],
     ]);
-    // или reject:
-    // srq_post('/v1/reject', [
-    //   'queue' => 'orders', 'consumer_id' => 'php-worker-1', 'task_id' => $t['id'],
-    //   'delay' => 5.0, 'dead_letter' => false,
-    // ]);
 }
 ```
-
-**Да: из PHP очередь через gateway уже можно** — только HTTP, gRPC не нужен.  
-Прямой доступ PHP→Redis к Lua SRQ не поддерживается; путь = HTTP gateway.
-
-Коды ошибок: `400` (bad request), `409` (recovering/draining), `503` (redis_down), `500` (прочее). Тело: `{ "ok": false, "error": "..." }`.
 
 ## HTTP ops
 
 | Path | Метод | Назначение |
 |------|-------|------------|
-| `/health` | GET | liveness; 503 при redis_down/failed |
-| `/api/overview` | GET | state, op_log_len, … |
-| `/api/shutdown` | POST | graceful drain+dump+exit |
+| `/health` | GET | liveness; `503` при `redis_down` / `failed` |
+| `/api/overview` | GET | state, размеры op-log / loss-window |
+| `/api/shutdown` | POST | graceful drain → dump → exit |
 
 ```bash
 manager gateway status --http http://127.0.0.1:50052
 manager gateway stop  --http http://127.0.0.1:50052
 ```
 
-SIGINT/SIGTERM — тот же Drain. `kill -9` в v1 без disk WAL небезопасен.
+`SIGINT` / `SIGTERM` запускают тот же Drain. `kill -9` в v1 небезопасен (нет disk WAL).
 
-### systemd
+## systemd
+
+Unit-файл (пример):
 
 ```ini
+[Unit]
+Description=SRQ Gateway
+After=network.target redis.service
+
 [Service]
+Type=simple
 ExecStart=/usr/local/bin/manager gateway --addr 127.0.0.1:6379 --listen 0.0.0.0:50051 --http 127.0.0.1:50052 --dump /var/lib/srq/gateway.dump
 ExecStop=/usr/local/bin/manager gateway stop --http http://127.0.0.1:50052
 KillMode=mixed
 TimeoutStopSec=30
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
 ```
+
+Команды:
+
+```bash
+sudo systemctl enable --now srq-gateway   # старт + автозапуск
+sudo systemctl status srq-gateway         # процесс unit (active/inactive)
+sudo systemctl stop srq-gateway           # ExecStop → HTTP /api/shutdown → Drain
+sudo systemctl restart srq-gateway
+```
+
+Поведение `systemctl stop`:
+
+1. Выполняется `ExecStop` → `POST /api/shutdown` → процесс делает Drain (dump при `--dump`) и выходит.
+2. Если за `TimeoutStopSec` процесс ещё жив — systemd шлёт `SIGTERM` (тот же Drain), затем при необходимости `SIGKILL`.
+
+`systemctl status` показывает только жизнь unit’а (процесс запущен или нет). Состояние очереди / Redis (`running`, `redis_down`, …) — через `manager gateway status` или `GET /health` / `/api/overview`.
+
+Для probe в оркестраторах: `GET http://127.0.0.1:50052/health`.
 
 ## Go SDK (gRPC)
 
 ```go
 import "github.com/Rinsvent/smart-redis-queue/gateway/client"
 
-conn, _ := client.Dial(ctx, "127.0.0.1:50051")
+conn, err := client.Dial(ctx, "127.0.0.1:50051")
+if err != nil { /* ... */ }
+defer conn.Close()
 _ = conn.Producer("orders").Publish(ctx, &redisqueue.Task{ID: "1", Payload: []byte("x")})
 ```
 
-## Loss-window
+## Loss-window и op-log
 
 | Событие | Loss-window | Op-log |
 |---------|-------------|--------|
 | Publish OK | до `publishOK + window` | append |
-| Ack | удаляем publish | append |
-| Reject | **не продлеваем** publish | append + opts |
+| Ack | publish удаляется | append |
+| Reject | publish не продлевается | append + opts |
 
 ## Шарды
 
-Один gateway может держать `ShardConfig` (fan-in Get по шардам, Publish через тот же роутинг, что SDK). Конфиг пока в коде/`Config.Shards`; CLI-файл — дальше.
+`Config.Shards` (`ShardConfig`): Publish через тот же роутинг, что SDK; Get/Ack/Reject — fan-in по шардам. Задание шардов из CLI-файла — в планах.
 
-## Не в v1
+## Ограничения v1 / roadmap
 
-- Disk WAL / kill-9
-- Multi-active gateway
-- Admin RPC через gateway
-- Rate-limit в gateway (остаётся в Redis)
+- нет disk WAL (защита от kill -9 процесса gateway);
+- один активный инстанс (без active/passive и multi-active);
+- нет Admin RPC через gateway;
+- rate-limit остаётся в Redis Lua;
+- нет бенчмарка gateway vs прямой SDK в CI.
 
 ## См. также
 
