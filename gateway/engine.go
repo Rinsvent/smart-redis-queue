@@ -20,6 +20,8 @@ type Config struct {
 	DumpPath   string // graceful dump path; empty = no dump
 	// Shards — опционально: один gateway на все шарды (тот же ShardConfig, что у SDK).
 	Shards *redisqueue.ShardConfig
+	// StatsRetention — если >0, consumer’ы gateway пишут g/a/r в Redis (централизованно).
+	StatsRetention time.Duration
 	// SkipPersistCheck — только для тестов (miniredis / no AOF).
 	SkipPersistCheck bool
 	// LossWindowOverride — если SkipPersistCheck; иначе из Redis CONFIG.
@@ -41,6 +43,9 @@ type Gateway struct {
 	consumers    map[string]*redisqueue.Consumer // key: queue\x00consumerID[\x00shardIdx]
 	shardClients []*redis.Client                 // nil → только cfg.Redis
 	shardRouter  *redisqueue.ShardRouter
+
+	hbMu        sync.Mutex
+	hbConsumers map[*redisqueue.Consumer]struct{}
 
 	stopHealth    chan struct{}
 	healthWG      sync.WaitGroup
@@ -150,6 +155,8 @@ func (g *Gateway) ensureHealth() {
 		defer g.healthWG.Done()
 		t := time.NewTicker(500 * time.Millisecond)
 		defer t.Stop()
+		pingT := time.NewTicker(30 * time.Second)
+		defer pingT.Stop()
 		for {
 			select {
 			case <-g.stopHealth:
@@ -157,6 +164,8 @@ func (g *Gateway) ensureHealth() {
 			case now := <-t.C:
 				g.loss.truncate(now)
 				g.probeRedis(context.Background())
+			case <-pingT.C:
+				g.pingAll(context.Background())
 			}
 		}
 	}()
@@ -216,12 +225,18 @@ func (g *Gateway) consumerOn(rdb *redis.Client, queue, consumerID string, shardI
 		key += "\x00" + fmt.Sprintf("%d", shardIdx)
 	}
 	g.mu.Lock()
-	defer g.mu.Unlock()
 	if c, ok := g.consumers[key]; ok {
+		g.mu.Unlock()
 		return c
 	}
-	c := redisqueue.NewConsumer(rdb, queue, consumerID, redisqueue.WithPing(false))
+	opts := []redisqueue.ConsumerOption{redisqueue.WithPing(false)}
+	if g.cfg.StatsRetention > 0 {
+		opts = append(opts, redisqueue.WithStatsRetention(g.cfg.StatsRetention))
+	}
+	c := redisqueue.NewConsumer(rdb, queue, consumerID, opts...)
 	g.consumers[key] = c
+	g.mu.Unlock()
+	g.trackConsumer(c)
 	return c
 }
 

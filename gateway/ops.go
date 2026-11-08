@@ -11,6 +11,11 @@ import (
 
 // PublishTasks — Publish после Redis OK; запись в op-log + loss-window.
 func (g *Gateway) PublishTasks(ctx context.Context, queue string, tasks []*redisqueue.Task, opts []redisqueue.PublishOption) error {
+	return g.PublishTasksWith(ctx, queue, tasks, PublishOpts{}, opts...)
+}
+
+// PublishTasksWith — Publish + PublishOpts (backpressure / shard / compression).
+func (g *Gateway) PublishTasksWith(ctx context.Context, queue string, tasks []*redisqueue.Task, po PublishOpts, extra ...redisqueue.PublishOption) error {
 	if queue == "" {
 		return ErrEmptyQueue
 	}
@@ -25,6 +30,7 @@ func (g *Gateway) PublishTasks(ctx context.Context, queue string, tasks []*redis
 		recs = append(recs, publishRecFromTask(t))
 	}
 
+	opts := append(po.toOptions(), extra...)
 	p := g.producer(queue)
 	var err error
 	if len(opts) > 0 {
@@ -320,10 +326,12 @@ func rejectOptions(r *RejectRec) []redisqueue.RejectOption {
 	return opts
 }
 
-// recover — Get закрыт; replay ops с RedisOK=false, затем loss-window publishes.
+// recover — Get закрыт; fence locks → replay ops с RedisOK=false → loss-window publishes.
 func (g *Gateway) recover(ctx context.Context) error {
 	g.state.set(StateRecovering)
 	g.log.Printf("recover: begin ops=%d loss=%d", g.ops.len(), g.loss.len())
+
+	g.fenceLocks(ctx)
 
 	for _, op := range g.ops.snapshot() {
 		if op.RedisOK {

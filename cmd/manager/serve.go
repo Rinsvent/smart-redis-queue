@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Rinsvent/smart-redis-queue/gateway"
+	"github.com/redis/go-redis/v9"
 	"github.com/urfave/cli/v3"
 )
 
@@ -16,29 +17,63 @@ func gatewayHTTPFlag() cli.Flag {
 	return &cli.StringFlag{
 		Name:    "http",
 		Value:   "127.0.0.1:50052",
-		Usage:   "HTTP ops base URL or listen addr (status/stop / server bind)",
+		Usage:   "HTTP ops base URL (status/stop)",
 		Sources: cli.EnvVars("SRQ_GATEWAY_HTTP"),
 	}
 }
 
 func runGateway(ctx context.Context, c *cli.Command) error {
-	rdb := redisClient(c)
+	cfg := gateway.Config{}
+	var rdb *redis.Client
+
+	if path := c.String("config"); path != "" {
+		fc, err := gateway.LoadFileConfig(path)
+		if err != nil {
+			return err
+		}
+		rdb = fc.RedisClient()
+		cfg.ListenAddr = fc.Listen
+		cfg.HTTPAddr = fc.HTTP
+		cfg.DumpPath = fc.Dump
+		cfg.SkipPersistCheck = fc.SkipPersistCheck
+		cfg.StatsRetention = fc.StatsRetentionDuration()
+		sc, err := fc.ShardConfig()
+		if err != nil {
+			_ = rdb.Close()
+			return err
+		}
+		cfg.Shards = sc
+	} else {
+		rdb = redisClient(c)
+		cfg.ListenAddr = "127.0.0.1:50051"
+		cfg.HTTPAddr = "127.0.0.1:50052"
+	}
 	defer rdb.Close()
+	cfg.Redis = rdb
 
-	listen := c.String("listen")
-	httpAddr := c.String("http")
+	if v := c.String("listen"); v != "" {
+		cfg.ListenAddr = v
+	}
+	if v := c.String("http"); v != "" {
+		cfg.HTTPAddr = v
+	}
+	if v := c.String("dump"); v != "" {
+		cfg.DumpPath = v
+	}
+	if c.Bool("skip-persist-check") {
+		cfg.SkipPersistCheck = true
+	}
+	if cfg.ListenAddr == "" {
+		cfg.ListenAddr = "127.0.0.1:50051"
+	}
+	if cfg.HTTPAddr == "" {
+		cfg.HTTPAddr = "127.0.0.1:50052"
+	}
 
-	gw, err := gateway.New(gateway.Config{
-		Redis:            rdb,
-		ListenAddr:       listen,
-		HTTPAddr:         httpAddr,
-		DumpPath:         c.String("dump"),
-		SkipPersistCheck: c.Bool("skip-persist-check"),
-	})
+	gw, err := gateway.New(cfg)
 	if err != nil {
 		return err
 	}
-
 	if err := gw.Boot(ctx); err != nil {
 		return fmt.Errorf("gateway boot: %w", err)
 	}
@@ -48,7 +83,7 @@ func runGateway(ctx context.Context, c *cli.Command) error {
 
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- gw.ListenAndServe(runCtx, listen, httpAddr)
+		errCh <- gw.ListenAndServe(runCtx, cfg.ListenAddr, cfg.HTTPAddr)
 	}()
 
 	select {
@@ -69,7 +104,7 @@ func runGatewayStatus(ctx context.Context, c *cli.Command) error {
 	if base == "" {
 		return fmt.Errorf("--http required (e.g. http://127.0.0.1:50052)")
 	}
-	if len(base) > 0 && base[0] != 'h' {
+	if base[0] != 'h' {
 		base = "http://" + base
 	}
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
@@ -97,7 +132,7 @@ func runGatewayStop(ctx context.Context, c *cli.Command) error {
 	if base == "" {
 		return fmt.Errorf("--http required (e.g. http://127.0.0.1:50052)")
 	}
-	if len(base) > 0 && base[0] != 'h' {
+	if base[0] != 'h' {
 		base = "http://" + base
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)

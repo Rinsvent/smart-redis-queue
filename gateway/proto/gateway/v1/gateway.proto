@@ -35,6 +35,11 @@ message Task {
 message PublishRequest {
   string queue = 1;
   repeated Task tasks = 2;
+  map<string, int64> tag_limits = 3; // backpressure: tag → max pending
+  string shard_key = 4;
+  string shard_name = 5;
+  string compression = 6; // "" | "none" | "zstd"
+  int32 compress_min_bytes = 7;
 }
 
 message PublishResponse {}

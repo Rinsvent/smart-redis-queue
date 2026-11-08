@@ -31,8 +31,13 @@ type httpTask struct {
 }
 
 type publishHTTPRequest struct {
-	Queue string     `json:"queue"`
-	Tasks []httpTask `json:"tasks"`
+	Queue            string           `json:"queue"`
+	Tasks            []httpTask       `json:"tasks"`
+	TagLimits        map[string]int64 `json:"tag_limits,omitempty"`
+	ShardKey         string           `json:"shard_key,omitempty"`
+	ShardName        string           `json:"shard_name,omitempty"`
+	Compression      string           `json:"compression,omitempty"` // none | zstd
+	CompressMinBytes int              `json:"compress_min_bytes,omitempty"`
 }
 
 type getHTTPRequest struct {
@@ -92,7 +97,14 @@ func (h *httpOps) handlePublish(w http.ResponseWriter, r *http.Request) {
 		}
 		tasks = append(tasks, task)
 	}
-	if err := h.g.PublishTasks(r.Context(), req.Queue, tasks, nil); err != nil {
+	po := PublishOpts{
+		TagLimits:        req.TagLimits,
+		ShardKey:         req.ShardKey,
+		ShardName:        req.ShardName,
+		Compression:      req.Compression,
+		CompressMinBytes: req.CompressMinBytes,
+	}
+	if err := h.g.PublishTasksWith(r.Context(), req.Queue, tasks, po); err != nil {
 		writeGatewayErr(w, err)
 		return
 	}
@@ -201,6 +213,7 @@ func writeHTTPError(w http.ResponseWriter, code int, err error) {
 
 func writeGatewayErr(w http.ResponseWriter, err error) {
 	code := http.StatusInternalServerError
+	var bp *redisqueue.ErrBackpressure
 	switch {
 	case errors.Is(err, ErrRedisDown):
 		code = http.StatusServiceUnavailable
@@ -208,6 +221,8 @@ func writeGatewayErr(w http.ResponseWriter, err error) {
 		code = http.StatusConflict
 	case errors.Is(err, ErrEmptyQueue), errors.Is(err, ErrEmptyTaskID):
 		code = http.StatusBadRequest
+	case errors.As(err, &bp):
+		code = http.StatusTooManyRequests
 	}
 	writeHTTPError(w, code, err)
 }

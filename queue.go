@@ -783,6 +783,11 @@ func (c *Consumer) ping(ctx context.Context) error {
 	return err
 }
 
+// Ping — публичный heartbeat (gateway централизует ping без per-consumer loop).
+func (c *Consumer) Ping(ctx context.Context) error {
+	return c.ping(ctx)
+}
+
 // SetJournalAck вызывается после успешного SRQ Ack (ретраи — на стороне колбэка).
 // Deprecated: NewConsumer(..., WithJournalAck(fn)).
 func (c *Consumer) SetJournalAck(fn func(ctx context.Context, taskID string) error) {

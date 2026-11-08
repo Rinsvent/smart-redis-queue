@@ -1,0 +1,23 @@
+# Пример: manager gateway --config gateway.yaml
+listen: "127.0.0.1:50051"   # gRPC
+http: "127.0.0.1:50052"     # HTTP data-plane + ops
+dump: "/var/lib/srq/gateway.dump"
+# skip_persist_check: false
+# stats_retention: "1h"     # централизованный writeback g/a/r в Redis
+
+redis:
+  addr: "localhost:6379"
+  password: ""
+  db: 0
+
+# Опционально — несколько шардов (тот же смысл, что ShardConfig в SDK):
+# shards:
+#   strategy: by_group   # by_group | by_queue | by_partition | by_manual
+#   strict_single_group: false
+#   list:
+#     - name: s0
+#       addr: "localhost:6379"
+#       db: 0
+#     - name: s1
+#       addr: "localhost:6379"
+#       db: 1

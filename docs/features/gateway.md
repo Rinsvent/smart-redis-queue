@@ -18,13 +18,23 @@
 
 ## Запуск
 
+Предпочтительно YAML-конфиг (шаблон: `gateway.example.yaml` в корне репозитория):
+
 ```bash
-manager gateway \
-  --addr localhost:6379 \
-  --listen 127.0.0.1:50051 \
-  --http 127.0.0.1:50052 \
-  --dump /var/lib/srq/gateway.dump
+manager gateway --config /etc/srq/gateway.yaml
 ```
+
+```yaml
+listen: "127.0.0.1:50051"
+http: "127.0.0.1:50052"
+dump: "/var/lib/srq/gateway.dump"
+# stats_retention: "1h"
+redis:
+  addr: "localhost:6379"
+  db: 0
+```
+
+Флаги `--listen` / `--http` / `--dump` / `--skip-persist-check` и корневые `--addr` / `--password` / `--db` перекрывают файл. Без `--config` используются дефолты портов и Redis из флагов manager.
 
 ## HTTP data-plane
 
@@ -32,15 +42,17 @@ manager gateway \
 
 | Path | Запрос | Ответ |
 |------|--------|--------|
-| `/v1/publish` | `{ "queue", "tasks":[{id,payload,...}] }` | `{ "ok": true }` |
+| `/v1/publish` | `{ "queue", "tasks", "tag_limits"?, "shard_key"?, "compression"? }` | `{ "ok": true }` |
 | `/v1/get` | `{ "queue", "consumer_id", "prefetch" }` | `{ "tasks":[...] }` |
-| `/v1/ack` | `{ "queue", "consumer_id", "task_id", ... }` | `{ "ok": true }` |
-| `/v1/reject` | `{ "queue", "consumer_id", "task_id", ... }` | `{ "ok": true }` |
+| `/v1/ack` | `{ "queue", "consumer_id", "task_id", idempotency/shared/open_blocks? }` | `{ "ok": true }` |
+| `/v1/reject` | `{ "queue", "consumer_id", "task_id", delay?, block_*, dead_letter? }` | `{ "ok": true }` |
 
 Поле `payload` — строка. `payload_encoding`: `utf8` (по умолчанию) или `base64`.  
 В ответе Get payload всегда с `payload_encoding: "base64"`.
 
-HTTP-коды: `400` — неверный запрос; `409` — recovering/draining; `503` — redis_down; `500` — прочее. Тело ошибки: `{ "ok": false, "error": "..." }`.
+Опции Publish: `tag_limits` (map tag→max, backpressure → HTTP `429`), `shard_key` / `shard_name`, `compression` (`zstd`|`none`), `compress_min_bytes`.
+
+HTTP-коды: `400` — неверный запрос; `409` — recovering/draining; `429` — backpressure; `503` — redis_down; `500` — прочее. Тело ошибки: `{ "ok": false, "error": "..." }`.
 
 Клиенты без gRPC используют только HTTP. Прямой доступ к Lua SRQ из таких клиентов не предусмотрен.
 
@@ -122,7 +134,7 @@ After=network.target redis.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/manager gateway --addr 127.0.0.1:6379 --listen 0.0.0.0:50051 --http 127.0.0.1:50052 --dump /var/lib/srq/gateway.dump
+ExecStart=/usr/local/bin/manager gateway --config /etc/srq/gateway.yaml
 ExecStop=/usr/local/bin/manager gateway stop --http http://127.0.0.1:50052
 KillMode=mixed
 TimeoutStopSec=30
@@ -169,17 +181,30 @@ _ = conn.Producer("orders").Publish(ctx, &redisqueue.Task{ID: "1", Payload: []by
 | Ack | publish удаляется | append |
 | Reject | publish не продлевается | append + opts |
 
+## Heartbeat и stats
+
+Consumer’ы через gateway создаются с `WithPing(false)`. Heartbeat выполняет сам gateway (~30s) по всем активным consumer’ам.  
+При recovery перед replay op-log вызывается Ping (fence locks), чтобы reclaim не обогнал отложенные Ack.  
+`stats_retention` в конфиге включает централизованный writeback счётчиков g/a/r в Redis.
+
 ## Шарды
 
-`Config.Shards` (`ShardConfig`): Publish через тот же роутинг, что SDK; Get/Ack/Reject — fan-in по шардам. Задание шардов из CLI-файла — в планах.
+Секция `shards` в YAML или `Config.Shards`: Publish с тем же роутингом, что SDK; Get/Ack/Reject — fan-in по шардам.
 
-## Ограничения v1 / roadmap
+## Бенчмарк
 
-- нет disk WAL (защита от kill -9 процесса gateway);
-- один активный инстанс (без active/passive и multi-active);
-- нет Admin RPC через gateway;
-- rate-limit остаётся в Redis Lua;
-- нет бенчмарка gateway vs прямой SDK в CI.
+```bash
+go test ./gateway -run='^$' -bench='BenchmarkGatewayVsDirect' -benchtime=2s -count=1
+```
+
+Сравнивает in-process gateway API с прямым `Producer`/`Consumer` (payload 256B и 16KB).
+
+## Ограничения / roadmap
+
+- disk WAL / защита от kill -9 процесса gateway;
+- active/passive и multi-active;
+- Admin RPC через gateway;
+- rate-limit admission остаётся в Redis Lua (не выносится в gateway).
 
 ## См. также
 

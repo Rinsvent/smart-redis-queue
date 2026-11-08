@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"net"
 	"time"
 
@@ -54,7 +55,14 @@ func (a *grpcAPI) Publish(ctx context.Context, req *gatewayv1.PublishRequest) (*
 	for _, t := range req.Tasks {
 		tasks = append(tasks, protoToTask(t))
 	}
-	if err := a.g.PublishTasks(ctx, req.Queue, tasks, nil); err != nil {
+	po := PublishOpts{
+		TagLimits:        req.TagLimits,
+		ShardKey:         req.ShardKey,
+		ShardName:        req.ShardName,
+		Compression:      req.Compression,
+		CompressMinBytes: int(req.CompressMinBytes),
+	}
+	if err := a.g.PublishTasksWith(ctx, req.Queue, tasks, po); err != nil {
 		return nil, mapErr(err)
 	}
 	return &gatewayv1.PublishResponse{}, nil
@@ -100,13 +108,16 @@ func (a *grpcAPI) Reject(ctx context.Context, req *gatewayv1.RejectRequest) (*ga
 }
 
 func mapErr(err error) error {
-	switch err {
-	case ErrRedisDown:
+	var bp *redisqueue.ErrBackpressure
+	switch {
+	case err == ErrRedisDown:
 		return status.Error(codes.Unavailable, err.Error())
-	case ErrRecovering, ErrDraining:
+	case err == ErrRecovering, err == ErrDraining:
 		return status.Error(codes.FailedPrecondition, err.Error())
-	case ErrEmptyQueue, ErrEmptyTaskID:
+	case err == ErrEmptyQueue, err == ErrEmptyTaskID:
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.As(err, &bp):
+		return status.Error(codes.ResourceExhausted, err.Error())
 	default:
 		return status.Errorf(codes.Internal, "%v", err)
 	}

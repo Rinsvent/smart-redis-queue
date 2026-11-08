@@ -140,20 +140,32 @@ func main() {
 			},
 			{
 				Name:  "gateway",
-				Usage: "SRQ Gateway: gRPC data-plane + HTTP ops. Admin UI ходит в Redis напрямую (не через gateway).",
+				Usage: "SRQ Gateway: gRPC + HTTP data-plane. Предпочтительно --config (см. gateway.example.yaml).",
 				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "config",
+						Aliases: []string{"c"},
+						Value:   "",
+						Usage:   "YAML-конфиг (listen/http/redis/shards/dump); флаги ниже перекрывают файл",
+						Sources: cli.EnvVars("SRQ_GATEWAY_CONFIG"),
+					},
 					&cli.StringFlag{
 						Name:    "listen",
 						Aliases: []string{"l"},
-						Value:   "127.0.0.1:50051",
-						Usage:   "gRPC data-plane listen host:port",
+						Value:   "",
+						Usage:   "gRPC listen (default 127.0.0.1:50051 или из config)",
 						Sources: cli.EnvVars("SRQ_GATEWAY_LISTEN"),
 					},
-					gatewayHTTPFlag(),
+					&cli.StringFlag{
+						Name:    "http",
+						Value:   "",
+						Usage:   "HTTP listen / status URL (default 127.0.0.1:50052 или из config)",
+						Sources: cli.EnvVars("SRQ_GATEWAY_HTTP"),
+					},
 					&cli.StringFlag{
 						Name:    "dump",
 						Value:   "",
-						Usage:   "путь graceful dump (op-log + loss-window); пусто = без dump",
+						Usage:   "путь graceful dump; пусто = без dump / из config",
 						Sources: cli.EnvVars("SRQ_GATEWAY_DUMP"),
 					},
 					&cli.BoolFlag{
