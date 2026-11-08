@@ -29,7 +29,7 @@
 - **Шардинг** — несколько standalone Redis (`ShardByGroup` / `ByManual` / …); см. [docs](https://rinsvent.github.io/smart-redis-queue/sharding/)
 - **Step recovery** — checkpoint шагов handler (`NewSteps` / `Do`); см. [docs](https://rinsvent.github.io/smart-redis-queue/features/step-recovery/)
 - **Headers** — мета между попытками (`SetHeader` / ошибки при Reject); см. [docs](https://rinsvent.github.io/smart-redis-queue/features/headers/)
-- **Dead letter queue** — `WithDeadLetter` → `queue:{name}:dlq`; Admin `ListDLQ` / `RetryDLQ` / `PurgeDLQ`; см. [docs](https://rinsvent.github.io/smart-redis-queue/features/dlq/)
+- **Dead letter queue** — `WithDeadLetter` / `WithDeadLetter(N)` → `queue:{name}:dlq` (+ вытеснение старых); Admin `ListDLQ` / `RetryDLQ` / `PurgeDLQ`; см. [docs](https://rinsvent.github.io/smart-redis-queue/features/dlq/)
 
 ## Требования
 

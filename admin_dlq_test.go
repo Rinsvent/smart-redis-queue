@@ -139,6 +139,106 @@ func TestAdmin_DLQ_ConsumeRejectWithDelay(t *testing.T) {
 	assert.Equal(t, "bad", entries[0].ID)
 }
 
+func TestAdmin_DLQ_MaxSizeEvictsOldest(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "dlq-max"
+
+	producer := NewProducer(rdb, q)
+	consumer := newConsumer(rdb, q, "", false)
+	consumer.SetPrefetchCount(1)
+
+	for _, id := range []string{"old1", "old2", "old3"} {
+		require.NoError(t, producer.Publish(ctx, &Task{
+			ID: id, Payload: []byte(id), Scheduled: time.Now().Add(-time.Second),
+		}))
+		tasks, err := consumer.Get(ctx)
+		require.NoError(t, err)
+		require.Len(t, tasks, 1)
+		require.NoError(t, consumer.Reject(ctx, id, WithDeadLetter(2)))
+		time.Sleep(2 * time.Millisecond) // развести score DLQ
+	}
+
+	n, err := admin.CountDLQ(ctx, q)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), n)
+
+	entries, err := admin.ListDLQ(ctx, q, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	ids := map[string]bool{entries[0].ID: true, entries[1].ID: true}
+	assert.False(t, ids["old1"], "oldest must be evicted")
+	assert.True(t, ids["old2"])
+	assert.True(t, ids["old3"])
+
+	// meta вытесненного удалена
+	ti, err := admin.InspectTask(ctx, q, "old1")
+	require.NoError(t, err)
+	assert.False(t, ti.Exists)
+
+	maxStr, err := rdb.Get(ctx, "queue:"+q+":dlq:max").Result()
+	require.NoError(t, err)
+	assert.Equal(t, "2", maxStr)
+}
+
+func TestAdmin_DLQ_MaxSizeUnlimited(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "dlq-unlim"
+
+	producer := NewProducer(rdb, q)
+	consumer := newConsumer(rdb, q, "", false)
+	consumer.SetPrefetchCount(1)
+	consumer.SetDLQMaxSize(1) // не должен сработать при явном 0
+
+	for _, id := range []string{"a", "b"} {
+		require.NoError(t, producer.Publish(ctx, &Task{
+			ID: id, Payload: []byte(id), Scheduled: time.Now().Add(-time.Second),
+		}))
+		tasks, err := consumer.Get(ctx)
+		require.NoError(t, err)
+		require.Len(t, tasks, 1)
+		require.NoError(t, consumer.Reject(ctx, id, WithDeadLetter(0)))
+	}
+
+	n, err := admin.CountDLQ(ctx, q)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), n)
+}
+
+func TestAdmin_DLQ_SetDLQMaxSizeDefault(t *testing.T) {
+	admin, rdb := setupAdminTest(t)
+	defer rdb.Close()
+	ctx := context.Background()
+	q := "dlq-defmax"
+
+	producer := NewProducer(rdb, q)
+	consumer := newConsumer(rdb, q, "", false)
+	consumer.SetPrefetchCount(1)
+	consumer.SetDLQMaxSize(1)
+
+	for _, id := range []string{"x", "y"} {
+		require.NoError(t, producer.Publish(ctx, &Task{
+			ID: id, Payload: []byte(id), Scheduled: time.Now().Add(-time.Second),
+		}))
+		tasks, err := consumer.Get(ctx)
+		require.NoError(t, err)
+		require.Len(t, tasks, 1)
+		require.NoError(t, consumer.Reject(ctx, id, WithDeadLetter()))
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	n, err := admin.CountDLQ(ctx, q)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+	entries, err := admin.ListDLQ(ctx, q, 0, 10)
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "y", entries[0].ID)
+}
+
 func TestAdmin_DLQ_RetryAllAndPurgeOne(t *testing.T) {
 	admin, rdb := setupAdminTest(t)
 	defer rdb.Close()

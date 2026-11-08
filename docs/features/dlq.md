@@ -6,14 +6,27 @@
 
 ```go
 return redisqueue.NewRejectWithDelay(err, redisqueue.WithDeadLetter())
+// или с лимитом ёмкости:
+return redisqueue.NewRejectWithDelay(err, redisqueue.WithDeadLetter(101))
 // или
-_ = consumer.Reject(ctx, task.ID, redisqueue.WithDeadLetter())
+_ = consumer.Reject(ctx, task.ID, redisqueue.WithDeadLetter(101))
+consumer.SetDLQMaxSize(101) // дефолт для WithDeadLetter() без аргумента
 ```
 
-- Meta (`payload`, `partition`, `priority`, `headers`, `step`, tags, `reject_count`) **не** чистится.
+- Meta (`payload`, `partition`, `priority`, `headers`, `step`, tags, `reject_count`) **не** чистится (пока задача в DLQ).
 - `srq:queues` −1 (как при Ack).
 - Race / ordered locks снимаются как при обычном Reject.
 - `WithDelay` / `WithBlockGroups` / `WithBlockTags` по-прежнему паркуют scope, если переданы вместе с DLQ.
+
+### Ёмкость (max size)
+
+| Вызов | Поведение |
+|-------|-----------|
+| `WithDeadLetter()` | Лимит из `SetDLQMaxSize` (0 = без лимита) |
+| `WithDeadLetter(0)` | Явно без лимита |
+| `WithDeadLetter(N)` N>0 | После добавления `ZCARD(dlq) ≤ N`: вытесняются самые старые (score = время попадания), meta чистится как при `PurgeDLQ` |
+
+На Reject трим до 32 oldest за вызов (обычный путь: +1/−1). Если хвост больше (снизили max / burst) — ping под `unlock:lock` дочищает батчами по 64. Лимит пишется в `queue:{name}:dlq:max`.
 
 ## Admin
 
@@ -25,4 +38,4 @@ _ = consumer.Reject(ctx, task.ID, redisqueue.WithDeadLetter())
 
 `InspectTask` / `ListMessages` отдают state `dead_letter`, пока задача в DLQ.
 
-Ключи: [redis-keys](../reference/redis-keys.md) (`dlq`, `dlq:score:{id}`).
+Ключи: [redis-keys](../reference/redis-keys.md) (`dlq`, `dlq:score:{id}`, `dlq:max`).

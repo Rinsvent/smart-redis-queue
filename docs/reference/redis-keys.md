@@ -51,6 +51,7 @@
 | `tag:{tag}` | SET | Индекс задач по тегу |
 | `dlq` | ZSET | Dead letter; score = ms попадания. Reject `WithDeadLetter`; meta не чистим |
 | `dlq:score:{id}` | STRING | Исходный ZSET score для RetryDLQ |
+| `dlq:max` | STRING | Ёмкость DLQ (N>0); Reject trim + ping дочистка. Нет ключа / 0 → без лимита |
 | `stats:{sec}` | HASH | get/ack/reject (+ теги) |
 | `stats:index` | ZSET | Индекс секунд stats |
 

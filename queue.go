@@ -19,11 +19,12 @@ import (
 // Delay / BlockGroups / BlockTags / DeadLetter — через RejectOption.
 // Для ordered-партиций (!) дополнительно ставится partition в blocked.
 type RejectWithDelay struct {
-	Err         error
-	Delay       float64
-	BlockGroups []string
-	BlockTags   []string
-	DeadLetter  bool
+	Err           error
+	Delay         float64
+	BlockGroups   []string
+	BlockTags     []string
+	DeadLetter    bool
+	DeadLetterMax int // ёмкость DLQ; -1 = взять Consumer.SetDLQMaxSize; 0 = без лимита
 }
 
 func (e *RejectWithDelay) Error() string {
@@ -43,6 +44,7 @@ type rejectConfig struct {
 	blockGroups []string
 	blockTags   []string
 	deadLetter  bool
+	dlqMax      int // -1 = consumer default; 0 = unlimited; >0 = cap
 }
 
 // RejectOption — опция Reject / NewRejectWithDelay (порядок любой).
@@ -73,10 +75,24 @@ func WithBlockTags(ids ...string) RejectOption {
 }
 
 // WithDeadLetter — вместо возврата в очередь положить задачу в queue:{name}:dlq.
-// Meta (payload/partition/…) сохраняется для Admin.RetryDLQ; srq:queues −1.
-func WithDeadLetter() RejectOption {
+// Meta сохраняется для Admin.RetryDLQ; srq:queues −1.
+//
+// maxSize (опционально):
+//   - без аргумента — лимит из Consumer.SetDLQMaxSize (0 = без лимита);
+//   - 0 — явно без лимита;
+//   - N>0 — после ZADD держать ZCARD(dlq) ≤ N (вытеснение самых старых + meta).
+func WithDeadLetter(maxSize ...int) RejectOption {
 	return func(c *rejectConfig) {
 		c.deadLetter = true
+		if len(maxSize) == 0 {
+			c.dlqMax = -1
+			return
+		}
+		if maxSize[0] <= 0 {
+			c.dlqMax = 0
+			return
+		}
+		c.dlqMax = maxSize[0]
 	}
 }
 
@@ -95,11 +111,12 @@ func applyRejectOptions(opts []RejectOption) rejectConfig {
 func NewRejectWithDelay(err error, opts ...RejectOption) *RejectWithDelay {
 	cfg := applyRejectOptions(opts)
 	return &RejectWithDelay{
-		Err:         err,
-		Delay:       cfg.delay,
-		BlockGroups: cfg.blockGroups,
-		BlockTags:   cfg.blockTags,
-		DeadLetter:  cfg.deadLetter,
+		Err:           err,
+		Delay:         cfg.delay,
+		BlockGroups:   cfg.blockGroups,
+		BlockTags:     cfg.blockTags,
+		DeadLetter:    cfg.deadLetter,
+		DeadLetterMax: cfg.dlqMax,
 	}
 }
 
@@ -447,6 +464,7 @@ type Consumer struct {
 	concurrencyTags             bool // F5: проверка race! в Get / release в Ack·Reject
 	samePartitionBatch          bool
 	extendGroupBlocksOnly       bool
+	dlqMaxSize                  int // дефолт для WithDeadLetter(); 0 = без лимита
 	middlewares                 []HandlerMiddleware
 	stopPing                    chan struct{}
 	stats                       *StatsSink
@@ -560,6 +578,15 @@ func (c *Consumer) SetSamePartitionBatch(enabled bool) {
 // длинную паузу. По умолчанию выключено — каждый вызов перезаписывает unlockAt.
 func (c *Consumer) SetExtendGroupBlocksOnly(enabled bool) {
 	c.extendGroupBlocksOnly = enabled
+}
+
+// SetDLQMaxSize — дефолтная ёмкость DLQ для WithDeadLetter() без аргумента.
+// 0 (дефолт) — без лимита. >0 — вытеснение старых при Reject→DLQ (+ дочистка в ping).
+func (c *Consumer) SetDLQMaxSize(n int) {
+	if n < 0 {
+		n = 0
+	}
+	c.dlqMaxSize = n
 }
 
 // SetIdempotencyTtl — окно dedupe после успешного Ack: payload:{id} живёт TTL, повторный Publish с тем же ID отклоняется (NX).
@@ -978,7 +1005,11 @@ func rejectOptsFromDelay(e *RejectWithDelay) []RejectOption {
 		opts = append(opts, WithBlockTags(e.BlockTags...))
 	}
 	if e.DeadLetter {
-		opts = append(opts, WithDeadLetter())
+		if e.DeadLetterMax < 0 {
+			opts = append(opts, WithDeadLetter())
+		} else {
+			opts = append(opts, WithDeadLetter(e.DeadLetterMax))
+		}
 	}
 	return opts
 }
@@ -997,6 +1028,14 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, opts ...RejectOpti
 		return err
 	}
 
+	dlqMax := 0
+	if cfg.deadLetter {
+		dlqMax = cfg.dlqMax
+		if dlqMax < 0 {
+			dlqMax = c.dlqMaxSize
+		}
+	}
+
 	result, err := getRejectScript().Run(ctx, c.redis, []string{},
 		c.queueName,
 		taskID,
@@ -1007,6 +1046,7 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, opts ...RejectOpti
 		bool01(c.extendGroupBlocksOnly),
 		blockTagsStr,
 		bool01(cfg.deadLetter),
+		dlqMax,
 	).Result()
 
 	if err != nil {
@@ -1104,6 +1144,7 @@ type ConsumerPool struct {
 	concurrencyTags             bool
 	samePartitionBatch          bool
 	extendGroupBlocksOnly       bool
+	dlqMaxSize                  int
 	middlewares                 []HandlerMiddleware
 	stats                       *StatsSink
 	router                      *ShardRouter
@@ -1206,6 +1247,14 @@ func (p *ConsumerPool) SetExtendGroupBlocksOnly(enabled bool) {
 	p.extendGroupBlocksOnly = enabled
 }
 
+// SetDLQMaxSize — см. Consumer.SetDLQMaxSize.
+func (p *ConsumerPool) SetDLQMaxSize(n int) {
+	if n < 0 {
+		n = 0
+	}
+	p.dlqMaxSize = n
+}
+
 // Use добавляет middleware вокруг handler (см. Consumer.Use).
 func (p *ConsumerPool) Use(mw ...HandlerMiddleware) {
 	p.middlewares = append(p.middlewares, mw...)
@@ -1259,6 +1308,7 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c.concurrencyTags = p.concurrencyTags
 		c.samePartitionBatch = p.samePartitionBatch
 		c.extendGroupBlocksOnly = p.extendGroupBlocksOnly
+		c.dlqMaxSize = p.dlqMaxSize
 		c.middlewares = p.middlewares
 		c.stats = stats
 		c.statsOwn = false
