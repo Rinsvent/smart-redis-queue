@@ -97,3 +97,32 @@ func TestAdmin_QueueSnapshot_PausedAndOldest(t *testing.T) {
 	assert.Equal(t, 5, snap2.OldestReady.QueuePriority)
 	assert.Greater(t, snap2.ActiveChats, 0)
 }
+
+// Multi-group partition must match Get admission: any sibling group blocked → not ready,
+// even when discovered via another free group's :ready set.
+func TestAdmin_QueueSnapshot_OldestReady_MultiGroupAdmission(t *testing.T) {
+	producer, _, rdb := setupTestQueue(t)
+	admin := NewAdmin(rdb)
+	ctx := context.Background()
+	q := "test-queue"
+
+	require.NoError(t, producer.Publish(ctx,
+		&Task{ID: "multi", Partition: "c-multi", Groups: []string{"tok:a", "tok:b"}, QueuePriority: 5,
+			PartitionPriority: 1, Payload: []byte("m"), Scheduled: time.Now().Add(-2 * time.Second)},
+		&Task{ID: "solo", Partition: "c-solo", Groups: []string{"tok:b"}, QueuePriority: 5,
+			PartitionPriority: 1, Payload: []byte("s"), Scheduled: time.Now().Add(-time.Second)},
+	))
+
+	require.NoError(t, admin.BlockGroups(ctx, q, 60, "tok:a"))
+
+	snap, err := admin.QueueSnapshot(ctx, q)
+	require.NoError(t, err)
+	require.NotNil(t, snap.OldestReady)
+	assert.Equal(t, "solo", snap.OldestReady.ID, "multi-group chat paused via tok:a must not win via tok:b")
+
+	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":groups", redis.Z{Score: 0, Member: "tok:a"}).Err())
+	snap2, err := admin.QueueSnapshot(ctx, q)
+	require.NoError(t, err)
+	require.NotNil(t, snap2.OldestReady)
+	assert.Equal(t, "multi", snap2.OldestReady.ID, "after unblock, older multi-group head wins")
+}

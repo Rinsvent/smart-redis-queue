@@ -312,9 +312,21 @@ func (a *Admin) partitionSnapshot(ctx context.Context, queueName, part string, l
 
 // findOldestReadyTask — следующий кандидат в духе Get: qp desc, free groups,
 // ready partitions, partition-prio desc, минимальный score среди голов.
+// Admission как isAdmissionBlocked: партиция недоступна, если blocked ИЛИ
+// любая из её групп на паузе (даже если встретили её через другую free group).
 func (a *Admin) findOldestReadyTask(ctx context.Context, queueName string, lanes []int, nowMs float64) (*OldestReadyTask, error) {
 	groupsKey := "queue:" + queueName + ":groups"
 	blockedKey := "queue:" + queueName + ":blocked"
+
+	blockedGroups := map[string]struct{}{}
+	if bl, err := a.redis.ZRangeByScore(ctx, groupsKey, &redis.ZRangeBy{
+		Min: "(" + strconv.FormatFloat(nowMs, 'f', -1, 64),
+		Max: "+inf",
+	}).Result(); err == nil {
+		for _, g := range bl {
+			blockedGroups[g] = struct{}{}
+		}
+	}
 
 	var best *OldestReadyTask
 	better := func(cand *OldestReadyTask) {
@@ -373,6 +385,20 @@ func (a *Admin) findOldestReadyTask(ctx context.Context, queueName string, lanes
 				if score, err := a.redis.ZScore(ctx, blockedKey, part).Result(); err == nil && nowMs < score {
 					continue
 				}
+				pgroups, _ := a.redis.SMembers(ctx, "queue:"+queueName+":partition:"+part+":groups").Result()
+				if len(pgroups) == 0 {
+					pgroups = []string{DefaultGroup}
+				}
+				admissionBlocked := false
+				for _, pg := range pgroups {
+					if _, ok := blockedGroups[pg]; ok {
+						admissionBlocked = true
+						break
+					}
+				}
+				if admissionBlocked {
+					continue
+				}
 				priosKey := "queue:" + queueName + ":" + pref + "partition:" + part + ":priorities"
 				prios, err := a.redis.ZRevRange(ctx, priosKey, 0, -1).Result()
 				if err != nil || len(prios) == 0 {
@@ -389,7 +415,6 @@ func (a *Admin) findOldestReadyTask(ctx context.Context, queueName string, lanes
 					if id == "" || head[0].Score > nowMs {
 						continue // future scheduled
 					}
-					pgroups, _ := a.redis.SMembers(ctx, "queue:"+queueName+":partition:"+part+":groups").Result()
 					better(&OldestReadyTask{
 						ID:                id,
 						Partition:         part,
