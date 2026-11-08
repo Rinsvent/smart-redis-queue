@@ -48,6 +48,7 @@ func (h *httpOps) mux() http.Handler {
 	mux.HandleFunc("/api/health", h.handleHealth)
 	mux.HandleFunc("/api/overview", h.handleOverview)
 	mux.HandleFunc("/api/shutdown", h.handleShutdown)
+	h.registerDataPlane(mux)
 	return mux
 }
 
@@ -93,7 +94,8 @@ func (h *httpOps) handleShutdown(w http.ResponseWriter, r *http.Request) {
 	}()
 }
 
-// ListenAndServe поднимает gRPC (data-plane) и HTTP (ops: health/overview/shutdown).
+// ListenAndServe поднимает gRPC и HTTP.
+// HTTP: data-plane /v1/publish|get|ack|reject (дубль gRPC для PHP) + ops /health /api/overview /api/shutdown.
 // httpAddr пустой — только gRPC.
 func (g *Gateway) ListenAndServe(ctx context.Context, grpcAddr, httpAddr string) error {
 	g.cfg.ListenAddr = grpcAddr
@@ -116,7 +118,7 @@ func (g *Gateway) ListenAndServe(ctx context.Context, grpcAddr, httpAddr string)
 			ReadHeaderTimeout: 5 * time.Second,
 		}
 		go func() {
-			g.log.Printf("HTTP ops listen %s (GET /health /api/overview, POST /api/shutdown)", httpAddr)
+			g.log.Printf("HTTP listen %s (/v1/publish|get|ack|reject, /health, /api/overview, /api/shutdown)", httpAddr)
 			ln, err := net.Listen("tcp", httpAddr)
 			if err != nil {
 				errCh <- err

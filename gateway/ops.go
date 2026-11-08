@@ -52,7 +52,7 @@ func (g *Gateway) PublishTasks(ctx context.Context, queue string, tasks []*redis
 	return nil
 }
 
-// GetTasks — Get только в Running.
+// GetTasks — Get только в Running. При шардах — fan-in по всем клиентам до prefetch.
 func (g *Gateway) GetTasks(ctx context.Context, queue, consumerID string, prefetch int) ([]*redisqueue.Task, error) {
 	if queue == "" {
 		return nil, ErrEmptyQueue
@@ -60,16 +60,43 @@ func (g *Gateway) GetTasks(ctx context.Context, queue, consumerID string, prefet
 	if err := g.state.allowGet(); err != nil {
 		return nil, err
 	}
-	c := g.consumer(queue, consumerID)
-	if prefetch > 0 {
+	if prefetch < 1 {
+		prefetch = 5
+	}
+	clients := g.redisClients()
+	if len(clients) == 1 {
+		c := g.consumer(queue, consumerID)
 		c.SetPrefetchCount(prefetch)
+		tasks, err := c.Get(ctx)
+		if err != nil {
+			g.noteRedisErr(err)
+			return nil, err
+		}
+		return tasks, nil
 	}
-	tasks, err := c.Get(ctx)
-	if err != nil {
-		g.noteRedisErr(err)
-		return nil, err
+	out := make([]*redisqueue.Task, 0, prefetch)
+	per := prefetch
+	if per < 1 {
+		per = 1
 	}
-	return tasks, nil
+	for i, rdb := range clients {
+		if len(out) >= prefetch {
+			break
+		}
+		need := prefetch - len(out)
+		if need > per {
+			need = per
+		}
+		c := g.consumerOn(rdb, queue, consumerID, i)
+		c.SetPrefetchCount(need)
+		tasks, err := c.Get(ctx)
+		if err != nil {
+			g.noteRedisErr(err)
+			return nil, err
+		}
+		out = append(out, tasks...)
+	}
+	return out, nil
 }
 
 // AckTask — Ack; при RedisDown копит в op-log без вызова Redis.
@@ -102,8 +129,7 @@ func (g *Gateway) AckTask(ctx context.Context, queue, consumerID, taskID string,
 		return nil
 	}
 
-	c := g.consumer(queue, consumerID)
-	if err := c.Ack(ctx, taskID, ackOptions(rec)...); err != nil {
+	if err := g.ackOnShards(ctx, queue, consumerID, taskID, rec); err != nil {
 		g.noteRedisErr(err)
 		if g.state.Get() == StateRedisDown {
 			op.RedisOK = false
@@ -117,6 +143,24 @@ func (g *Gateway) AckTask(ctx context.Context, queue, consumerID, taskID string,
 	g.ops.append(op)
 	g.loss.onAckOK(taskID)
 	return nil
+}
+
+func (g *Gateway) ackOnShards(ctx context.Context, queue, consumerID, taskID string, rec *AckRec) error {
+	clients := g.redisClients()
+	var last error
+	for i, rdb := range clients {
+		idx := -1
+		if len(clients) > 1 {
+			idx = i
+		}
+		c := g.consumerOn(rdb, queue, consumerID, idx)
+		if err := c.Ack(ctx, taskID, ackOptions(rec)...); err != nil {
+			last = err
+			continue
+		}
+		return nil
+	}
+	return last
 }
 
 // RejectTask — Reject; publish остаётся / продлевается в loss-window.
@@ -151,8 +195,7 @@ func (g *Gateway) RejectTask(ctx context.Context, queue, consumerID, taskID stri
 		return nil
 	}
 
-	c := g.consumer(queue, consumerID)
-	if err := c.Reject(ctx, taskID, rejectOptions(rec)...); err != nil {
+	if err := g.rejectOnShards(ctx, queue, consumerID, taskID, rec); err != nil {
 		g.noteRedisErr(err)
 		if g.state.Get() == StateRedisDown {
 			now := time.Now()
@@ -170,6 +213,24 @@ func (g *Gateway) RejectTask(ctx context.Context, queue, consumerID, taskID stri
 	g.ops.append(op)
 	g.loss.onRejectOK(taskID, now)
 	return nil
+}
+
+func (g *Gateway) rejectOnShards(ctx context.Context, queue, consumerID, taskID string, rec *RejectRec) error {
+	clients := g.redisClients()
+	var last error
+	for i, rdb := range clients {
+		idx := -1
+		if len(clients) > 1 {
+			idx = i
+		}
+		c := g.consumerOn(rdb, queue, consumerID, idx)
+		if err := c.Reject(ctx, taskID, rejectOptions(rec)...); err != nil {
+			last = err
+			continue
+		}
+		return nil
+	}
+	return last
 }
 
 func (g *Gateway) noteRedisErr(err error) {

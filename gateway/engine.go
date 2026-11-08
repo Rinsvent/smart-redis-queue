@@ -16,8 +16,10 @@ import (
 type Config struct {
 	Redis      *redis.Client
 	ListenAddr string // host:port gRPC data-plane
-	HTTPAddr   string // host:port HTTP ops; empty = без HTTP
+	HTTPAddr   string // host:port HTTP (data-plane + ops); empty = без HTTP
 	DumpPath   string // graceful dump path; empty = no dump
+	// Shards — опционально: один gateway на все шарды (тот же ShardConfig, что у SDK).
+	Shards *redisqueue.ShardConfig
 	// SkipPersistCheck — только для тестов (miniredis / no AOF).
 	SkipPersistCheck bool
 	// LossWindowOverride — если SkipPersistCheck; иначе из Redis CONFIG.
@@ -34,9 +36,11 @@ type Gateway struct {
 	loss    *lossWindow
 	persist PersistInfo
 
-	mu        sync.Mutex
-	producers map[string]*redisqueue.Producer
-	consumers map[string]*redisqueue.Consumer // key: queue\x00consumerID
+	mu           sync.Mutex
+	producers    map[string]*redisqueue.Producer
+	consumers    map[string]*redisqueue.Consumer // key: queue\x00consumerID[\x00shardIdx]
+	shardClients []*redis.Client                 // nil → только cfg.Redis
+	shardRouter  *redisqueue.ShardRouter
 
 	stopHealth    chan struct{}
 	healthWG      sync.WaitGroup
@@ -66,6 +70,17 @@ func New(cfg Config) (*Gateway, error) {
 
 // Boot — проверка persist, загрузка dump, переход в Running или Recovering.
 func (g *Gateway) Boot(ctx context.Context) error {
+	if g.cfg.Shards != nil {
+		router, err := redisqueue.NewShardRouter(g.cfg.Shards)
+		if err != nil {
+			g.state.set(StateFailed)
+			return fmt.Errorf("gateway: shards: %w", err)
+		}
+		g.shardRouter = router
+		g.shardClients = router.Clients()
+		g.log.Printf("shards: %d", len(g.shardClients))
+	}
+
 	var info PersistInfo
 	var err error
 	if g.cfg.SkipPersistCheck {
@@ -78,10 +93,13 @@ func (g *Gateway) Boot(ctx context.Context) error {
 			info.LossWindow = time.Second
 		}
 	} else {
-		info, err = DetectLossWindow(ctx, g.cfg.Redis)
-		if err != nil {
-			g.state.set(StateFailed)
-			return err
+		clients := g.redisClients()
+		for i, c := range clients {
+			info, err = DetectLossWindow(ctx, c)
+			if err != nil {
+				g.state.set(StateFailed)
+				return fmt.Errorf("gateway: persist check shard/client[%d]: %w", i, err)
+			}
 		}
 	}
 	g.persist = info
@@ -165,6 +183,13 @@ func (g *Gateway) probeRedis(ctx context.Context) {
 	}
 }
 
+func (g *Gateway) redisClients() []*redis.Client {
+	if len(g.shardClients) > 0 {
+		return g.shardClients
+	}
+	return []*redis.Client{g.cfg.Redis}
+}
+
 func (g *Gateway) producer(queue string) *redisqueue.Producer {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -172,19 +197,30 @@ func (g *Gateway) producer(queue string) *redisqueue.Producer {
 		return p
 	}
 	p := redisqueue.NewProducer(g.cfg.Redis, queue)
+	if g.cfg.Shards != nil {
+		if err := p.SetShards(g.cfg.Shards); err != nil {
+			g.log.Printf("SetShards %s: %v", queue, err)
+		}
+	}
 	g.producers[queue] = p
 	return p
 }
 
 func (g *Gateway) consumer(queue, consumerID string) *redisqueue.Consumer {
+	return g.consumerOn(g.cfg.Redis, queue, consumerID, -1)
+}
+
+func (g *Gateway) consumerOn(rdb *redis.Client, queue, consumerID string, shardIdx int) *redisqueue.Consumer {
 	key := queue + "\x00" + consumerID
+	if shardIdx >= 0 {
+		key += "\x00" + fmt.Sprintf("%d", shardIdx)
+	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if c, ok := g.consumers[key]; ok {
 		return c
 	}
-	// startPing=false: heartbeat централизуем позже; пока без лишнего ping на каждый SDK consumer.
-	c := redisqueue.NewConsumer(g.cfg.Redis, queue, consumerID, redisqueue.WithPing(false))
+	c := redisqueue.NewConsumer(rdb, queue, consumerID, redisqueue.WithPing(false))
 	g.consumers[key] = c
 	return c
 }
@@ -201,6 +237,13 @@ func (g *Gateway) Close() {
 	defer g.mu.Unlock()
 	for _, c := range g.consumers {
 		c.Close()
+	}
+	for _, p := range g.producers {
+		_ = p.Close()
+	}
+	if g.shardRouter != nil {
+		_ = g.shardRouter.Close()
+		g.shardRouter = nil
 	}
 }
 

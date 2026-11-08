@@ -115,9 +115,9 @@ L1 v1: sticky OR + Rebuild/Purge (не auto-clear по depth=0). Контрак�
 ### 12. Gateway (v1 skeleton → доработки)
 
 Публично: [`docs/features/gateway.md`](docs/features/gateway.md).  
-Сейчас: `manager gateway` (+ `status`/`stop`), gRPC Publish/Get/Ack/Reject, HTTP ops, RAM loss-window ≤1s, op-log, drain dump, single-active; Admin UI → Redis напрямую; rate-limit остаётся в Lua.
+Сейчас: `manager gateway` (+ `status`/`stop`), gRPC + **HTTP JSON** data-plane (`/v1/publish|get|ack|reject` для PHP), HTTP ops, RAM loss-window ≤1s, op-log, drain dump, single-active, `Config.Shards` fan-in; Admin UI → Redis напрямую; rate-limit остаётся в Lua.
 
-Дальше: disk WAL / kill-9, active/passive, multi-shard fan-in в одном gateway, расширенный client (все Ack/Reject opts / backpressure), бенч vs прямой SDK.
+Дальше: disk WAL / kill-9, active/passive, CLI `--shards-file`, бенч vs прямой SDK.
 
 ---
 
