@@ -345,7 +345,7 @@ return notAddedItems
 // ARGV[5] = algorithm ("" = RL выкл); ARGV[6]=gRateN + пары; затем pRateN + пары
 // После rates: ARGV[argIdx] = concurrencyTags ("1" / "0")
 // ARGV[argIdx+1] = samePartition ("1" / "0") — добор prefetch из партиции первой задачи
-// Возвращает: {taskId1, partition1, payload1, rejectCount1, ...} или {}
+// Возвращает: {taskId, partition, payload, rejectCount, scoreMs, sharedPairs, ...} или {}
 var getScript = redis.NewScript(`
 local queueName = ARGV[1]
 local consumerId = ARGV[2]
@@ -891,7 +891,8 @@ local function getFromPartition(partition, group)
 					sharedPairs = {}
 				end
 				-- partition уже известен (мы внутри getFromPartition); GET partition:{id} не нужен
-				return {taskId, partition, payload, tostring(rejectCount), sharedPairs}
+				-- taskScore — исходный ZSET score (Scheduled ms) для Go Task.Scheduled
+				return {taskId, partition, payload, tostring(rejectCount), tostring(taskScore), sharedPairs}
 			end
 		else
 			redis.call('ZREM', prioritiesKey, maxPriority)
@@ -1030,7 +1031,7 @@ end
 local stickyPartition = nil
 local stickyGroup = nil
 local stickyPref = nil
-while #results / 5 < prefetchCount do
+while #results / 6 < prefetchCount do
 	if raceBudgetExhausted then
 		break
 	end
@@ -1053,7 +1054,8 @@ while #results / 5 < prefetchCount do
 	results[#results + 1] = taskData[2]
 	results[#results + 1] = taskData[3]
 	results[#results + 1] = taskData[4]
-	local sharedPairs = taskData[5]
+	results[#results + 1] = taskData[5] -- Scheduled ms (taskScore)
+	local sharedPairs = taskData[6]
 	if sharedPairs == nil then
 		sharedPairs = {}
 	end

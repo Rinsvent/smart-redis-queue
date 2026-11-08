@@ -822,10 +822,10 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 		return nil, nil
 	}
 
-	// Результат: {taskId, partition, payload, rejectCount, sharedPairs, ...}
+	// Результат: {taskId, partition, payload, rejectCount, scoreMs, sharedPairs, ...}
 	// sharedPairs — плоский массив [id, blob, id, blob, ...] или пустой.
-	tasks := make([]*Task, 0, len(results)/5)
-	for i := 0; i+4 < len(results); i += 5 {
+	tasks := make([]*Task, 0, len(results)/6)
+	for i := 0; i+5 < len(results); i += 6 {
 		if results[i] == nil {
 			continue
 		}
@@ -844,7 +844,13 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 				rejectCount = n
 			}
 		}
-		shared := parseSharedPairs(results[i+4])
+		scheduled := time.Now()
+		if results[i+4] != nil {
+			if ms, err := strconv.ParseInt(results[i+4].(string), 10, 64); err == nil && ms > 0 {
+				scheduled = time.UnixMilli(ms)
+			}
+		}
+		shared := parseSharedPairs(results[i+5])
 
 		raw := []byte(payload)
 		decoded, err := decodePayloadFromRedis(raw)
@@ -855,7 +861,7 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 			ID:                  taskID,
 			Partition:           partition,
 			Payload:             decoded,
-			Scheduled:           time.Now(),
+			Scheduled:           scheduled,
 			RejectCount:         rejectCount,
 			Shared:              shared,
 			bindRedis:           c.redis,

@@ -188,10 +188,11 @@ func TestQueue_Get_NonPartitioned(t *testing.T) {
 	producer, consumer, _ := setupTestQueue(t)
 	ctx := context.Background()
 
+	wantScheduled := time.Now().Add(-time.Second).Truncate(time.Millisecond)
 	task := &Task{
 		ID:        "task-1",
 		Payload:   []byte("test payload"),
-		Scheduled: time.Now().Add(-time.Second),
+		Scheduled: wantScheduled,
 	}
 
 	err := producer.Publish(ctx, task)
@@ -202,6 +203,7 @@ func TestQueue_Get_NonPartitioned(t *testing.T) {
 	require.NotEmpty(t, got)
 	assert.Equal(t, "task-1", got[0].ID)
 	assert.Equal(t, []byte("test payload"), got[0].Payload)
+	assert.Equal(t, wantScheduled.UnixMilli(), got[0].Scheduled.UnixMilli())
 }
 
 func TestQueue_Get_Partitioned(t *testing.T) {
