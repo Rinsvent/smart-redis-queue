@@ -48,14 +48,14 @@ func (w *lossWindow) onAckOK(taskID string) {
 	w.mu.Unlock()
 }
 
-// onRejectOK — как Ack: убираем publish из loss-window.
-// Иначе recover сделал бы re-publish после (или вместо) Reject → дубликат / откат Reject.
-// Reject не продлевает RetainUntil (просто удаляет). Сам Reject остаётся в op-log до replay/age-GC.
+// onRejectOK — no-op для retention: Reject ≠ «обработано».
+// Publish остаётся до publishOK+window, чтобы при AOF-потере recover мог re-publish
+// (клиент Reject’нул = не закончил; сообщение должно вернуться в Redis).
+// RetainUntil не продлеваем. Дубликат на recover без потери данных → AlreadyExist (ok).
+// Сам Reject (delay/blocks) живёт в op-log; RedisOK=false replay’ится, пока задача в processing.
 func (w *lossWindow) onRejectOK(taskID string, at time.Time) {
+	_ = taskID
 	_ = at
-	w.mu.Lock()
-	delete(w.byID, taskID)
-	w.mu.Unlock()
 }
 
 func (w *lossWindow) truncate(now time.Time) {

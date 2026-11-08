@@ -178,8 +178,10 @@ _ = conn.Producer("orders").Publish(ctx, &redisqueue.Task{ID: "1", Payload: []by
 | Событие | Loss-window | Op-log |
 |---------|-------------|--------|
 | Publish OK | до `publishOK + window` | append |
-| Ack | publish удаляется | append |
-| Reject | publish удаляется (не продлевается и не воскрешается на recover) | append + opts |
+| Ack | publish удаляется (обработано — не воскрешать) | append |
+| Reject | publish **остаётся** до конца окна, RetainUntil **не** продлевается | append + opts |
+
+Reject ≠ «готово»: если Redis потерял AOF за окно, recover делает re-publish из loss-window (тот же task id; `AlreadyExist` при целых данных — ok). Delay/blocks из Reject применяются через replay op-log, только пока задача ещё в processing (`RedisOK=false`).
 
 ## Heartbeat и stats
 

@@ -176,7 +176,7 @@ func (g *Gateway) ackOnShards(ctx context.Context, queue, consumerID, taskID str
 	return lastNotFound
 }
 
-// RejectTask — Reject; publish убирается из loss-window (не продлевается).
+// RejectTask — Reject; publish остаётся в loss-window до expiry (не продлевается).
 func (g *Gateway) RejectTask(ctx context.Context, queue, consumerID, taskID string, rej *RejectRec) error {
 	if queue == "" {
 		return ErrEmptyQueue
