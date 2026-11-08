@@ -580,8 +580,9 @@ func (c *Consumer) SetExtendGroupBlocksOnly(enabled bool) {
 	c.extendGroupBlocksOnly = enabled
 }
 
-// SetDLQMaxSize — дефолтная ёмкость DLQ для WithDeadLetter() без аргумента.
-// 0 (дефолт) — без лимита. >0 — вытеснение старых при Reject→DLQ (+ дочистка в ping).
+// SetDLQMaxSize — дефолтная ёмкость DLQ для WithDeadLetter() без аргумента
+// и лимит дочистки в ping (ARGV, без ключа в Redis).
+// 0 (дефолт) — без лимита. >0 — вытеснение старых при Reject→DLQ (+ батчи в ping).
 func (c *Consumer) SetDLQMaxSize(n int) {
 	if n < 0 {
 		n = 0
@@ -761,8 +762,7 @@ func (c *Consumer) pingLoop() {
 
 // ping обновляет heartbeat консьюмера через Lua скрипт
 func (c *Consumer) ping(ctx context.Context) error {
-	script := getPingScript()
-	_, err := script.Run(ctx, c.redis, []string{}, c.queueName, c.consumerID).Result()
+	_, err := getPingScript().Run(ctx, c.redis, []string{}, c.queueName, c.consumerID, c.dlqMaxSize).Result()
 	return err
 }
 

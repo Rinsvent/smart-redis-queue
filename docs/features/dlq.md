@@ -26,7 +26,7 @@ consumer.SetDLQMaxSize(101) // дефолт для WithDeadLetter() без ар�
 | `WithDeadLetter(0)` | Явно без лимита |
 | `WithDeadLetter(N)` N>0 | После добавления `ZCARD(dlq) ≤ N`: вытесняются самые старые (score = время попадания), meta чистится как при `PurgeDLQ` |
 
-На Reject трим до 32 oldest за вызов (обычный путь: +1/−1). Если хвост больше (снизили max / burst) — ping под `unlock:lock` дочищает батчами по 64. Лимит пишется в `queue:{name}:dlq:max`.
+На Reject трим до 32 oldest за вызов (обычный путь: +1/−1). Если хвост больше — ping под `unlock:lock` дочищает батчами по 64, лимит из `SetDLQMaxSize` (ARGV, без ключа в Redis).
 
 ## Admin
 
@@ -38,4 +38,4 @@ consumer.SetDLQMaxSize(101) // дефолт для WithDeadLetter() без ар�
 
 `InspectTask` / `ListMessages` отдают state `dead_letter`, пока задача в DLQ.
 
-Ключи: [redis-keys](../reference/redis-keys.md) (`dlq`, `dlq:score:{id}`, `dlq:max`).
+Ключи: [redis-keys](../reference/redis-keys.md) (`dlq`, `dlq:score:{id}`).

@@ -1292,10 +1292,7 @@ return 1
 // getRejectScript возвращает Lua скрипт для отклонения задачи.
 // Возврат в тот же priority с originalScore из consumer:tasks.
 // deadLetter=1 → ZADD queue:{q}:dlq (score=now), meta не чистим; srq:queues −1.
-// dlqMax>0 → после ZADD вытеснить самые старые (meta purge), ≤dlqMaxTrimPerReject за вызов;
-//
-//	пишем queue:{q}:dlq:max для дочистки в ping.
-//
+// dlqMax>0 → после ZADD вытеснить самые старые (meta purge), ≤dlqMaxTrimPerReject за вызов.
 // При waitTime > 0: ordered → blocked; группы → score unlockAt в groups.
 // ARGV[1]=queue ARGV[2]=taskId ARGV[3]=consumerId ARGV[4]=waitTime
 // ARGV[5]=blockGroups ARGV[6]=concurrencyTags ARGV[7]=extendGroupBlocksOnly
@@ -1366,7 +1363,6 @@ if deadLetter then
 	end
 	-- ёмкость: вытеснить oldest (не трогаем только что добавленный — у него max score)
 	if dlqMax > 0 then
-		redis.call('SET', "queue:" .. queueName .. ":dlq:max", tostring(dlqMax))
 		local card = redis.call('ZCARD', dlqKey)
 		local trimmed = 0
 		while card > dlqMax and trimmed < dlqMaxTrimPerReject do
@@ -1538,9 +1534,11 @@ return n
 // getPingScript возвращает Lua скрипт для ping консьюмера и разблокировки мертвых консьюмеров
 // ARGV[1] = queue name
 // ARGV[2] = consumer ID
+// ARGV[3] = dlqMax (0 = не тримить DLQ; >0 = дочистка до лимита батчами)
 var pingScript = redis.NewScript(`
 local queueName = ARGV[1]
 local consumerId = ARGV[2]
+local dlqMax = tonumber(ARGV[3]) or 0
 
 local consumersKey = "queue:" .. queueName .. ":consumers"
 local consumerKey = "queue:" .. queueName .. ":consumer:" .. consumerId
@@ -1567,46 +1565,42 @@ local blockedKey = "queue:" .. queueName .. ":blocked"
 local groupsKey = "queue:" .. queueName .. ":groups"
 redis.call('ZREMRANGEBYSCORE', blockedKey, '-inf', now)
 
--- DLQ cap: дочистка батчами, если Reject не успел (хвост после снижения max / burst)
-local dlqMaxStr = redis.call('GET', "queue:" .. queueName .. ":dlq:max")
-if dlqMaxStr ~= false then
-	local dlqMax = tonumber(dlqMaxStr) or 0
-	if dlqMax > 0 then
-		local dlqKey = "queue:" .. queueName .. ":dlq"
-		local card = redis.call('ZCARD', dlqKey)
-		local trimmed = 0
-		local dlqMaxTrimPerPing = 64
-		while card > dlqMax and trimmed < dlqMaxTrimPerPing do
-			local oldest = redis.call('ZRANGE', dlqKey, 0, 0)
-			if #oldest == 0 then
-				break
-			end
-			local oid = oldest[1]
-			redis.call('ZREM', dlqKey, oid)
-			local tagsKey = "queue:" .. queueName .. ":tags:" .. oid
-			local tags = redis.call('SMEMBERS', tagsKey)
-			for ti = 1, #tags do
-				local tagKey = "queue:" .. queueName .. ":tag:" .. tags[ti]
-				redis.call('SREM', tagKey, oid)
-				if redis.call('SCARD', tagKey) == 0 then
-					redis.call('DEL', tagKey)
-				end
-			end
-			redis.call('DEL',
-				"queue:" .. queueName .. ":dlq:score:" .. oid,
-				"queue:" .. queueName .. ":payload:" .. oid,
-				"queue:" .. queueName .. ":partition:" .. oid,
-				"queue:" .. queueName .. ":priority:" .. oid,
-				"queue:" .. queueName .. ":qpriority:" .. oid,
-				"queue:" .. queueName .. ":reject_count:" .. oid,
-				"queue:" .. queueName .. ":step:" .. oid,
-				"queue:" .. queueName .. ":headers:" .. oid,
-				"queue:" .. queueName .. ":race:tags:" .. oid,
-				"queue:" .. queueName .. ":debounce:" .. oid,
-				tagsKey)
-			card = card - 1
-			trimmed = trimmed + 1
+-- DLQ cap: дочистка батчами (лимит из ARGV consumer), если Reject не успел
+if dlqMax > 0 then
+	local dlqKey = "queue:" .. queueName .. ":dlq"
+	local card = redis.call('ZCARD', dlqKey)
+	local trimmed = 0
+	local dlqMaxTrimPerPing = 64
+	while card > dlqMax and trimmed < dlqMaxTrimPerPing do
+		local oldest = redis.call('ZRANGE', dlqKey, 0, 0)
+		if #oldest == 0 then
+			break
 		end
+		local oid = oldest[1]
+		redis.call('ZREM', dlqKey, oid)
+		local tagsKey = "queue:" .. queueName .. ":tags:" .. oid
+		local tags = redis.call('SMEMBERS', tagsKey)
+		for ti = 1, #tags do
+			local tagKey = "queue:" .. queueName .. ":tag:" .. tags[ti]
+			redis.call('SREM', tagKey, oid)
+			if redis.call('SCARD', tagKey) == 0 then
+				redis.call('DEL', tagKey)
+			end
+		end
+		redis.call('DEL',
+			"queue:" .. queueName .. ":dlq:score:" .. oid,
+			"queue:" .. queueName .. ":payload:" .. oid,
+			"queue:" .. queueName .. ":partition:" .. oid,
+			"queue:" .. queueName .. ":priority:" .. oid,
+			"queue:" .. queueName .. ":qpriority:" .. oid,
+			"queue:" .. queueName .. ":reject_count:" .. oid,
+			"queue:" .. queueName .. ":step:" .. oid,
+			"queue:" .. queueName .. ":headers:" .. oid,
+			"queue:" .. queueName .. ":race:tags:" .. oid,
+			"queue:" .. queueName .. ":debounce:" .. oid,
+			tagsKey)
+		card = card - 1
+		trimmed = trimmed + 1
 	end
 end
 

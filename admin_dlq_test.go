@@ -177,9 +177,6 @@ func TestAdmin_DLQ_MaxSizeEvictsOldest(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, ti.Exists)
 
-	maxStr, err := rdb.Get(ctx, "queue:"+q+":dlq:max").Result()
-	require.NoError(t, err)
-	assert.Equal(t, "2", maxStr)
 }
 
 func TestAdmin_DLQ_MaxSizeUnlimited(t *testing.T) {
