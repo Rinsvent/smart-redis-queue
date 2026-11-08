@@ -97,6 +97,21 @@ Copy-on-publish в N bound очередей: `Exchange` (direct / fanout / topic
 
 **Решение:** не отдельный протоколный эпик, пока нет жёсткого SaaS-multi-tenant. Берём как следствия §1 + документация «как изолировать»; жёсткий tenant middleware — только если появится продуктный запрос.
 
+### 11. Script / queue flags (ресерч → TBD)
+
+Два уровня битовых флагов вместо россыпи `"1"`/`"0"` и длинных `__srq_ex` / `__srq_jn`:
+
+| Уровень | Где | Зачем |
+|---------|-----|--------|
+| **L1 system** | `queue:{name}:flags` | Publish OR-ит caps (`HAS_RACE`, `HAS_QP`, …); Get не заходит в лишние ветки / `redis.call` |
+| **L2 call** | int в ARGV скрипта | Клиент: mode Publish + bool-опции вызова |
+
+Mode Publish (L2): `MODE_EX` побеждает `MODE_JN`; оба выкл → обычный Publish. **Не** цель — атомарный Exchange∩Journal в одном вызове; только короткий флаг вместо маркера-строки и явный приоритет веток.
+
+L1 v1: sticky OR + Rebuild/Purge (не auto-clear по depth=0). Контракт `SetConcurrencyTags` vs auto `HAS_RACE` — уточнить при реализации.
+
+Статус: **не делаем**, пока нет решения «берём / откладываем». Ресерч: [`internal/docs/script-flags-design.md`](internal/docs/script-flags-design.md).
+
 ---
 
 ## Порядок (ориентир)
@@ -104,6 +119,5 @@ Copy-on-publish в N bound очередей: `Exchange` (direct / fanout / topic
 1. ~~Документация: EOS-паттерн, fan-out vs work-queue, scale/multi-tenant~~ — сайт GitHub Pages (`docs/` + MkDocs): [rinsvent.github.io/smart-redis-queue](https://rinsvent.github.io/smart-redis-queue/). ANALYSIS остаётся детальным приложением.
 2. Auto-ack (§6).
 3. Selective groups / routing (§7).
-4. Шардинг по DB (§1) + заметки Cluster.
-5. Desktop (§2), persistence checklist (§3).
-6. Persist/replay / archive (§4) — после выбора модели A/B/C.
+4. Desktop (§2).
+5. Script / queue flags (§11) — после решения по ресерчу; не в горячем порядке.

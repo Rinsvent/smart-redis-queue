@@ -23,6 +23,7 @@
 5. **Selective groups** — consumer читает только выбранные группы.
 6. **Consistent hashing / live migration** — меньше боли при expand без полного drain.
 7. **Multi-tenant** — по запросу продукта; сейчас хватает queue / DB / ACL.
+8. **Script / queue flags** (TBD) — два уровня битовых флагов: L1 `queue:{name}:flags` (skip веток Get), L2 int в ARGV (mode Publish вместо `__srq_ex`/`__srq_jn`, bool-опции вызова). EX > JN > normal; без атомарного Exchange∩Journal. Ресерч: [`internal/docs/script-flags-design.md`](https://github.com/Rinsvent/smart-redis-queue/blob/main/internal/docs/script-flags-design.md). Пока **не берём в работу**.
 
 ## Порядок
 
@@ -31,7 +32,8 @@
 3. ~~Exchange (copy-on-publish)~~ — [exchange.md](features/exchange.md)  
 4. Auto-ack  
 5. Selective groups  
-6. Desktop UI 
-7. ~~Journal~~ — [journal.md](features/journal.md)
+6. Desktop UI  
+7. ~~Journal~~ — [journal.md](features/journal.md)  
+8. Script / queue flags — после решения по ресерчу
 
 Актуальный список в репозитории: [`ROADMAP.md`](https://github.com/Rinsvent/smart-redis-queue/blob/main/ROADMAP.md).
