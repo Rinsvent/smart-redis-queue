@@ -112,6 +112,13 @@ L1 v1: sticky OR + Rebuild/Purge (не auto-clear по depth=0). Контрак�
 
 Статус: **не делаем**, пока нет решения «берём / откладываем». Ресерч: [`internal/docs/script-flags-design.md`](internal/docs/script-flags-design.md).
 
+### 12. Gateway (v1 skeleton → доработки)
+
+Публично: [`docs/features/gateway.md`](docs/features/gateway.md).  
+Сейчас: `manager serve`, gRPC Publish/Get/Ack/Reject, RAM loss-window ≤1s, op-log, drain dump, single-active; Admin UI → Redis напрямую; rate-limit остаётся в Lua.
+
+Дальше: disk WAL / kill-9, active/passive, multi-shard fan-in в одном gateway, расширенный client (все Ack/Reject opts / backpressure), бенч vs прямой SDK.
+
 ---
 
 ## Порядок (ориентир)
@@ -121,3 +128,4 @@ L1 v1: sticky OR + Rebuild/Purge (не auto-clear по depth=0). Контрак�
 3. Selective groups / routing (§7).
 4. Desktop (§2).
 5. Script / queue flags (§11) — после решения по ресерчу; не в горячем порядке.
+6. Gateway доработки (§12).

@@ -481,6 +481,11 @@ func NewConsumer(redisClient *redis.Client, queueName string, consumerID string)
 	return newConsumer(redisClient, queueName, consumerID, true)
 }
 
+// NewConsumerNoPing — consumer без pingLoop (gateway централизует heartbeat / Redis probe).
+func NewConsumerNoPing(redisClient *redis.Client, queueName string, consumerID string) *Consumer {
+	return newConsumer(redisClient, queueName, consumerID, false)
+}
+
 // newConsumer создает консьюмера. startPing — запускать ли pingLoop (для тестов можно false).
 func newConsumer(redisClient *redis.Client, queueName string, consumerID string, startPing bool) *Consumer {
 	if consumerID == "" {

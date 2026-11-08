@@ -24,6 +24,7 @@
 | Dead letter (`WithDeadLetter`) | Терминальный сбой → `queue:{name}:dlq`; Admin Retry/Purge | [DLQ](dlq.md) |
 | Exchange | direct / fanout / topic → копии в N очередей | [Exchange](exchange.md) |
 | Journal | Durable ingress (kafka/pg/mongo) + recovery | [Journal](journal.md) |
+| Gateway | Opt-in gRPC перед Redis: loss-window + op-log, single-active | [Gateway](gateway.md) |
 
 ## Prefetch и пул
 

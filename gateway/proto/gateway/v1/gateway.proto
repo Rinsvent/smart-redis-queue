@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package gateway.v1;
+
+option go_package = "github.com/Rinsvent/smart-redis-queue/gateway/internal/pb/gateway/v1;gatewayv1";
+
+service Gateway {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Publish(PublishRequest) returns (PublishResponse);
+  rpc Get(GetRequest) returns (GetResponse);
+  rpc Ack(AckRequest) returns (AckResponse);
+  rpc Reject(RejectRequest) returns (RejectResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string state = 1;
+  string append_fsync = 2;
+  int64 loss_window_ns = 3;
+}
+
+message Task {
+  string id = 1;
+  string partition = 2;
+  int32 partition_priority = 3;
+  int32 queue_priority = 4;
+  bytes payload = 5;
+  repeated string tags = 6;
+  repeated string groups = 7;
+  int64 scheduled_unix_ms = 8;
+  int32 reject_count = 9;
+}
+
+message PublishRequest {
+  string queue = 1;
+  repeated Task tasks = 2;
+}
+
+message PublishResponse {}
+
+message GetRequest {
+  string queue = 1;
+  string consumer_id = 2;
+  int32 prefetch = 3;
+}
+
+message GetResponse {
+  repeated Task tasks = 1;
+}
+
+message AckRequest {
+  string queue = 1;
+  string consumer_id = 2;
+  string task_id = 3;
+  double idempotency_ttl_sec = 4;
+  map<string, bytes> shared = 5;
+  double shared_ttl_sec = 6;
+  repeated string open_blocks = 7;
+}
+
+message AckResponse {}
+
+message RejectRequest {
+  string queue = 1;
+  string consumer_id = 2;
+  string task_id = 3;
+  double delay = 4;
+  repeated string block_groups = 5;
+  repeated string block_tags = 6;
+  bool dead_letter = 7;
+  int32 dead_letter_max = 8; // -1 = consumer default
+}
+
+message RejectResponse {}

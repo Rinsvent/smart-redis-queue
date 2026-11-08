@@ -24,6 +24,7 @@
 6. **Consistent hashing / live migration** — меньше боли при expand без полного drain.
 7. **Multi-tenant** — по запросу продукта; сейчас хватает queue / DB / ACL.
 8. **Script / queue flags** (TBD) — два уровня битовых флагов: L1 `queue:{name}:flags` (skip веток Get), L2 int в ARGV (mode Publish вместо `__srq_ex`/`__srq_jn`, bool-опции вызова). EX > JN > normal; без атомарного Exchange∩Journal. Ресерч: [`internal/docs/script-flags-design.md`](https://github.com/Rinsvent/smart-redis-queue/blob/main/internal/docs/script-flags-design.md). Пока **не берём в работу**.
+9. **Gateway** — [gateway.md](features/gateway.md): `manager serve`, gRPC data-plane, RAM loss-window ≤1s, op-log, single-active. Дальше (roadmap): disk WAL / kill-9, active/passive, Admin RPC на gateway, multi-shard fan-in, async OK-after-WAL. Rate-limit **не** выносим из Redis.
 
 ## Порядок
 
@@ -34,6 +35,7 @@
 5. Selective groups  
 6. Desktop UI  
 7. ~~Journal~~ — [journal.md](features/journal.md)  
-8. Script / queue flags — после решения по ресерчу
+8. Script / queue flags — после решения по ресерчу  
+9. Gateway — доработки после v1 skeleton (disk WAL, HA, шарды)
 
 Актуальный список в репозитории: [`ROADMAP.md`](https://github.com/Rinsvent/smart-redis-queue/blob/main/ROADMAP.md).
