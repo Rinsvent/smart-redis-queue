@@ -25,6 +25,7 @@
 7. **Multi-tenant** — по запросу продукта; сейчас хватает queue / DB / ACL.
 8. **Script / queue flags** (TBD) — два уровня битовых флагов: L1 `queue:{name}:flags` (skip веток Get), L2 int в ARGV (mode Publish вместо `__srq_ex`/`__srq_jn`, bool-опции вызова). EX > JN > normal; без атомарного Exchange∩Journal. Ресерч: [`internal/docs/script-flags-design.md`](https://github.com/Rinsvent/smart-redis-queue/blob/main/internal/docs/script-flags-design.md). Пока **не берём в работу**.
 9. **Gateway** — [gateway.md](features/gateway.md): `--config` YAML, gRPC+HTTP data-plane, heartbeat/stats, fence на recover, бенч vs SDK. Roadmap: disk WAL / kill-9, active/passive, Admin RPC. Rate-limit остаётся в Redis.
+10. **Compact Redis keys** (major) — `srq:q:{qid}:` + короткие суффиксы вместо `queue:{name}:…`; сначала opt-in, в major — default + алгоритм миграции. Без interning part/group/tag. Ресерч: [`internal/docs/compact-keys-design.md`](https://github.com/Rinsvent/smart-redis-queue/blob/main/internal/docs/compact-keys-design.md); [redis-keys.md](reference/redis-keys.md); `ROADMAP.md` §13.
 
 ## Порядок
 
@@ -36,6 +37,7 @@
 6. Desktop UI  
 7. ~~Journal~~ — [journal.md](features/journal.md)  
 8. Script / queue flags — после решения по ресерчу  
-9. Gateway — после v1: disk WAL / kill-9, active/passive HA, Admin RPC (шарды уже в v1)
+9. Gateway — после v1: disk WAL / kill-9, active/passive HA, Admin RPC (шарды уже в v1)  
+10. Compact Redis keys — major: default + миграция legacy → `srq:q:{qid}:`
 
 Актуальный список в репозитории: [`ROADMAP.md`](https://github.com/Rinsvent/smart-redis-queue/blob/main/ROADMAP.md).

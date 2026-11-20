@@ -20,7 +20,8 @@
 | `srq:tasks:{ns}:catalog` | HASH | Схема Tasks (name → JSON); см. [Tasks](../features/tasks.md) |
 | `srq:tasks:{ns}:run:{name}` | HASH | Last-run status / progress mirror |
 
-Префикс очереди: `queue:{name}:…`
+Префикс очереди: `queue:{name}:…`  
+(Roadmap / major: compact `srq:q:{qid}:…` — см. [`internal/docs/compact-keys-design.md`](../../internal/docs/compact-keys-design.md).)
 
 | Ключ | Тип | Назначение |
 |------|-----|------------|

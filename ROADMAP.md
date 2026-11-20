@@ -119,6 +119,19 @@ L1 v1: sticky OR + Rebuild/Purge (не auto-clear по depth=0). Контрак�
 
 Roadmap (не в ближайшей итерации): disk WAL / kill-9; active/passive / multi-active; Admin RPC через gateway.
 
+### 13. Compact Redis keys (major)
+
+Сжатие keyspace: числовой QID очереди + префикс `srq:q:{qid}:` + короткие суффиксы (`pl`, `pt`, …) вместо `queue:{name}:payload:…`.
+
+- Сейчас ординала очереди нет — `srq:queues` member = имя; Ensure только регистрирует.
+- Сначала opt-in (`WithCompactKeys` / аналог); **в major — поведение по умолчанию**.
+- В major: алгоритм перехода legacy → compact (copy/rename ключей или dual-read окно + cutover; детальный дизайн при взятии в работу).
+- Interning партиций/групп/тегов — вне скоупа (низкий ROI); только qid + short tokens.
+- Без remapping name→qid на hot path: Producer/Consumer кэшируют qid после Ensure и передают в Lua ARGV.
+
+Ресерч/архитектура: [`internal/docs/compact-keys-design.md`](internal/docs/compact-keys-design.md).  
+Справочник ключей сегодня: [`docs/reference/redis-keys.md`](docs/reference/redis-keys.md).
+
 ---
 
 ## Порядок (ориентир)
@@ -129,3 +142,4 @@ Roadmap (не в ближайшей итерации): disk WAL / kill-9; active
 4. Desktop (§2).
 5. Script / queue flags (§11) — после решения по ресерчу; не в горячем порядке.
 6. Gateway доработки (§12).
+7. Compact Redis keys (§13) — major: default + миграция legacy→`srq:q:{qid}:`.
