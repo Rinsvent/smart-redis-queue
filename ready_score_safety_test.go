@@ -251,6 +251,56 @@ func TestSafety_StaleScoreZero_Blocked_DoesNotDeleteTask(t *testing.T) {
 	assert.Greater(t, score, float64(time.Now().UnixMilli()), "self-heal readyAt")
 }
 
+// TestSafety_TryReadyGroup_HealDoesNotSkipDue — self-heal выкидывает из due;
+// обход не должен пропускать соседей из‑за LIMIT offset (баг «смещение по живому ZSET»).
+func TestSafety_TryReadyGroup_HealDoesNotSkipDue(t *testing.T) {
+	producer, consumer, rdb := setupTestQueue(t)
+	consumer.SetPrefetchCount(1)
+	consumer.SetPartitionScanBudget(256)
+	ctx := context.Background()
+	q := "test-queue"
+	const group = "g"
+	const n = 40
+	future := time.Now().Add(time.Hour)
+
+	tasks := make([]*Task, n)
+	for i := 0; i < n; i++ {
+		tasks[i] = &Task{
+			ID: fmt.Sprintf("f-%02d", i), Partition: fmt.Sprintf("!p:%02d", i),
+			Groups: []string{group}, Payload: []byte("x"), Scheduled: future,
+		}
+	}
+	require.NoError(t, producer.Publish(ctx, tasks...))
+
+	// Stale: score=0 → все due, хотя головы future (как после миграции / баг score).
+	for i := 0; i < n; i++ {
+		part := fmt.Sprintf("!p:%02d", i)
+		require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":group:"+group+":ready", redis.Z{Score: 0, Member: part}).Err())
+	}
+	nowMs := float64(time.Now().UnixMilli())
+	if tm, err := rdb.Time(ctx).Result(); err == nil {
+		nowMs = float64(tm.UnixMilli())
+	}
+	dueBefore, err := rdb.ZCount(ctx, "queue:"+q+":group:"+group+":ready", "-inf", strconv.FormatInt(int64(nowMs), 10)).Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(n), dueBefore)
+
+	got, err := consumer.Get(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, got, "только future heads")
+
+	dueAfter, err := rdb.ZCount(ctx, "queue:"+q+":group:"+group+":ready", "-inf", strconv.FormatInt(int64(nowMs), 10)).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), dueAfter,
+		"один Get с budget>=N должен self-heal все due без пропусков по offset; осталось due=%d", dueAfter)
+
+	// Задачи на месте.
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("f-%02d", i)
+		require.Equal(t, int64(1), rdb.Exists(ctx, "queue:"+q+":payload:"+id).Val(), id)
+	}
+}
+
 func TestSafety_RejectDelay_ThenUnblock_Delivers(t *testing.T) {
 	producer, consumer, rdb := setupTestQueue(t)
 	admin := NewAdmin(rdb)

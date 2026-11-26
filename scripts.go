@@ -903,46 +903,76 @@ end
 local lastCollectedGroup = nil
 
 -- ready = ZSET score=nextReadyAt. Обход только due: ZRANGEBYSCORE -inf now.
--- Бюджет: не больше partitionScanBudget вызовов tryCollectFromPartition на группу;
--- исчерпание → бросаем группу до конца этого Get (страховка от O(N) due+uncollectable).
+-- Бюджет: не больше partitionScanBudget вызовов tryCollectFromPartition на группу.
+--
+-- Нельзя фиксировать n/offset на всё окно: visit (self-heal / future head / empty)
+-- выкидывает member из due и сдвигает индексы → LIMIT from пропускает соседей.
+-- Поэтому: visited + после визитов offset=0; если окно уже всё visited — сдвигаем offset.
 local function tryReadyGroup(g)
 	local readyKey = "queue:" .. queueName .. ":" .. currentPref .. "group:" .. g .. ":ready"
-	local n = redis.call('ZCOUNT', readyKey, '-inf', now)
-	if n == 0 then
-		return nil
-	end
-	local start = math.random(0, n - 1)
-	local seen = 0
+	local visited = {}
 	local checked = 0
-	while seen < n do
-		local from = (start + seen) % n
-		local take = math.min(32, n - seen)
-		local parts
-		if from + take <= n then
-			parts = redis.call('ZRANGEBYSCORE', readyKey, '-inf', now, 'LIMIT', from, take)
-		else
-			local left = n - from
-			parts = redis.call('ZRANGEBYSCORE', readyKey, '-inf', now, 'LIMIT', from, left)
-			local rest = redis.call('ZRANGEBYSCORE', readyKey, '-inf', now, 'LIMIT', 0, take - left)
-			for ri = 1, #rest do
-				parts[#parts + 1] = rest[ri]
+	local offset = 0
+	local firstBatch = true
+
+	while true do
+		local n = redis.call('ZCOUNT', readyKey, '-inf', now)
+		if n == 0 then
+			return nil
+		end
+		if offset >= n then
+			return nil
+		end
+
+		local from = offset
+		if firstBatch then
+			from = math.random(0, n - 1)
+			firstBatch = false
+		end
+
+		local take = math.min(32, n - from)
+		local parts = redis.call('ZRANGEBYSCORE', readyKey, '-inf', now, 'LIMIT', from, take)
+		if from > 0 then
+			-- первый random-батч: добрать с начала кольца
+			local need = math.min(32, n) - #parts
+			if need > 0 then
+				local rest = redis.call('ZRANGEBYSCORE', readyKey, '-inf', now, 'LIMIT', 0, need)
+				for ri = 1, #rest do
+					parts[#parts + 1] = rest[ri]
+				end
 			end
 		end
+		if #parts == 0 then
+			return nil
+		end
+
+		local newVisits = 0
 		for pi = 1, #parts do
-			if partitionScanBudget >= 0 and checked >= partitionScanBudget then
-				partitionBudgetHits = partitionBudgetHits + 1
-				return nil
-			end
-			checked = checked + 1
-			local taskData = tryCollectFromPartition(parts[pi], g)
-			if taskData then
-				lastCollectedGroup = g
-				return taskData
+			local part = parts[pi]
+			if not visited[part] then
+				visited[part] = true
+				newVisits = newVisits + 1
+				if partitionScanBudget >= 0 and checked >= partitionScanBudget then
+					partitionBudgetHits = partitionBudgetHits + 1
+					return nil
+				end
+				checked = checked + 1
+				local taskData = tryCollectFromPartition(part, g)
+				if taskData then
+					lastCollectedGroup = g
+					return taskData
+				end
 			end
 		end
-		seen = seen + take
+
+		if newVisits > 0 then
+			-- due мог сжаться — начинаем с головы, visited не даст зациклиться на uncollectable
+			offset = 0
+		else
+			-- окно из уже посещённых due (локи и т.п.) — перешагиваем
+			offset = offset + #parts
+		end
 	end
-	return nil
 end
 
 -- Обход свободных групп в текущем currentPref: ZCOUNT + ZRANGEBYSCORE LIMIT батчами.
