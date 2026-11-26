@@ -60,7 +60,9 @@ end
 
 local taskBase = 4 + bpCount * 2
 -- groups: каталог групп (member есть → участвует в обходе Get). Блоки — в {pref}groups:blocked.
+-- ready score = nextReadyAt (ms): Get берёт только ZRANGEBYSCORE -inf now.
 local groupsKey = "queue:" .. queueName .. ":groups"
+local blockedKey = "queue:" .. queueName .. ":blocked"
 local queuePrioritiesKey = "queue:" .. queueName .. ":priorities"
 
 local function qpPrefix(qp)
@@ -75,9 +77,52 @@ local function ensureGroup(group)
 	end
 end
 
--- Поднять partition в ready всех её групп (после ZADD задачи); pref = "" | "qpN:"
-local function ensurePartitionReady(partitionCode, pref)
-	local partGroupsKey = "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups"
+local function partitionBlockedUntil(partition)
+	local s = redis.call('ZSCORE', blockedKey, partition)
+	if s then return tonumber(s) end
+	return nil
+end
+
+-- readyAt с учётом partition blocked (не поднимать due, пока парковка).
+local function effectiveReadyAt(partition, readyAt)
+	local bu = partitionBlockedUntil(partition)
+	if bu and bu > readyAt then
+		return bu
+	end
+	return readyAt
+end
+
+-- Раньше доступность побеждает (min score); не раздуваем readyAt вверх.
+local function touchGroupReady(pref, group, partition, readyAt)
+	readyAt = effectiveReadyAt(partition, readyAt)
+	local key = "queue:" .. queueName .. ":" .. pref .. "group:" .. group .. ":ready"
+	local cur = redis.call('ZSCORE', key, partition)
+	if (not cur) or tonumber(cur) > readyAt then
+		redis.call('ZADD', key, readyAt, partition)
+	end
+end
+
+local function minPartitionHeadScore(pref, partition)
+	local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":priorities"
+	local priorities = redis.call('ZRANGE', prioritiesKey, 0, -1)
+	local minS = nil
+	for i = 1, #priorities do
+		local qk = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":" .. priorities[i]
+		local tasks = redis.call('ZRANGE', qk, 0, 0, 'WITHSCORES')
+		if #tasks >= 2 then
+			local s = tonumber(tasks[2])
+			if minS == nil or s < minS then
+				minS = s
+			end
+		end
+	end
+	return minS
+end
+
+-- Выставить ready score во всех группах партиции (force, не min).
+local function setPartitionReadyAt(pref, partition, readyAt)
+	readyAt = effectiveReadyAt(partition, readyAt)
+	local partGroupsKey = "queue:" .. queueName .. ":partition:" .. partition .. ":groups"
 	local pgroups = redis.call('SMEMBERS', partGroupsKey)
 	if #pgroups == 0 then
 		pgroups = {"_default"}
@@ -86,8 +131,27 @@ local function ensurePartitionReady(partitionCode, pref)
 	for gi = 1, #pgroups do
 		local g = pgroups[gi]
 		ensureGroup(g)
-		redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", 0, partitionCode)
+		redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", readyAt, partition)
 	end
+end
+
+-- Пересчитать ready из голов priority-ZSET (или снять с ready).
+local function refreshPartitionReady(pref, partition)
+	local minS = minPartitionHeadScore(pref, partition)
+	if minS == nil then
+		local partGroupsKey = "queue:" .. queueName .. ":partition:" .. partition .. ":groups"
+		local pgroups = redis.call('SMEMBERS', partGroupsKey)
+		for gi = 1, #pgroups do
+			redis.call('ZREM', "queue:" .. queueName .. ":" .. pref .. "group:" .. pgroups[gi] .. ":ready", partition)
+		end
+		return
+	end
+	setPartitionReadyAt(pref, partition, minS)
+end
+
+-- Поднять partition в ready всех её групп (после ZADD задачи); pref = "" | "qpN:"
+local function ensurePartitionReady(partitionCode, pref)
+	refreshPartitionReady(pref, partitionCode)
 end
 
 local debPrefix = "deb!"
@@ -154,14 +218,14 @@ for i = 0, taskCount - 1 do
 				if group ~= "" then
 					hasGroup = true
 					ensureGroup(group)
-					redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. group .. ":ready", 0, partitionCode)
+					touchGroupReady(pref, group, partitionCode, scheduled)
 					redis.call('SADD', partGroupsKey, group)
 				end
 			end
 		end
 		if not hasGroup then
 			ensureGroup("_default")
-			redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:_default:ready", 0, partitionCode)
+			touchGroupReady(pref, "_default", partitionCode, scheduled)
 			redis.call('SADD', partGroupsKey, "_default")
 		end
     elseif isDebounce then
@@ -404,16 +468,21 @@ redis.call('SET', consumerKey, currentUnix, 'EX', 120)
 
 local results = {}
 
--- blocked: ZSET member=partition (ordered Reject).
--- groups — только каталог групп (score ≤ now = есть в обходе); блоки групп — в {pref}groups:blocked.
--- Cleanup expired stream-блоков — в ping.
+-- blocked: ZSET member=partition (ordered Reject). Без preload всего ZSET (O(N) на idle Get).
+-- groups — каталог; блоки групп — в {pref}groups:blocked.
+-- ready score = nextReadyAt; Get обходит только due (score ≤ now). Cleanup expired — в ping.
 local blockedKey = "queue:" .. queueName .. ":blocked"
 local groupsKey = "queue:" .. queueName .. ":groups"
 
-local activeBlocked = redis.call('ZRANGEBYSCORE', blockedKey, '(' .. now, '+inf')
-local blockedParts = {}
-for bi = 1, #activeBlocked do
-	blockedParts[activeBlocked[bi]] = true
+local function partitionBlockedUntil(partition)
+	local s = redis.call('ZSCORE', blockedKey, partition)
+	if s then
+		local n = tonumber(s)
+		if n > now then
+			return n
+		end
+	end
+	return nil
 end
 
 -- Блоки текущего lane; при смене currentPref — заменить (не копить с верхних qp).
@@ -427,6 +496,41 @@ local function reloadLaneBlockedGroups()
 	end
 end
 reloadLaneBlockedGroups()
+
+local function setPartitionReadyAt(pref, partition, readyAt)
+	local bu = partitionBlockedUntil(partition)
+	if bu and bu > readyAt then
+		readyAt = bu
+	end
+	local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
+	if #pgroups == 0 then
+		pgroups = {"_default"}
+	end
+	for gi = 1, #pgroups do
+		local g = pgroups[gi]
+		if not redis.call('ZSCORE', groupsKey, g) then
+			redis.call('ZADD', groupsKey, 0, g)
+		end
+		redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", readyAt, partition)
+	end
+end
+
+local function minPartitionHeadScore(pref, partition)
+	local prioritiesKey = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":priorities"
+	local priorities = redis.call('ZRANGE', prioritiesKey, 0, -1)
+	local minS = nil
+	for i = 1, #priorities do
+		local qk = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partition .. ":" .. priorities[i]
+		local tasks = redis.call('ZRANGE', qk, 0, 0, 'WITHSCORES')
+		if #tasks >= 2 then
+			local s = tonumber(tasks[2])
+			if minS == nil or s < minS then
+				minS = s
+			end
+		end
+	end
+	return minS
+end
 
 math.randomseed((currentUnix % 100000) * 1000000 + tonumber(currentTime[2]))
 
@@ -577,9 +681,9 @@ local function rlCheckRates(keyPrefix, rates)
 	return true, 0
 end
 
--- Admission: partition в blockedParts, или любая группа в blockedGroups
+-- Admission: partition в blocked (ZSCORE), или любая группа в blockedGroups
 local function isAdmissionBlocked(partition)
-	if blockedParts[partition] then
+	if partitionBlockedUntil(partition) then
 		return true
 	end
 	local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
@@ -664,6 +768,18 @@ local function removePartitionFromIndexes(partition)
 	redis.call('DEL', "queue:" .. queueName .. ":" .. currentPref .. "partition:" .. partition .. ":priorities")
 end
 
+-- Обновить ready score после take / future-head.
+-- Пусто (задача in-flight): оставляем в ready со score=now — следующий Get увидит
+-- пустую партицию и вызовет removePartitionFromIndexes (не трогаем groups до того).
+local function refreshPartitionReadyAfterVisit(partition)
+	local minS = minPartitionHeadScore(currentPref, partition)
+	if minS == nil then
+		setPartitionReadyAt(currentPref, partition, now)
+		return
+	end
+	setPartitionReadyAt(currentPref, partition, minS)
+end
+
 -- Функция для получения одной задачи из партиции
 -- Партиции с префиксом "!" — эксклюзивный lock на консьюмера.
 -- Rate-limit блоки (blocked / groups) проверяются в isAdmissionBlocked до вызова.
@@ -727,7 +843,7 @@ local function getFromPartition(partition, group)
 					if not ok then
 						local unlockAt = now + waitMs
 						redis.call('ZADD', blockedKey, unlockAt, partition)
-						blockedParts[partition] = true
+						setPartitionReadyAt(currentPref, partition, unlockAt)
 						return nil
 					end
 				end
@@ -742,6 +858,8 @@ local function getFromPartition(partition, group)
 					redis.call('INCR', consumerPartitionCountKey)
 				end
 				partitionHadTask[partition] = true
+				-- следующая голова / снять с ready, если пусто
+				refreshPartitionReadyAfterVisit(partition)
 				local payloadKey = "queue:" .. queueName .. ":payload:" .. taskId
 				local payload = redis.call('GET', payloadKey)
 				local rejectCountKey = "queue:" .. queueName .. ":reject_count:" .. taskId
@@ -757,6 +875,7 @@ local function getFromPartition(partition, group)
 	-- дошли сюда без return: либо пусто, либо только future head(s)
 	if found then
 		deferPartition(partition)
+		refreshPartitionReadyAfterVisit(partition) -- self-heal score → min future head
 	else
 		removePartitionFromIndexes(partition)
 	end
@@ -770,6 +889,11 @@ local function tryCollectFromPartition(partition, group)
 		return nil
 	end
 	if isAdmissionBlocked(partition) then
+		-- миграция / stale score=0 при active blocked → поднять readyAt
+		local bu = partitionBlockedUntil(partition)
+		if bu then
+			setPartitionReadyAt(currentPref, partition, bu)
+		end
 		return nil
 	end
 	return getFromPartition(partition, group)
@@ -778,12 +902,12 @@ end
 -- Группа, из которой взята последняя задача collectOne (нужна добору samePartition для RL group-слоя).
 local lastCollectedGroup = nil
 
--- ready = ZSET (score=0). Random start index → ZRANGE батчами по кругу. Память O(batch).
+-- ready = ZSET score=nextReadyAt. Обход только due: ZRANGEBYSCORE -inf now.
 -- Бюджет: не больше partitionScanBudget вызовов tryCollectFromPartition на группу;
--- исчерпание → бросаем группу до конца этого Get, идём к следующей (страховка от O(N) parked).
+-- исчерпание → бросаем группу до конца этого Get (страховка от O(N) due+uncollectable).
 local function tryReadyGroup(g)
 	local readyKey = "queue:" .. queueName .. ":" .. currentPref .. "group:" .. g .. ":ready"
-	local n = redis.call('ZCARD', readyKey)
+	local n = redis.call('ZCOUNT', readyKey, '-inf', now)
 	if n == 0 then
 		return nil
 	end
@@ -795,11 +919,11 @@ local function tryReadyGroup(g)
 		local take = math.min(32, n - seen)
 		local parts
 		if from + take <= n then
-			parts = redis.call('ZRANGE', readyKey, from, from + take - 1)
+			parts = redis.call('ZRANGEBYSCORE', readyKey, '-inf', now, 'LIMIT', from, take)
 		else
 			local left = n - from
-			parts = redis.call('ZRANGE', readyKey, from, n - 1)
-			local rest = redis.call('ZRANGE', readyKey, 0, take - left - 1)
+			parts = redis.call('ZRANGEBYSCORE', readyKey, '-inf', now, 'LIMIT', from, left)
+			local rest = redis.call('ZRANGEBYSCORE', readyKey, '-inf', now, 'LIMIT', 0, take - left)
 			for ri = 1, #rest do
 				parts[#parts + 1] = rest[ri]
 			end
@@ -1037,12 +1161,21 @@ if isDebounce then
 			pgroups = {"_default"}
 			redis.call('SADD', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups", "_default")
 		end
+		local readyAt = score
+		local bu = redis.call('ZSCORE', "queue:" .. queueName .. ":blocked", partitionCode)
+		if bu and tonumber(bu) > readyAt then
+			readyAt = tonumber(bu)
+		end
 		for gi = 1, #pgroups do
 			local g = pgroups[gi]
 			if not redis.call('ZSCORE', groupsKey, g) then
 				redis.call('ZADD', groupsKey, 0, g)
 			end
-			redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", 0, partitionCode)
+			local rkey = "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready"
+			local cur = redis.call('ZSCORE', rkey, partitionCode)
+			if (not cur) or tonumber(cur) > readyAt then
+				redis.call('ZADD', rkey, readyAt, partitionCode)
+			end
 		end
 		redis.call('DEL', debounceKey)
 		-- race:tags оставляем — задача снова в очереди
@@ -1152,7 +1285,7 @@ if queuePriority > 0 then
 	redis.call('ZADD', "queue:" .. queueName .. ":priorities", queuePriority, tostring(queuePriority))
 end
 
--- ready = «есть/была работа». Каталог groups: score 0; блок — в {pref}groups:blocked.
+-- ready score = nextReadyAt (голова / reject unlock). Каталог groups; блок — {pref}groups:blocked.
 local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups")
 if #pgroups == 0 then
 	pgroups = {"_default"}
@@ -1163,7 +1296,6 @@ for gi = 1, #pgroups do
 	if not redis.call('ZSCORE', groupsKey, g) then
 		redis.call('ZADD', groupsKey, 0, g)
 	end
-	redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", 0, partitionCode)
 end
 
 -- :count / :lock только для ordered (!)
@@ -1181,8 +1313,9 @@ if needsLockUnlock then
 end
 
 -- При waitTime > 0: ordered → blocked; группы → {pref}groups:blocked потока задачи
+local unlockAt = nil
 if waitTime > 0 then
-	local unlockAt = math.floor(blockNowMs + waitTime * 1000)
+	unlockAt = math.floor(blockNowMs + waitTime * 1000)
 	if needsLockUnlock then
 		redis.call('ZADD', "queue:" .. queueName .. ":blocked", unlockAt, partitionCode)
 	end
@@ -1198,6 +1331,30 @@ if waitTime > 0 then
 			end
 		end
 	end
+end
+-- readyAt = min(heads); для ordered+delay не ниже unlockAt (парковка партиции)
+local readyAt = nil
+do
+	local priorities = redis.call('ZRANGE', prioritiesKey, 0, -1)
+	for pi = 1, #priorities do
+		local qk = "queue:" .. queueName .. ":" .. pref .. "partition:" .. partitionCode .. ":" .. priorities[pi]
+		local head = redis.call('ZRANGE', qk, 0, 0, 'WITHSCORES')
+		if #head >= 2 then
+			local hs = tonumber(head[2])
+			if readyAt == nil or hs < readyAt then
+				readyAt = hs
+			end
+		end
+	end
+end
+if readyAt == nil then
+	readyAt = score
+end
+if unlockAt ~= nil and needsLockUnlock and unlockAt > readyAt then
+	readyAt = unlockAt
+end
+for gi = 1, #pgroups do
+	redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. pgroups[gi] .. ":ready", readyAt, partitionCode)
 end
 
 -- Удаляем задачу из hash консьюмера (prefetch)
@@ -1390,12 +1547,32 @@ for i = 1, #consumers do
 				pgroups = {"_default"}
 				redis.call('SADD', "queue:" .. queueName .. ":partition:" .. part .. ":groups", "_default")
 			end
+			-- readyAt = min head после reclaim (задачи уже ZADD'нуты выше)
+			local readyAt = nil
+			local prioMap = partPriorities[laneKey]
+			for prioStr, _ in pairs(prioMap) do
+				local qk = "queue:" .. queueName .. ":" .. pref .. "partition:" .. part .. ":" .. prioStr
+				local head = redis.call('ZRANGE', qk, 0, 0, 'WITHSCORES')
+				if #head >= 2 then
+					local hs = tonumber(head[2])
+					if readyAt == nil or hs < readyAt then
+						readyAt = hs
+					end
+				end
+			end
+			if readyAt == nil then
+				readyAt = now
+			end
+			local bu = redis.call('ZSCORE', blockedKey, part)
+			if bu and tonumber(bu) > readyAt then
+				readyAt = tonumber(bu)
+			end
 			for gi = 1, #pgroups do
 				local g = pgroups[gi]
 				if not redis.call('ZSCORE', groupsKey, g) then
 					redis.call('ZADD', groupsKey, 0, g)
 				end
-				redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", 0, part)
+				redis.call('ZADD', "queue:" .. queueName .. ":" .. pref .. "group:" .. g .. ":ready", readyAt, part)
 			end
 
 			if part:sub(1, 1) == "!" then

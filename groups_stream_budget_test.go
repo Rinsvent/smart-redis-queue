@@ -104,9 +104,11 @@ func TestQueue_PartitionScanBudget_AbandonsLargeParkedGroup(t *testing.T) {
 		}
 	}
 
+	// Reject(delay) → ready score=unlockAt; due-срез пуст — budget не жжётся на parked.
 	consumer.SetPartitionScanBudget(8)
 	got, err := consumer.Get(ctx)
 	require.NoError(t, err)
 	assert.Empty(t, got)
-	assert.Greater(t, consumer.LastPartitionBudgetHits(), int64(0), "budget must trip on large parked group")
+	assert.Equal(t, int64(0), consumer.LastPartitionBudgetHits(),
+		"parked via readyAt>now must not burn partition scan budget")
 }

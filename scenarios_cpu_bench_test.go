@@ -468,7 +468,8 @@ func TestConnectorRateLimitLoad_Head(t *testing.T) {
 	t.Logf("block_group: redis_cpu=%.0fm Ack/s=%.1f Reject/s=%.0f avg_EVAL_us=%.0f",
 		grp.redisCPUMilli, grp.ackPerSec, grp.rejectPerSec, grp.evalUs)
 
-	// Главный сигнал отчёта: холостые Reject и дорогой EVAL, не busy-spin.
+	// После ready-score (nextReadyAt) idle Get дешёвый и в part_only — EVAL больше не сигнал.
+	// Главный выигрыш BlockGroups: нет шторма idle Reject (пустой Get → poll sleep).
 	if part.rejectPerSec < 50 {
 		t.Fatalf("part_only should idle-Reject a lot, got %.0f/s", part.rejectPerSec)
 	}
@@ -476,15 +477,8 @@ func TestConnectorRateLimitLoad_Head(t *testing.T) {
 		t.Fatalf("block_group should nearly stop idle Reject, got %.0f/s (part=%.0f)",
 			grp.rejectPerSec, part.rejectPerSec)
 	}
-	if part.evalUs < 80 {
-		t.Fatalf("part_only expected expensive EVAL, avg_us=%.0f", part.evalUs)
-	}
-	if grp.evalUs > part.evalUs*0.35 {
-		t.Fatalf("block_group EVAL should be much cheaper: part=%.0fµs group=%.0fµs",
-			part.evalUs, grp.evalUs)
-	}
-	if grp.redisCPUMilli > part.redisCPUMilli*0.5 {
-		t.Fatalf("block_group should cut Redis CPU (with poll on empty): part=%.0fm group=%.0fm",
+	if grp.redisCPUMilli > part.redisCPUMilli {
+		t.Fatalf("block_group should not exceed part_only Redis CPU: part=%.0fm group=%.0fm",
 			part.redisCPUMilli, grp.redisCPUMilli)
 	}
 }

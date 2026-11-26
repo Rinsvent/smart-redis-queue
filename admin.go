@@ -441,7 +441,7 @@ type TagStats struct {
 }
 
 // BlockPartition паркует партицию в ZSET blocked на waitTime секунд (как Reject rate-limit).
-// Get не берёт задачи из этой партиции, пока now < unlockAt. Consumer :lock не трогаем.
+// Get не берёт задачи из этой партиции, пока now < unlockAt. Поднимает ready score до unlockAt.
 func (a *Admin) BlockPartition(ctx context.Context, queueName, partition string, waitTime float64) error {
 	if partition == "" {
 		return fmt.Errorf("partition is required")
@@ -454,18 +454,43 @@ func (a *Admin) BlockPartition(ctx context.Context, queueName, partition string,
 		nowMs = float64(t.UnixMilli())
 	}
 	unlockAt := nowMs + waitTime*1000
-	return a.redis.ZAdd(ctx, "queue:"+queueName+":blocked", redis.Z{
+	if err := a.redis.ZAdd(ctx, "queue:"+queueName+":blocked", redis.Z{
 		Score:  unlockAt,
 		Member: partition,
-	}).Err()
+	}).Err(); err != nil {
+		return err
+	}
+	a.bumpPartitionReadyAt(ctx, queueName, partition, unlockAt)
+	return nil
 }
 
 // UnblockPartition снимает партицию из blocked — воркеры снова могут брать задачи.
+// Ready score сбрасываем в now (Get self-heal'ит до min head).
 func (a *Admin) UnblockPartition(ctx context.Context, queueName, partition string) error {
 	if partition == "" {
 		return fmt.Errorf("partition is required")
 	}
-	return a.redis.ZRem(ctx, "queue:"+queueName+":blocked", partition).Err()
+	if err := a.redis.ZRem(ctx, "queue:"+queueName+":blocked", partition).Err(); err != nil {
+		return err
+	}
+	a.bumpPartitionReadyAt(ctx, queueName, partition, a.nowMs(ctx))
+	return nil
+}
+
+// bumpPartitionReadyAt — обновить ready score, если партиция уже member в group ready.
+func (a *Admin) bumpPartitionReadyAt(ctx context.Context, queueName, partition string, readyAt float64) {
+	pgroups, _ := a.redis.SMembers(ctx, "queue:"+queueName+":partition:"+partition+":groups").Result()
+	if len(pgroups) == 0 {
+		pgroups = []string{DefaultGroup}
+	}
+	for _, pref := range a.streamPrefs(ctx, queueName) {
+		for _, g := range pgroups {
+			key := "queue:" + queueName + ":" + pref + "group:" + g + ":ready"
+			if _, err := a.redis.ZScore(ctx, key, partition).Result(); err == nil {
+				_ = a.redis.ZAdd(ctx, key, redis.Z{Score: readyAt, Member: partition}).Err()
+			}
+		}
+	}
 }
 
 // ListGroups — ZSET groups: total=ZCARD; без фильтра ZRANGE 0..limit-1, с фильтром ZSCAN MATCH до limit.
@@ -902,11 +927,18 @@ func (a *Admin) returnTaskToQueue(ctx context.Context, queueName, taskID, consum
 		pgroups = []string{DefaultGroup}
 		a.redis.SAdd(ctx, pgroupsKey, DefaultGroup)
 	}
+	readyAt := score
+	if bu, err := a.redis.ZScore(ctx, "queue:"+queueName+":blocked", partition).Result(); err == nil && bu > readyAt {
+		readyAt = bu
+	}
 	for _, g := range pgroups {
 		if _, err := a.redis.ZScore(ctx, groupsKey, g).Result(); err == redis.Nil {
 			a.redis.ZAdd(ctx, groupsKey, redis.Z{Score: 0, Member: g})
 		}
-		a.redis.ZAdd(ctx, "queue:"+queueName+":"+pref+"group:"+g+":ready", redis.Z{Score: 0, Member: partition})
+		key := "queue:" + queueName + ":" + pref + "group:" + g + ":ready"
+		if cur, err := a.redis.ZScore(ctx, key, partition).Result(); err == redis.Nil || cur > readyAt {
+			a.redis.ZAdd(ctx, key, redis.Z{Score: readyAt, Member: partition})
+		}
 	}
 
 	if len(partition) > 0 && partition[0] == '!' {

@@ -9,7 +9,7 @@
 | `qp{N}:partitions` | SET | Партиции lane qp=N |
 | `qp{N}:partition:{p}:{pp}` | ZSET | Задачи lane qp=N |
 | `qp{N}:partition:{p}:priorities` | ZSET | PartitionPriority в lane |
-| `qp{N}:group:{g}:ready` | ZSET | Ready партиции группы в lane |
+| `qp{N}:group:{g}:ready` | ZSET | Партиции группы в lane; score = nextReadyAt (ms), Get: `-inf..now` |
 | `partition:{p}:{pp}` | ZSET | Ожидающие задачи (legacy) |
 | `priority:{id}` | STRING | PartitionPriority задачи |
 | `qpriority:{id}` | STRING | QueuePriority задачи (только если > 0) |
@@ -21,7 +21,7 @@
 | `groups` | ZSET | Каталог групп (member есть → Get обходит); score обычно 0 |
 | `groups:blocked` | ZSET | Блок групп legacy-потока (qp=0); `BlockGroups` / Reject mass |
 | `qp{N}:groups:blocked` | ZSET | Блок групп потока qp=N (Reject берёт qp из задачи) |
-| `group:{g}:ready` | ZSET / SET | Ready партиции группы (legacy) |
+| `group:{g}:ready` | ZSET | Партиции группы (legacy); score = nextReadyAt |
 | `partition:{p}:groups` | SET | Группы партиции (общее) |
 | `partition:{p}:lock` | STRING | Lock ordered-партиции (общее) |
 | `blocked` | ZSET | Заблокированные партиции |
