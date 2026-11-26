@@ -187,7 +187,7 @@ func TestBusiness_Consume_RejectWithDelay_BlockGroups(t *testing.T) {
 		if !gotOther.Load() {
 			return false
 		}
-		score, err := rdb.ZScore(ctx, "queue:test-queue:groups", "conn").Result()
+		score, err := rdb.ZScore(ctx, "queue:test-queue:groups:blocked", "conn").Result()
 		return err == nil && score > float64(time.Now().UnixMilli())
 	}, 3*time.Second, 20*time.Millisecond, "other Ack + BlockGroups(conn)")
 	cancel()

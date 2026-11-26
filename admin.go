@@ -41,11 +41,11 @@ type PartitionStats struct {
 	Blocked    bool
 }
 
-// GroupStats — группа очереди (ZSET groups + ready).
+// GroupStats — группа очереди (каталог groups + ready + groups:blocked).
 type GroupStats struct {
 	Name    string
 	Ready   int64   // ZCARD group:g:ready
-	Score   float64 // unlockAt ms; ≤ now → свободна
+	Score   float64 // unlockAt ms из groups:blocked (max по lanes); 0 / ≤ now → свободна
 	Blocked bool
 }
 
@@ -372,41 +372,64 @@ func (a *Admin) nowMs(ctx context.Context) float64 {
 	return nowMs
 }
 
-func (a *Admin) groupStatsFromZ(ctx context.Context, queueName string, z redis.Z, nowMs float64) GroupStats {
+// streamPrefs — legacy "" + qpN: из queue:priorities (как purgePartition).
+func (a *Admin) streamPrefs(ctx context.Context, queueName string) []string {
+	prefs := []string{""}
+	if qpris, err := a.redis.ZRevRange(ctx, "queue:"+queueName+":priorities", 0, -1).Result(); err == nil {
+		for _, qp := range qpris {
+			if qp != "" && qp != "0" {
+				prefs = append(prefs, "qp"+qp+":")
+			}
+		}
+	}
+	return prefs
+}
+
+// groupBlockUnlockAt — max unlockAt по {pref}groups:blocked (prefs: legacy "" + qpN:).
+func (a *Admin) groupBlockUnlockAt(ctx context.Context, queueName, group string, prefs []string) float64 {
+	var unlock float64
+	for _, pref := range prefs {
+		key := "queue:" + queueName + ":" + pref + "groups:blocked"
+		if score, err := a.redis.ZScore(ctx, key, group).Result(); err == nil && score > unlock {
+			unlock = score
+		}
+	}
+	return unlock
+}
+
+func (a *Admin) groupStatsFromZ(ctx context.Context, queueName string, z redis.Z, nowMs float64, prefs []string) GroupStats {
 	name, _ := z.Member.(string)
 	ready, _ := a.redis.ZCard(ctx, "queue:"+queueName+":group:"+name+":ready").Result()
+	unlock := a.groupBlockUnlockAt(ctx, queueName, name, prefs)
 	return GroupStats{
 		Name:    name,
 		Ready:   ready,
-		Score:   z.Score,
-		Blocked: z.Score > nowMs,
+		Score:   unlock,
+		Blocked: unlock > nowMs,
 	}
 }
 
-// isPartitionBlocked: blocked (partition) или groups score > now.
+// isPartitionBlocked: ZSET blocked (partition) или любая группа партиции в {pref}groups:blocked.
 func (a *Admin) isPartitionBlocked(ctx context.Context, queueName, partition string) bool {
-	nowMs := float64(time.Now().UnixMilli())
-	if t, err := a.redis.Time(ctx).Result(); err == nil {
-		nowMs = float64(t.UnixMilli())
-	}
+	nowMs := a.nowMs(ctx)
 	blockedKey := "queue:" + queueName + ":blocked"
 	if score, err := a.redis.ZScore(ctx, blockedKey, partition).Result(); err == nil && nowMs < score {
 		return true
 	}
-	groupsKey := "queue:" + queueName + ":groups"
 	groups, _ := a.redis.SMembers(ctx, "queue:"+queueName+":partition:"+partition+":groups").Result()
 	if len(groups) == 0 {
 		groups = []string{DefaultGroup}
 	}
+	prefs := a.streamPrefs(ctx, queueName)
 	for _, g := range groups {
-		if score, err := a.redis.ZScore(ctx, groupsKey, g).Result(); err == nil && nowMs < score {
+		if a.groupBlockUnlockAt(ctx, queueName, g, prefs) > nowMs {
 			return true
 		}
 	}
 	return false
 }
 
-// BlockGroups паркует группы на waitTime секунд (см. Consumer.BlockGroups).
+// BlockGroups паркует группы на waitTime секунд в legacy-потоке (см. Consumer.BlockGroups).
 func (a *Admin) BlockGroups(ctx context.Context, queueName string, waitTime float64, groups ...string) error {
 	return blockGroups(ctx, a.redis, queueName, waitTime, false, groups...)
 }
@@ -457,6 +480,7 @@ func (a *Admin) ListGroups(ctx context.Context, queueName, substr string, limit 
 	}
 	total := int(n)
 	nowMs := a.nowMs(ctx)
+	prefs := a.streamPrefs(ctx, queueName)
 
 	var out []GroupStats
 	if substr == "" {
@@ -477,7 +501,7 @@ func (a *Admin) ListGroups(ctx context.Context, queueName, substr string, limit 
 			if name == "" {
 				continue
 			}
-			out = append(out, a.groupStatsFromZ(ctx, queueName, z, nowMs))
+			out = append(out, a.groupStatsFromZ(ctx, queueName, z, nowMs, prefs))
 		}
 	} else {
 		match := listMatchGlob(substr)
@@ -500,7 +524,7 @@ func (a *Admin) ListGroups(ctx context.Context, queueName, substr string, limit 
 				}
 				seen[name] = struct{}{}
 				score, _ := strconv.ParseFloat(keys[i+1], 64)
-				out = append(out, a.groupStatsFromZ(ctx, queueName, redis.Z{Member: name, Score: score}, nowMs))
+				out = append(out, a.groupStatsFromZ(ctx, queueName, redis.Z{Member: name, Score: score}, nowMs, prefs))
 			}
 			cursor = next
 			if cursor == 0 {

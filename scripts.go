@@ -59,7 +59,7 @@ if bpCount > 0 then
 end
 
 local taskBase = 4 + bpCount * 2
--- groups: ZSET score=0|past (свободна) | unlockAt>now (блок). Единственный источник правды для групп.
+-- groups: каталог групп (member есть → участвует в обходе Get). Блоки — в {pref}groups:blocked.
 local groupsKey = "queue:" .. queueName .. ":groups"
 local queuePrioritiesKey = "queue:" .. queueName .. ":priorities"
 
@@ -262,7 +262,8 @@ return notAddedItems
 // ARGV[5] = algorithm ("" = RL выкл); ARGV[6]=gRateN + пары; затем pRateN + пары
 // После rates: ARGV[argIdx] = concurrencyTags ("1" / "0")
 // ARGV[argIdx+1] = samePartition ("1" / "0") — добор prefetch из партиции первой задачи
-// Возвращает: {taskId1, partition1, payload1, rejectCount1, ...} или {}
+// ARGV[argIdx+2] = partitionScanBudget (0→256, <0→без лимита на группу)
+// Возвращает: {taskId…, "__srq_pbudget__", hits}
 var getScript = redis.NewScript(`
 local queueName = ARGV[1]
 local consumerId = ARGV[2]
@@ -304,6 +305,12 @@ end
 -- F5: concurrency tags (race!) — только при opt-in (хелперы после deferredPartitions)
 local concurrencyTags = (ARGV[argIdx] or "") == "1"
 local samePartition = (ARGV[argIdx + 1] or "") == "1"
+-- Бюджет tryCollectFromPartition на одну группу (tryReadyGroup); 0 → 256; <0 → без лимита
+local partitionScanBudget = tonumber(ARGV[argIdx + 2]) or 0
+if partitionScanBudget == 0 then
+	partitionScanBudget = 256
+end
+local partitionBudgetHits = 0
 local raceLocksKey = "queue:" .. queueName .. ":race:locks"
 local raceLocks = nil
 local raceSkips = 0
@@ -397,8 +404,9 @@ redis.call('SET', consumerKey, currentUnix, 'EX', 120)
 
 local results = {}
 
--- blocked: ZSET member=partition (ordered Reject). Группы — score в groups.
--- Cleanup expired — в ping.
+-- blocked: ZSET member=partition (ordered Reject).
+-- groups — только каталог групп (score ≤ now = есть в обходе); блоки групп — в {pref}groups:blocked.
+-- Cleanup expired stream-блоков — в ping.
 local blockedKey = "queue:" .. queueName .. ":blocked"
 local groupsKey = "queue:" .. queueName .. ":groups"
 
@@ -408,12 +416,17 @@ for bi = 1, #activeBlocked do
 	blockedParts[activeBlocked[bi]] = true
 end
 
--- Активные блоки групп (score > now) — один раз в память, не ZSCORE на каждую партицию.
-local blockedGroupsList = redis.call('ZRANGEBYSCORE', groupsKey, '(' .. now, '+inf')
+-- Блоки текущего lane; при смене currentPref — заменить (не копить с верхних qp).
 local blockedGroups = {}
-for gi = 1, #blockedGroupsList do
-	blockedGroups[blockedGroupsList[gi]] = true
+local function reloadLaneBlockedGroups()
+	blockedGroups = {}
+	local streamBlockedKey = "queue:" .. queueName .. ":" .. currentPref .. "groups:blocked"
+	local streamList = redis.call('ZRANGEBYSCORE', streamBlockedKey, '(' .. now, '+inf')
+	for gi = 1, #streamList do
+		blockedGroups[streamList[gi]] = true
+	end
 end
+reloadLaneBlockedGroups()
 
 math.randomseed((currentUnix % 100000) * 1000000 + tonumber(currentTime[2]))
 
@@ -612,6 +625,24 @@ local function partitionInAnyLane(partition)
 	return false
 end
 
+-- Группа ещё «жива» в каталоге, если есть ready где-то ИЛИ активный stream-блок.
+local function groupStreamBlocked(g)
+	local s = redis.call('ZSCORE', "queue:" .. queueName .. ":groups:blocked", g)
+	if s and tonumber(s) > now then
+		return true
+	end
+	for qi = 1, #queuePriorities do
+		local qp = tonumber(queuePriorities[qi]) or 0
+		if qp > 0 then
+			s = redis.call('ZSCORE', "queue:" .. queueName .. ":" .. qpPrefix(qp) .. "groups:blocked", g)
+			if s and tonumber(s) > now then
+				return true
+			end
+		end
+	end
+	return false
+end
+
 local function removePartitionFromIndexes(partition)
 	local partitionsKey = "queue:" .. queueName .. ":" .. currentPref .. "partitions"
 	redis.call('SREM', partitionsKey, partition)
@@ -622,11 +653,8 @@ local function removePartitionFromIndexes(partition)
 		redis.call('ZREM', readyKey, partition)
 		if redis.call('ZCARD', readyKey) == 0 then
 			redis.call('DEL', readyKey)
-			if not groupReadyAnywhere(g) then
-				local gs = redis.call('ZSCORE', groupsKey, g)
-				if (not gs) or (tonumber(gs) <= now) then
-					redis.call('ZREM', groupsKey, g)
-				end
+			if not groupReadyAnywhere(g) and not groupStreamBlocked(g) then
+				redis.call('ZREM', groupsKey, g)
 			end
 		end
 	end
@@ -686,8 +714,10 @@ local function getFromPartition(partition, group)
 				if #gRates > 0 then
 					local ok, waitMs = rlCheckRates("queue:" .. queueName .. ":rl:g:" .. group, gRates)
 					if not ok then
+						-- RL-блок группы только в текущем потоке (не глушим другие qp).
 						local unlockAt = now + waitMs
-						redis.call('ZADD', groupsKey, unlockAt, group)
+						local streamBlockedKey = "queue:" .. queueName .. ":" .. currentPref .. "groups:blocked"
+						redis.call('ZADD', streamBlockedKey, unlockAt, group)
 						blockedGroups[group] = true
 						return nil
 					end
@@ -749,6 +779,8 @@ end
 local lastCollectedGroup = nil
 
 -- ready = ZSET (score=0). Random start index → ZRANGE батчами по кругу. Память O(batch).
+-- Бюджет: не больше partitionScanBudget вызовов tryCollectFromPartition на группу;
+-- исчерпание → бросаем группу до конца этого Get, идём к следующей (страховка от O(N) parked).
 local function tryReadyGroup(g)
 	local readyKey = "queue:" .. queueName .. ":" .. currentPref .. "group:" .. g .. ":ready"
 	local n = redis.call('ZCARD', readyKey)
@@ -757,6 +789,7 @@ local function tryReadyGroup(g)
 	end
 	local start = math.random(0, n - 1)
 	local seen = 0
+	local checked = 0
 	while seen < n do
 		local from = (start + seen) % n
 		local take = math.min(32, n - seen)
@@ -772,6 +805,11 @@ local function tryReadyGroup(g)
 			end
 		end
 		for pi = 1, #parts do
+			if partitionScanBudget >= 0 and checked >= partitionScanBudget then
+				partitionBudgetHits = partitionBudgetHits + 1
+				return nil
+			end
+			checked = checked + 1
 			local taskData = tryCollectFromPartition(parts[pi], g)
 			if taskData then
 				lastCollectedGroup = g
@@ -785,6 +823,7 @@ end
 
 -- Обход свободных групп в текущем currentPref: ZCOUNT + ZRANGEBYSCORE LIMIT батчами.
 local function collectOneLane()
+	reloadLaneBlockedGroups()
 	for _ = 1, 64 do
 		local n = redis.call('ZCOUNT', groupsKey, '-inf', now)
 		if n == 0 then
@@ -814,7 +853,7 @@ local function collectOneLane()
 					if taskData then
 						return taskData
 					end
-					-- F4 заблокировал эту группу → n/offset устарели
+					-- F4 / stream RL заблокировал эту группу → n/offset устарели
 					if blockedGroups[g] then
 						refresh = true
 						break
@@ -892,6 +931,10 @@ for partition, _ in pairs(acquiredPartitionLocks) do
 		redis.call('DEL', partitionLockKey)
 	end
 end
+
+-- Трейлер для Go (ASCII: Lua 5.1 не знает \xHH).
+results[#results + 1] = "__srq_pbudget__"
+results[#results + 1] = tostring(partitionBudgetHits)
 
 return results
 `)
@@ -1109,7 +1152,7 @@ if queuePriority > 0 then
 	redis.call('ZADD', "queue:" .. queueName .. ":priorities", queuePriority, tostring(queuePriority))
 end
 
--- ready = «есть/была работа». Блок группы — score в groups (не трогаем, если уже > now).
+-- ready = «есть/была работа». Каталог groups: score 0; блок — в {pref}groups:blocked.
 local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partitionCode .. ":groups")
 if #pgroups == 0 then
 	pgroups = {"_default"}
@@ -1137,19 +1180,20 @@ if needsLockUnlock then
 	end
 end
 
--- При waitTime > 0: ordered → blocked; группы → score в groups
+-- При waitTime > 0: ordered → blocked; группы → {pref}groups:blocked потока задачи
 if waitTime > 0 then
 	local unlockAt = math.floor(blockNowMs + waitTime * 1000)
 	if needsLockUnlock then
 		redis.call('ZADD', "queue:" .. queueName .. ":blocked", unlockAt, partitionCode)
 	end
 	if blockGroupsStr ~= "" then
+		local blockKey = "queue:" .. queueName .. ":" .. pref .. "groups:blocked"
 		for group in string.gmatch(blockGroupsStr, "[^#]+") do
 			if group ~= "" then
 				if extendGroupBlocksOnly then
-					redis.call('ZADD', groupsKey, 'GT', unlockAt, group)
+					redis.call('ZADD', blockKey, 'GT', unlockAt, group)
 				else
-					redis.call('ZADD', groupsKey, unlockAt, group)
+					redis.call('ZADD', blockKey, unlockAt, group)
 				end
 			end
 		end
@@ -1179,6 +1223,7 @@ return 1
 `)
 
 // blockGroupsScript паркует группы без привязки к задаче (Consumer/Admin.BlockGroups).
+// Всегда legacy-поток (qp=0): queue:Q:groups:blocked. Reject берёт qp из задачи сам.
 // ARGV[1] = queue name
 // ARGV[2] = waitTime секунды
 // ARGV[3] = groups (g1#g2#...)
@@ -1195,13 +1240,18 @@ local t = redis.call('TIME')
 local nowMs = t[1] * 1000 + math.floor(t[2] / 1000)
 local unlockAt = math.floor(nowMs + waitTime * 1000)
 local groupsKey = "queue:" .. queueName .. ":groups"
+local blockKey = "queue:" .. queueName .. ":groups:blocked"
 local n = 0
 for group in string.gmatch(groupsStr, "[^#]+") do
 	if group ~= "" then
+		-- каталог groups: держим member (score 0), если ещё нет
+		if not redis.call('ZSCORE', groupsKey, group) then
+			redis.call('ZADD', groupsKey, 0, group)
+		end
 		if extendOnly then
-			redis.call('ZADD', groupsKey, 'GT', unlockAt, group)
+			redis.call('ZADD', blockKey, 'GT', unlockAt, group)
 		else
-			redis.call('ZADD', groupsKey, unlockAt, group)
+			redis.call('ZADD', blockKey, unlockAt, group)
 		end
 		n = n + 1
 	end
@@ -1236,10 +1286,19 @@ if not lockAcquired then
     return 1
 end
 
--- Чистка expired партиций в blocked (группы сами «отпускаются» когда score <= now)
+-- Чистка expired партиций в blocked (глобальные группы сами «отпускаются» когда score <= now)
 local blockedKey = "queue:" .. queueName .. ":blocked"
 local groupsKey = "queue:" .. queueName .. ":groups"
 redis.call('ZREMRANGEBYSCORE', blockedKey, '-inf', now)
+-- Stream-scoped блоки групп: legacy + известные qp lanes
+redis.call('ZREMRANGEBYSCORE', "queue:" .. queueName .. ":groups:blocked", '-inf', now)
+local qps = redis.call('ZRANGE', "queue:" .. queueName .. ":priorities", 0, -1)
+for qi = 1, #qps do
+	local qp = tonumber(qps[qi]) or 0
+	if qp > 0 then
+		redis.call('ZREMRANGEBYSCORE', "queue:" .. queueName .. ":qp" .. tostring(qp) .. ":groups:blocked", '-inf', now)
+	end
+end
 
 -- Получаем список всех консамеров
 local consumers = redis.call('SMEMBERS', consumersKey)
@@ -1468,6 +1527,19 @@ if redis.call('ZCARD', queueKey) == 0 then
 		local t = redis.call('TIME')
 		local nowMs = t[1] * 1000 + math.floor(t[2] / 1000)
 		local groupsKey = "queue:" .. queueName .. ":groups"
+		local function groupStreamBlocked(g)
+			local s = redis.call('ZSCORE', "queue:" .. queueName .. ":groups:blocked", g)
+			if s and tonumber(s) > nowMs then return true end
+			local qps = redis.call('ZRANGE', queuePrioritiesKey, 0, -1)
+			for qi = 1, #qps do
+				local qp = tonumber(qps[qi]) or 0
+				if qp > 0 then
+					s = redis.call('ZSCORE', "queue:" .. queueName .. ":qp" .. tostring(qp) .. ":groups:blocked", g)
+					if s and tonumber(s) > nowMs then return true end
+				end
+			end
+			return false
+		end
 		local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
 		for gi = 1, #pgroups do
 			local g = pgroups[gi]
@@ -1475,11 +1547,8 @@ if redis.call('ZCARD', queueKey) == 0 then
 			redis.call('ZREM', readyKey, partition)
 			if redis.call('ZCARD', readyKey) == 0 then
 				redis.call('DEL', readyKey)
-				if not groupReadyAnywhere(g) then
-					local gs = redis.call('ZSCORE', groupsKey, g)
-					if (not gs) or (tonumber(gs) <= nowMs) then
-						redis.call('ZREM', groupsKey, g)
-					end
+				if not groupReadyAnywhere(g) and not groupStreamBlocked(g) then
+					redis.call('ZREM', groupsKey, g)
 				end
 			end
 		end
@@ -1614,6 +1683,19 @@ local function removeOne(taskId)
 			local t = redis.call('TIME')
 			local nowMs = t[1] * 1000 + math.floor(t[2] / 1000)
 			local groupsKey = "queue:" .. queueName .. ":groups"
+			local function groupStreamBlocked(g)
+				local s = redis.call('ZSCORE', "queue:" .. queueName .. ":groups:blocked", g)
+				if s and tonumber(s) > nowMs then return true end
+				local qps = redis.call('ZRANGE', queuePrioritiesKey, 0, -1)
+				for qi = 1, #qps do
+					local qp = tonumber(qps[qi]) or 0
+					if qp > 0 then
+						s = redis.call('ZSCORE', "queue:" .. queueName .. ":qp" .. tostring(qp) .. ":groups:blocked", g)
+						if s and tonumber(s) > nowMs then return true end
+					end
+				end
+				return false
+			end
 			local pgroups = redis.call('SMEMBERS', "queue:" .. queueName .. ":partition:" .. partition .. ":groups")
 			for gi = 1, #pgroups do
 				local g = pgroups[gi]
@@ -1621,11 +1703,8 @@ local function removeOne(taskId)
 				redis.call('ZREM', readyKey, partition)
 				if redis.call('ZCARD', readyKey) == 0 then
 					redis.call('DEL', readyKey)
-					if not groupReadyAnywhere(g) then
-						local gs = redis.call('ZSCORE', groupsKey, g)
-						if (not gs) or (tonumber(gs) <= nowMs) then
-							redis.call('ZREM', groupsKey, g)
-						end
+					if not groupReadyAnywhere(g) and not groupStreamBlocked(g) then
+						redis.call('ZREM', groupsKey, g)
 					end
 				end
 			end

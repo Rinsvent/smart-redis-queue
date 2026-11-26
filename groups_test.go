@@ -33,7 +33,7 @@ func TestQueue_Groups_BlockGroupsSkipsWholeGroup(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got2, "connA ещё заблокирована")
 
-	score, err := rdb.ZScore(ctx, "queue:test-queue:groups", "connA").Result()
+	score, err := rdb.ZScore(ctx, "queue:test-queue:groups:blocked", "connA").Result()
 	require.NoError(t, err)
 	assert.Greater(t, score, float64(time.Now().UnixMilli()))
 }
@@ -115,7 +115,7 @@ func TestQueue_Groups_BlockSurvivesEmptyReady_Remove(t *testing.T) {
 	}))
 	require.NoError(t, consumer.BlockGroups(ctx, 30, "gBlock"))
 
-	scoreBefore, err := rdb.ZScore(ctx, "queue:"+q+":groups", "gBlock").Result()
+	scoreBefore, err := rdb.ZScore(ctx, "queue:"+q+":groups:blocked", "gBlock").Result()
 	require.NoError(t, err)
 	assert.Greater(t, scoreBefore, float64(time.Now().UnixMilli()))
 
@@ -123,10 +123,11 @@ func TestQueue_Groups_BlockSurvivesEmptyReady_Remove(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, RemovalStatusRemoved, rem.Status)
 
-	scoreAfter, err := rdb.ZScore(ctx, "queue:"+q+":groups", "gBlock").Result()
+	scoreAfter, err := rdb.ZScore(ctx, "queue:"+q+":groups:blocked", "gBlock").Result()
 	require.NoError(t, err, "блок группы не должен сниматься при пустом ready")
 	assert.Greater(t, scoreAfter, float64(time.Now().UnixMilli()))
 	assert.InDelta(t, scoreBefore, scoreAfter, 1)
+	assert.Equal(t, int64(1), rdb.Exists(ctx, "queue:"+q+":groups").Val()) // каталог жив
 
 	require.NoError(t, producer.Publish(ctx, &Task{
 		ID: "t2", Partition: "p2", Groups: []string{"gBlock"},
@@ -151,7 +152,7 @@ func TestQueue_Groups_BlockSurvivesEmptyReady_RemoveByTag(t *testing.T) {
 	}))
 	require.NoError(t, consumer.BlockGroups(ctx, 30, "gTag"))
 
-	scoreBefore, err := rdb.ZScore(ctx, "queue:"+q+":groups", "gTag").Result()
+	scoreBefore, err := rdb.ZScore(ctx, "queue:"+q+":groups:blocked", "gTag").Result()
 	require.NoError(t, err)
 
 	removed, err := admin.RemoveByTag(ctx, q, "kill", RemoveByTagOptions{Limit: 10})
@@ -159,7 +160,7 @@ func TestQueue_Groups_BlockSurvivesEmptyReady_RemoveByTag(t *testing.T) {
 	require.Len(t, removed, 1)
 	assert.Equal(t, RemovalStatusRemoved, removed[0].Status)
 
-	scoreAfter, err := rdb.ZScore(ctx, "queue:"+q+":groups", "gTag").Result()
+	scoreAfter, err := rdb.ZScore(ctx, "queue:"+q+":groups:blocked", "gTag").Result()
 	require.NoError(t, err)
 	assert.Greater(t, scoreAfter, float64(time.Now().UnixMilli()))
 	assert.InDelta(t, scoreBefore, scoreAfter, 1)
@@ -265,7 +266,8 @@ func TestQueue_Groups_ScaleBlockedGroup(t *testing.T) {
 
 	unlockAt := float64(time.Now().Add(time.Hour).UnixMilli())
 	pipe := rdb.Pipeline()
-	pipe.ZAdd(ctx, "queue:"+q+":groups", redis.Z{Score: unlockAt, Member: blockedGroup})
+	pipe.ZAdd(ctx, "queue:"+q+":groups", redis.Z{Score: 0, Member: blockedGroup})
+	pipe.ZAdd(ctx, "queue:"+q+":groups:blocked", redis.Z{Score: unlockAt, Member: blockedGroup})
 	for i := 0; i < blockedN; i++ {
 		part := fmt.Sprintf("!blocked:%d", i)
 		pipe.ZAdd(ctx, "queue:"+q+":group:"+blockedGroup+":ready", redis.Z{Score: 0, Member: part})
@@ -313,7 +315,8 @@ func TestQueue_Groups_GetSpeedVsLegacyScan(t *testing.T) {
 	const n = 50_000
 	unlockAt := float64(time.Now().Add(time.Hour).UnixMilli())
 	pipe := rdb.Pipeline()
-	pipe.ZAdd(ctx, "queue:"+q+":groups", redis.Z{Score: unlockAt, Member: "parked"})
+	pipe.ZAdd(ctx, "queue:"+q+":groups", redis.Z{Score: 0, Member: "parked"})
+	pipe.ZAdd(ctx, "queue:"+q+":groups:blocked", redis.Z{Score: unlockAt, Member: "parked"})
 	for i := 0; i < n; i++ {
 		part := fmt.Sprintf("!parked:%d", i)
 		pipe.ZAdd(ctx, "queue:"+q+":group:parked:ready", redis.Z{Score: 0, Member: part})

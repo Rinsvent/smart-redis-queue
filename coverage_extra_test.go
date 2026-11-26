@@ -100,7 +100,7 @@ func TestConsume_RejectWithDelay_ExtractsFields(t *testing.T) {
 	}()
 
 	require.Eventually(t, func() bool {
-		score, err := rdb.ZScore(context.Background(), "queue:test-queue:groups", "g").Result()
+		score, err := rdb.ZScore(context.Background(), "queue:test-queue:groups:blocked", "g").Result()
 		return err == nil && score > float64(time.Now().UnixMilli())
 	}, 3*time.Second, 20*time.Millisecond)
 	cancel()

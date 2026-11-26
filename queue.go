@@ -16,12 +16,13 @@ import (
 )
 
 // RejectWithDelay — ошибка, при которой задача возвращается в очередь с задержкой.
-// Delay — секунды (дробные OK). BlockGroups — группы для парковки (score unlockAt в groups).
+// Delay — секунды (дробные OK). BlockGroups — группы для парковки.
 // Для ordered-партиций (!) дополнительно ставится partition в blocked.
+// BlockGroups пишутся в {pref}groups:blocked потока задачи (qp из qpriority).
 type RejectWithDelay struct {
 	Err         error
 	Delay       float64  // секунды (можно дробные)
-	BlockGroups []string // опционально: заблокировать группы на Delay
+	BlockGroups []string // опционально: заблокировать группы на Delay (в потоке задачи)
 }
 
 func (e *RejectWithDelay) Error() string {
@@ -347,6 +348,8 @@ type Consumer struct {
 	concurrencyTags             bool // F5: проверка race! в Get / release в Ack·Reject
 	samePartitionBatch          bool
 	extendGroupBlocksOnly       bool
+	partitionScanBudget         int   // 0→256; <0 → без лимита на группу в Get
+	lastPartitionBudgetHits     int64 // сколько групп сдались по бюджету в последнем Get
 	middlewares                 []HandlerMiddleware
 	stopPing                    chan struct{}
 	stats                       *StatsSink
@@ -455,6 +458,17 @@ func (c *Consumer) SetSamePartitionBatch(enabled bool) {
 // длинную паузу. По умолчанию выключено — каждый вызов перезаписывает unlockAt.
 func (c *Consumer) SetExtendGroupBlocksOnly(enabled bool) {
 	c.extendGroupBlocksOnly = enabled
+}
+
+// SetPartitionScanBudget — макс. tryCollectFromPartition на одну группу за Get (default 256).
+// n == 0 → 256; n < 0 → без лимита. При исчерпании группа пропускается до конца Get.
+func (c *Consumer) SetPartitionScanBudget(n int) {
+	c.partitionScanBudget = n
+}
+
+// LastPartitionBudgetHits — сколько групп сдались по бюджету скана в последнем Get.
+func (c *Consumer) LastPartitionBudgetHits() int64 {
+	return c.lastPartitionBudgetHits
 }
 
 // SetIdempotencyTtl — окно dedupe после успешного Ack: payload:{id} живёт TTL, повторный Publish с тем же ID отклоняется (NX).
@@ -627,6 +641,22 @@ func (c *Consumer) ping(ctx context.Context) error {
 	return err
 }
 
+const getPartitionBudgetTrailer = "__srq_pbudget__"
+
+func asString(v interface{}) string {
+	switch x := v.(type) {
+	case string:
+		return x
+	case []byte:
+		return string(x)
+	default:
+		if v == nil {
+			return ""
+		}
+		return fmt.Sprint(v)
+	}
+}
+
 // Get получает до prefetchCount задач из очереди и возвращает их разом
 func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 	script := getGetScript()
@@ -638,7 +668,7 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 		bool01(c.checkDeadConsumerLocksOnGet),
 	}
 	args = appendGetRateLimitArgs(args, c.rateLimit)
-	args = append(args, bool01(c.concurrencyTags), bool01(c.samePartitionBatch))
+	args = append(args, bool01(c.concurrencyTags), bool01(c.samePartitionBatch), c.partitionScanBudget)
 
 	result, err := script.Run(ctx, c.redis, []string{}, args...).Result()
 
@@ -647,6 +677,13 @@ func (c *Consumer) Get(ctx context.Context) ([]*Task, error) {
 	}
 
 	results := result.([]interface{})
+	c.lastPartitionBudgetHits = 0
+	if len(results) >= 2 && asString(results[len(results)-2]) == getPartitionBudgetTrailer {
+		if hits, err := strconv.ParseInt(asString(results[len(results)-1]), 10, 64); err == nil {
+			c.lastPartitionBudgetHits = hits
+		}
+		results = results[:len(results)-2]
+	}
 	if len(results) == 0 {
 		return nil, nil
 	}
@@ -723,7 +760,8 @@ func (c *Consumer) Ack(ctx context.Context, taskID string, idempotencyTtl time.D
 
 // Reject отклоняет задачу и возвращает её обратно в очередь.
 // waitTime — секунды (дробные OK). При waitTime > 0 для ordered-партиций (!) в
-// queue:{name}:blocked пишется partition; blockGroups — score unlockAt в groups.
+// queue:{name}:blocked пишется partition; blockGroups — в {pref}groups:blocked
+// потока задачи (qp из qpriority), другие потоки не трогаем.
 func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, blockGroups ...string) error {
 	groupsStr, err := encodeGroups(blockGroups)
 	if err != nil {
@@ -754,8 +792,9 @@ func (c *Consumer) Reject(ctx context.Context, taskID string, waitTime float64, 
 	return nil
 }
 
-// BlockGroups паркует группы на waitTime секунд (без задачи): ZADD group → unlockAt в groups.
-// Get не обходит ready этих групп, пока now < unlockAt.
+// BlockGroups паркует группы на waitTime секунд (без задачи) в legacy-потоке (qp=0):
+// queue:{q}:groups:blocked. Ответы в qpN продолжают идти. Для блока из Reject qp
+// берётся из задачи автоматически.
 func (c *Consumer) BlockGroups(ctx context.Context, waitTime float64, groups ...string) error {
 	return blockGroups(ctx, c.redis, c.queueName, waitTime, c.extendGroupBlocksOnly, groups...)
 }
@@ -768,7 +807,9 @@ func blockGroups(ctx context.Context, rdb *redis.Client, queueName string, waitT
 	if err != nil {
 		return err
 	}
-	_, err = getBlockGroupsScript().Run(ctx, rdb, []string{}, queueName, waitTime, groupsStr, bool01(extendOnly)).Result()
+	_, err = getBlockGroupsScript().Run(ctx, rdb, []string{},
+		queueName, waitTime, groupsStr, bool01(extendOnly),
+	).Result()
 	if err != nil {
 		return fmt.Errorf("failed to block groups: %w", err)
 	}
@@ -788,6 +829,7 @@ type ConsumerPool struct {
 	concurrencyTags             bool
 	samePartitionBatch          bool
 	extendGroupBlocksOnly       bool
+	partitionScanBudget         int
 	middlewares                 []HandlerMiddleware
 	stats                       *StatsSink
 	router                      *ShardRouter
@@ -885,6 +927,11 @@ func (p *ConsumerPool) SetExtendGroupBlocksOnly(enabled bool) {
 	p.extendGroupBlocksOnly = enabled
 }
 
+// SetPartitionScanBudget — см. Consumer.SetPartitionScanBudget.
+func (p *ConsumerPool) SetPartitionScanBudget(n int) {
+	p.partitionScanBudget = n
+}
+
 // Use добавляет middleware вокруг handler (см. Consumer.Use).
 func (p *ConsumerPool) Use(mw ...HandlerMiddleware) {
 	p.middlewares = append(p.middlewares, mw...)
@@ -938,6 +985,7 @@ func (p *ConsumerPool) runConsumer(ctx context.Context, wg *sync.WaitGroup, hand
 		c.concurrencyTags = p.concurrencyTags
 		c.samePartitionBatch = p.samePartitionBatch
 		c.extendGroupBlocksOnly = p.extendGroupBlocksOnly
+		c.partitionScanBudget = p.partitionScanBudget
 		c.middlewares = p.middlewares
 		c.stats = stats
 		c.statsOwn = false

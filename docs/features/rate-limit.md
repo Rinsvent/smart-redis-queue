@@ -98,7 +98,8 @@ pool.SetExtendGroupBlocksOnly(true) // или consumer.SetExtendGroupBlocksOnly(
 
 ## Как это лежит в Redis
 
-- `queue:{name}:groups` — ZSET; score `≤ now` значит группа свободна
+- `queue:{name}:groups` — каталог групп (наличие member)
+- `queue:{name}:groups:blocked` / `qp{N}:groups:blocked` — пауза группы (unlockAt ms); `BlockGroups` пишет в legacy
 - `queue:{name}:blocked` — заблокированные партиции (время разблокировки)
 - готовые группы обходятся порциями со случайного места, без загрузки миллионов партиций в один Lua-вызов
 - свободных групп нет — Get пустой

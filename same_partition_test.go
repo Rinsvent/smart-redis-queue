@@ -161,7 +161,7 @@ func TestQueue_SamePartitionBatch_DisabledMixesPartitions(t *testing.T) {
 
 func groupUnlockAt(t *testing.T, consumer *Consumer, group string) float64 {
 	t.Helper()
-	score, err := consumer.redis.ZScore(context.Background(), "queue:test-queue:groups", group).Result()
+	score, err := consumer.redis.ZScore(context.Background(), "queue:test-queue:groups:blocked", group).Result()
 	require.NoError(t, err)
 	return score
 }

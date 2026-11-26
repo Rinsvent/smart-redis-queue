@@ -194,9 +194,12 @@ func TestAdmin_ListGroups_ZCardAndFilter(t *testing.T) {
 	q := "list-groups-q"
 	now := float64(time.Now().UnixMilli())
 	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":groups",
-		redis.Z{Score: now, Member: "alpha"},
+		redis.Z{Score: 0, Member: "alpha"},
+		redis.Z{Score: 0, Member: "beta-camp"},
+		redis.Z{Score: 0, Member: "gamma"},
+	).Err())
+	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":groups:blocked",
 		redis.Z{Score: now + 60_000, Member: "beta-camp"},
-		redis.Z{Score: now, Member: "gamma"},
 	).Err())
 	require.NoError(t, rdb.ZAdd(ctx, "queue:"+q+":group:beta-camp:ready", redis.Z{Score: 0, Member: "!p"}).Err())
 

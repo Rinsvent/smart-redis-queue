@@ -54,7 +54,7 @@ func TestRateLimit_AllAlgorithms_GroupLimit(t *testing.T) {
 			got2, err := consumer.Get(ctx)
 			require.NoError(t, err)
 			assert.Empty(t, got2, algo)
-			score, err := rdb.ZScore(ctx, "queue:test-queue:groups", "tok").Result()
+			score, err := rdb.ZScore(ctx, "queue:test-queue:groups:blocked", "tok").Result()
 			require.NoError(t, err)
 			assert.Greater(t, score, float64(time.Now().UnixMilli()), algo)
 			require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
@@ -86,7 +86,7 @@ func TestRateLimit_GroupLayer_BlocksGroup(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got2, "group limit 1/h — вторая партиция того же token не выдаётся")
 
-	score, err := rdb.ZScore(ctx, "queue:"+q+":groups", "token:1").Result()
+	score, err := rdb.ZScore(ctx, "queue:"+q+":groups:blocked", "token:1").Result()
 	require.NoError(t, err)
 	assert.Greater(t, score, float64(time.Now().UnixMilli()))
 
@@ -151,7 +151,7 @@ func TestRateLimit_BothLayers_GroupFirst(t *testing.T) {
 	assert.Empty(t, got2)
 
 	// упёрлись в group — blocked partition для c2 может не появиться (counter partition не жгли)
-	gScore, err := rdb.ZScore(ctx, "queue:"+q+":groups", "tok").Result()
+	gScore, err := rdb.ZScore(ctx, "queue:"+q+":groups:blocked", "tok").Result()
 	require.NoError(t, err)
 	assert.Greater(t, gScore, float64(time.Now().UnixMilli()))
 
@@ -269,7 +269,7 @@ func TestRateLimit_BurstThenDeny_AllAlgorithms(t *testing.T) {
 			require.NoError(t, err)
 			assert.Empty(t, got3)
 
-			score, err := rdb.ZScore(ctx, "queue:test-queue:groups", "g").Result()
+			score, err := rdb.ZScore(ctx, "queue:test-queue:groups:blocked", "g").Result()
 			require.NoError(t, err)
 			assert.Greater(t, score, float64(time.Now().UnixMilli()))
 
@@ -340,7 +340,7 @@ func TestRateLimit_MultiRate_AND(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, got2)
 
-	score, err := rdb.ZScore(ctx, "queue:test-queue:groups", "tok").Result()
+	score, err := rdb.ZScore(ctx, "queue:test-queue:groups:blocked", "tok").Result()
 	require.NoError(t, err)
 	assert.Greater(t, score, float64(time.Now().UnixMilli()))
 	require.NoError(t, consumer.Ack(ctx, got[0].ID, 0))
@@ -445,7 +445,7 @@ func TestRateLimit_BothLayers_PartitionDeny(t *testing.T) {
 	require.NoError(t, err)
 	assert.Greater(t, score, float64(time.Now().UnixMilli()))
 	// group не должна быть заблокирована — упёрлись в partition
-	gScore, err := rdb.ZScore(ctx, "queue:test-queue:groups", "tok").Result()
+	gScore, err := rdb.ZScore(ctx, "queue:test-queue:groups:blocked", "tok").Result()
 	if err == nil {
 		assert.LessOrEqual(t, gScore, float64(time.Now().UnixMilli()))
 	}

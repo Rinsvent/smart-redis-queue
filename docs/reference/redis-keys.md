@@ -18,7 +18,9 @@
 | `headers:{id}` | HASH | Мета между попытками; чистится на Ack/Remove |
 | `consumers` | HASH | Heartbeat consumer’ов |
 | `consumer:{cid}:tasks` | SET | In-progress у consumer |
-| `groups` | ZSET | Группы; score ≤ now — свободна (общее, без qp) |
+| `groups` | ZSET | Каталог групп (member есть → Get обходит); score обычно 0 |
+| `groups:blocked` | ZSET | Блок групп legacy-потока (qp=0); `BlockGroups` / Reject mass |
+| `qp{N}:groups:blocked` | ZSET | Блок групп потока qp=N (Reject берёт qp из задачи) |
 | `group:{g}:ready` | ZSET / SET | Ready партиции группы (legacy) |
 | `partition:{p}:groups` | SET | Группы партиции (общее) |
 | `partition:{p}:lock` | STRING | Lock ordered-партиции (общее) |
